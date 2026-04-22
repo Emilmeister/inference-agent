@@ -40,14 +40,16 @@ def build_graph() -> StateGraph:
     graph.set_entry_point("discovery")
 
     # Define edges
+    # Reporter must run AFTER analyzer so that LLM commentary,
+    # scores, and Pareto classification are included in the JSON file.
     graph.add_edge("discovery", "planner")
     graph.add_edge("planner", "executor")
-    graph.add_edge("executor", "reporter")
-    graph.add_edge("reporter", "analyzer")
+    graph.add_edge("executor", "analyzer")
+    graph.add_edge("analyzer", "reporter")
 
-    # Conditional edge from analyzer
+    # Conditional edge from reporter
     graph.add_conditional_edges(
-        "analyzer",
+        "reporter",
         _should_continue,
         {
             "continue": "planner",

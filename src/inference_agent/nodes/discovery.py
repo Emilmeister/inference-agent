@@ -136,10 +136,24 @@ async def discovery_node(state: AgentState) -> dict:
     if hidden_size and num_layers:
         model_size_params = 12 * hidden_size**2 * num_layers + vocab_size * hidden_size
 
-    max_context = model_config.get(
-        "max_position_embeddings",
-        model_config.get("max_sequence_length", 4096),
+    # Determine max context: check rope_scaling for effective context,
+    # then max_position_embeddings, then max_sequence_length
+    max_context = model_config.get("max_position_embeddings", 4096)
+    rope_scaling = model_config.get("rope_scaling")
+    if rope_scaling and isinstance(rope_scaling, dict):
+        # RoPE scaling increases effective context beyond max_position_embeddings
+        factor = rope_scaling.get("factor", 1.0)
+        original_max = rope_scaling.get(
+            "original_max_position_embeddings", max_context
+        )
+        max_context = int(original_max * factor)
+    # Some models use max_sequence_length or sliding_window
+    max_context = max(
+        max_context,
+        model_config.get("max_sequence_length", 0),
+        model_config.get("seq_length", 0),
     )
+    logger.info("Detected max context: %d (rope_scaling=%s)", max_context, rope_scaling)
 
     # Filter engines to only those requested in config
     available = [e for e in engines if e in config.experiments.engines]
