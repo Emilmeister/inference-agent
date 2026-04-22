@@ -1,0 +1,40 @@
+# Модель для бенчмарка
+model_name: "Qwen/Qwen2.5-72B-Instruct"
+model_revision: null
+
+# LLM агента (для принятия решений)
+agent_llm:
+  base_url: "https://api.openai.com/v1"
+  api_key: "${AGENT_LLM_API_KEY}"
+  model: "gpt-4o"
+
+# Docker
+docker:
+  vllm_image: "vllm/vllm-openai:latest"
+  sglang_image: "lmsysorg/sglang:latest"
+  network: "host"
+  shm_size: "16g"
+  model_cache_dir: "/root/.cache/huggingface"
+
+# Бенчмарк
+benchmark:
+  warmup_requests: 10
+  concurrency_levels: [1, 4, 16, 64, 128, 256, 512]
+  prompt_lengths: [128, 512, 2048, 4096, 32768, 65536, 100000]
+  max_output_tokens: 256
+  long_context_max_output_tokens: 8192
+  duration_per_level_sec: 60
+  timeout_sec: 600
+  latency_threshold_ms: 500
+
+# Эксперименты
+experiments:
+  max_experiments: 30
+  plateau_threshold: 0.02
+  plateau_window: 5
+  engines: ["vllm", "sglang"]
+
+# Storage
+storage:
+  experiments_dir: "./experiments"
+  logs_dir: "./logs"
