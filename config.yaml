@@ -1,12 +1,12 @@
 # Модель для бенчмарка
-model_name: "Qwen/Qwen2.5-72B-Instruct"
+model_name: "Qwen/Qwen3.5-9B"
 model_revision: null
 
 # LLM агента (для принятия решений)
 agent_llm:
-  base_url: "https://api.openai.com/v1"
+  base_url: "https://foundation-models.api.cloud.ru/v1"
   api_key: "${AGENT_LLM_API_KEY}"
-  model: "gpt-4o"
+  model: "zai-org/GLM-4.6"
 
 # Docker
 docker:
