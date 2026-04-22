@@ -15,6 +15,7 @@ from inference_agent.models import (
     OptimizationGoal,
     ParetoPoint,
 )
+from inference_agent.nodes.reporter import save_experiment
 from inference_agent.state import AgentState
 
 logger = logging.getLogger(__name__)
@@ -340,6 +341,20 @@ async def analyzer_node(state: AgentState) -> dict:
 
     status = "completed" if decision == "stop" else "running"
 
+    # Build enriched result with LLM analysis
+    enriched_result = ExperimentResult(
+        **{
+            **result.model_dump(),
+            "llm_commentary": commentary,
+            "optimization_classification": classification,
+            "scores": scores,
+        }
+    )
+
+    # Save JSON file HERE — after LLM enrichment, guaranteeing
+    # commentary, scores, and Pareto data are included
+    save_experiment(enriched_result, config.storage.experiments_dir)
+
     return {
         "experiment_history": [summary],
         "experiments_count": exp_count,
@@ -354,12 +369,5 @@ async def analyzer_node(state: AgentState) -> dict:
         "next_optimization_goal": next_goal,
         "status": status,
         "stop_reason": stop_reason,
-        "current_result": ExperimentResult(
-            **{
-                **result.model_dump(),
-                "llm_commentary": commentary,
-                "optimization_classification": classification,
-                "scores": scores,
-            }
-        ),
+        "current_result": enriched_result,
     }

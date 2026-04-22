@@ -229,6 +229,7 @@ class ExperimentResult(BaseModel):
         OptimizationClassification.NONE
     )
     scores: ExperimentScores = Field(default_factory=ExperimentScores)
+    docker_command: str = ""  # one-liner docker run command for reproduction
     duration_seconds: float = 0.0
 
 

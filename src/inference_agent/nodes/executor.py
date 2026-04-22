@@ -64,7 +64,8 @@ async def executor_node(state: AgentState) -> dict:
     # 2. Build and run Docker container
     try:
         docker_args = engine.build_docker_args(experiment)
-        logger.info("Docker command: %s", " ".join(docker_args))
+        docker_command = " ".join(docker_args)
+        logger.info("Docker command: %s", docker_command)
         container_id = await run_container(docker_args, timeout=60)
         logger.info("Container started: %s", container_id[:12])
     except RuntimeError as e:
@@ -176,6 +177,7 @@ async def executor_node(state: AgentState) -> dict:
             status=status,
             benchmark=benchmark,
             smoke_tests=smoke_results,
+            docker_command=docker_command,
             duration_seconds=duration,
         )
     }
