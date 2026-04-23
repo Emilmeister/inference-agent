@@ -96,6 +96,7 @@ def build_summary_df(experiments: list[dict]) -> pd.DataFrame:
             "is_pareto": scores.get("is_pareto_optimal", False),
             "classification": exp.get("optimization_classification", "none"),
             "commentary": exp.get("llm_commentary", ""),
+            "docker_command": exp.get("docker_command", ""),
             "duration_s": exp.get("duration_seconds", 0),
         })
 
@@ -182,16 +183,25 @@ if not valid.empty:
         },
     )
 
-    # Highlight Pareto-optimal points
-    pareto_pts = valid[valid["is_pareto"]]
+    # Compute Pareto front directly from data (works even without analyzer scores)
+    pareto_ids = []
+    sorted_by_tp = valid.sort_values("peak_throughput", ascending=False)
+    best_lat = float("inf")
+    for _, row in sorted_by_tp.iterrows():
+        if row["ttft_p95"] < best_lat:
+            pareto_ids.append(row["experiment_id"])
+            best_lat = row["ttft_p95"]
+
+    pareto_pts = valid[valid["experiment_id"].isin(pareto_ids)]
     if not pareto_pts.empty:
         pareto_sorted = pareto_pts.sort_values("ttft_p95")
         fig.add_trace(go.Scatter(
             x=pareto_sorted["ttft_p95"],
             y=pareto_sorted["peak_throughput"],
-            mode="lines",
+            mode="lines+markers",
             name="Pareto Front",
             line=dict(color="red", dash="dash", width=2),
+            marker=dict(size=10, symbol="star"),
         ))
 
     fig.update_layout(height=500)
@@ -371,24 +381,61 @@ else:
     st.info("No GPU metrics available.")
 
 
+# ── Docker Commands ───────────────────────────────────────────────────────
+
+st.header("Docker Commands")
+st.caption("Copy-paste ready commands to reproduce each experiment")
+
+for exp in experiments:
+    docker_cmd = exp.get("docker_command", "")
+    eid = exp.get("experiment_id", "")
+    engine = exp.get("engine", "")
+    config = exp.get("config", {})
+    tp = config.get("tensor_parallel_size", "?")
+    quant = config.get("quantization", "none")
+    throughput = exp.get("benchmark", {}).get("peak_output_tokens_per_sec", 0)
+
+    label = f"{eid} ({engine} TP={tp} q={quant}) — {throughput:.0f} tok/s"
+
+    with st.expander(label):
+        if docker_cmd:
+            st.code(docker_cmd, language="bash")
+        else:
+            st.info("Docker command not recorded (old experiment format)")
+
+
 # ── LLM Commentary ────────────────────────────────────────────────────────
 
 st.header("LLM Analysis")
 
+has_commentary = False
 for exp in experiments:
     commentary = exp.get("llm_commentary", "")
-    if commentary:
-        eid = exp.get("experiment_id", "")
-        engine = exp.get("engine", "")
-        classification = exp.get("optimization_classification", "none")
+    eid = exp.get("experiment_id", "")
+    engine = exp.get("engine", "")
+    classification = exp.get("optimization_classification", "none")
+    rationale = exp.get("config", {}).get("rationale", "")
+
+    # Show if we have commentary OR rationale
+    if commentary or rationale:
+        has_commentary = True
         with st.expander(f"{eid} ({engine}) — {classification}"):
-            st.write(commentary)
+            if commentary:
+                st.markdown("**LLM Analysis:**")
+                st.write(commentary)
+            if rationale:
+                st.markdown("**Planner Rationale:**")
+                st.write(rationale)
+
             smoke = exp.get("smoke_tests", {})
             st.write(
-                f"Smoke tests: tool_calling={'✓' if smoke.get('tool_calling') else '✗'}, "
-                f"json_mode={'✓' if smoke.get('json_mode') else '✗'}, "
-                f"json_schema={'✓' if smoke.get('json_schema') else '✗'}"
+                f"Smoke tests: tool_calling={'pass' if smoke.get('tool_calling') else 'FAIL'}, "
+                f"json_mode={'pass' if smoke.get('json_mode') else 'FAIL'}, "
+                f"json_schema={'pass' if smoke.get('json_schema') else 'FAIL'}"
             )
+
+if not has_commentary:
+    st.info("No LLM analysis available. Ensure the agent code is updated so analyzer saves commentary to JSON.")
 
 
 # ── Full comparison table ─────────────────────────────────────────────────
