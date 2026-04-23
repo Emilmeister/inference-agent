@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import string
@@ -95,34 +96,41 @@ async def _send_request(
                 result["error"] = f"HTTP {resp.status}: {body[:200]}"
                 return result
 
-            async for line in resp.content:
-                line_str = line.decode("utf-8").strip()
-                if not line_str.startswith("data: "):
-                    continue
-                data_str = line_str[6:]
-                if data_str == "[DONE]":
-                    break
+            # Read SSE stream line by line (handles buffering correctly)
+            buffer = ""
+            async for chunk in resp.content.iter_any():
+                buffer += chunk.decode("utf-8", errors="replace")
+                while "\n" in buffer:
+                    line_str, buffer = buffer.split("\n", 1)
+                    line_str = line_str.strip()
+                    if not line_str.startswith("data: "):
+                        continue
+                    data_str = line_str[6:]
+                    if data_str == "[DONE]":
+                        break
 
-                now = time.perf_counter()
-                # Check if this chunk contains content
-                try:
-                    import json
-                    data = json.loads(data_str)
-                    choices = data.get("choices", [])
-                    if choices:
-                        delta = choices[0].get("delta", {})
-                        content = delta.get("content", "")
-                        if content:
-                            token_count += 1
-                            if first_token_time is None:
-                                first_token_time = now
-                            else:
-                                result["itl_ms_list"].append(
-                                    (now - last_token_time) * 1000
-                                )
-                            last_token_time = now
-                except (json.JSONDecodeError, KeyError):
-                    pass
+                    now = time.perf_counter()
+                    try:
+                        data = json.loads(data_str)
+                        choices = data.get("choices", [])
+                        if choices:
+                            delta = choices[0].get("delta", {})
+                            # Count both content and reasoning_content tokens
+                            has_token = bool(
+                                delta.get("content")
+                                or delta.get("reasoning_content")
+                            )
+                            if has_token:
+                                token_count += 1
+                                if first_token_time is None:
+                                    first_token_time = now
+                                else:
+                                    result["itl_ms_list"].append(
+                                        (now - last_token_time) * 1000
+                                    )
+                                last_token_time = now
+                    except (json.JSONDecodeError, KeyError):
+                        pass
 
     except asyncio.TimeoutError:
         result["error"] = "Request timed out"
@@ -250,6 +258,10 @@ BENCHMARK_PHASES = [
     ("mid_throughput", [4, 16, 64], [512, 2048], 256, False),
     ("high_throughput", [128, 256], [512], 256, False),
     ("stress", [512], [512], 256, False),
+    # Long context: prompt + output must fit in max_model_len
+    # Use prompt sizes that leave room for 8192 output tokens
+    ("long_context_16k", [1, 4], [16384], 8192, True),
+    ("long_context_24k", [1, 4], [24576], 8192, True),
     ("long_context_32k", [1, 4], [32768], 8192, True),
     ("long_context_64k", [1, 4], [65536], 8192, True),
     ("long_context_100k", [1, 2], [100000], 8192, True),
