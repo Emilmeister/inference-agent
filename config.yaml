@@ -16,6 +16,20 @@ docker:
   shm_size: "16g"
   model_cache_dir: "/root/.cache/huggingface"
 
+  # Фиксированные аргументы, которые всегда добавляются к docker run
+  # (не перебираются LLM, передаются как есть)
+  vllm_extra_args:
+    - "--enable-auto-tool-choice"
+    - "--tool-call-parser"
+    - "qwen3_coder"
+    - "--reasoning-parser"
+    - "qwen3"
+  sglang_extra_args:
+    - "--reasoning-parser"
+    - "qwen3"
+    - "--tool-call-parser"
+    - "qwen3_coder"
+
 # Бенчмарк
 benchmark:
   warmup_requests: 10
@@ -38,3 +52,12 @@ experiments:
 storage:
   experiments_dir: "./experiments"
   logs_dir: "./logs"
+
+# Инструкции для LLM планировщика на естественном языке.
+# Пиши сюда на какие параметры обратить внимание, что попробовать,
+# что пропустить и т.д.
+planner_instructions: |
+  Дополнительно оцени какой прирост даст MTP
+  `python -m sglang.launch_server --model-path Qwen/Qwen3.5-9B --port 8000 --tp-size 1 --mem-fraction-static 0.8 --context-length 262144 --reasoning-parser qwen3 --speculative-algo NEXTN --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4`
+  А для vllm оцени какой прирост дает --language-model-only
+

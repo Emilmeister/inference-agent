@@ -103,6 +103,11 @@ class ExperimentConfig(BaseModel):
     num_continuous_decode_steps: int = 1
     dp_size: int | None = None  # sglang data parallelism
 
+    # Tool calling / reasoning support (fixed per engine, not varied)
+    enable_auto_tool_choice: bool = True  # vllm: --enable-auto-tool-choice
+    tool_call_parser: str | None = None  # vllm: --tool-call-parser (hermes, llama3_json, etc.)
+    reasoning_parser: str | None = None  # vllm: --reasoning-parser
+
     # LLM rationale
     rationale: str = ""
 
@@ -303,6 +308,50 @@ class ExperimentSummary(BaseModel):
         )
 
 
+# ── LLM Structured Output Schemas ──────────────────────────────────────────
+
+
+class PlannerOutput(BaseModel):
+    """Schema for the Planner LLM response."""
+
+    engine: str = Field(description="Engine to use: 'vllm' or 'sglang'")
+    tensor_parallel_size: int = Field(default=1, description="Tensor parallelism size")
+    pipeline_parallel_size: int = Field(default=1, description="Pipeline parallelism size")
+    data_parallel_size: int = Field(default=1, description="Data parallelism size")
+    max_model_len: int | None = Field(default=None, description="Max model context length override")
+    gpu_memory_utilization: float = Field(default=0.9, description="GPU memory fraction (vLLM)")
+    mem_fraction_static: float | None = Field(default=None, description="Static memory fraction (SGLang)")
+    max_num_seqs: int | None = Field(default=None, description="Max concurrent sequences (vLLM)")
+    max_running_requests: int | None = Field(default=None, description="Max running requests (SGLang)")
+    max_num_batched_tokens: int | None = Field(default=None, description="Max batched tokens (vLLM)")
+    max_prefill_tokens: int | None = Field(default=None, description="Max prefill tokens (SGLang)")
+    scheduling_policy: str = Field(default="fcfs", description="Scheduling policy")
+    quantization: str | None = Field(default=None, description="Quantization method: fp8, awq, gptq, or null")
+    dtype: str = Field(default="auto", description="Data type: auto, float16, bfloat16")
+    kv_cache_dtype: str = Field(default="auto", description="KV cache dtype")
+    enable_chunked_prefill: bool = Field(default=False, description="Enable chunked prefill")
+    chunked_prefill_size: int | None = Field(default=None, description="Chunked prefill size (SGLang)")
+    enable_prefix_caching: bool = Field(default=False, description="Enable prefix caching")
+    enforce_eager: bool = Field(default=False, description="Disable CUDA graphs (vLLM)")
+    speculative_algorithm: str | None = Field(default=None, description="Speculative decoding algorithm")
+    speculative_draft_model: str | None = Field(default=None, description="Draft model path")
+    speculative_num_steps: int | None = Field(default=None, description="Speculative decode steps")
+    num_continuous_decode_steps: int = Field(default=1, description="Continuous decode steps (SGLang)")
+    dp_size: int | None = Field(default=None, description="Data parallelism size (SGLang)")
+    rationale: str = Field(description="Explanation of why these parameters were chosen")
+
+
+class AnalyzerOutput(BaseModel):
+    """Schema for the Analyzer LLM response."""
+
+    commentary: str = Field(description="2-4 sentence analysis of the experiment across all 3 goals")
+    classification: str = Field(description="One of: best_throughput, best_latency, best_balanced, none")
+    decision: str = Field(description="One of: continue, stop")
+    stop_reason: str | None = Field(default=None, description="Reason for stopping, if decision=stop")
+    next_goal: str = Field(description="One of: optimize_throughput, optimize_latency, optimize_balanced, explore")
+    planner_hint: str = Field(default="", description="Hint for the planner on what to try next")
+
+
 # ── Pareto Point ───────────────────────────────────────────────────────────
 
 
@@ -328,6 +377,10 @@ class DockerConfig(BaseModel):
     network: str = "host"
     shm_size: str = "16g"
     model_cache_dir: str = "/root/.cache/huggingface"
+
+    # Fixed engine flags (not varied by LLM, always applied)
+    vllm_extra_args: list[str] = Field(default_factory=list)
+    sglang_extra_args: list[str] = Field(default_factory=list)
 
 
 class BenchmarkConfig(BaseModel):
@@ -367,3 +420,7 @@ class AgentConfig(BaseModel):
     benchmark: BenchmarkConfig = Field(default_factory=BenchmarkConfig)
     experiments: ExperimentsConfig = Field(default_factory=ExperimentsConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
+
+    # Natural language instructions for the LLM planner
+    # e.g. "Focus on fp8 quantization. Try chunked_prefill_size=4096 with SGLang."
+    planner_instructions: str = ""

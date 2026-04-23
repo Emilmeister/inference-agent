@@ -8,6 +8,7 @@ import logging
 from langchain_openai import ChatOpenAI
 
 from inference_agent.models import (
+    AnalyzerOutput,
     ExperimentResult,
     ExperimentScores,
     ExperimentSummary,
@@ -224,13 +225,14 @@ async def analyzer_node(state: AgentState) -> dict:
         hard_stop = True
         stop_reason = f"Plateau: no improvement in last {config.experiments.plateau_window} experiments"
 
-    # Ask LLM for analysis
+    # Ask LLM for analysis using structured output
     llm = ChatOpenAI(
         base_url=config.agent_llm.base_url,
         api_key=config.agent_llm.api_key,
         model=config.agent_llm.model,
         temperature=0.2,
     )
+    structured_llm = llm.with_structured_output(AnalyzerOutput)
 
     # Prepare leaderboard data
     sorted_by_tp = sorted(all_history, key=lambda h: h.peak_throughput, reverse=True)[:5]
@@ -280,51 +282,41 @@ async def analyzer_node(state: AgentState) -> dict:
         plateau_threshold=config.experiments.plateau_threshold * 100,
     )
 
-    response = await llm.ainvoke([
-        {"role": "system", "content": prompt},
-        {"role": "user", "content": "Analyze and respond with JSON."},
-    ])
-
-    # Parse LLM response
-    content = response.content.strip()
-    if content.startswith("```"):
-        content = content.split("\n", 1)[1]
-        if content.endswith("```"):
-            content = content.rsplit("```", 1)[0]
-        content = content.strip()
-
     try:
-        analysis = json.loads(content)
-    except json.JSONDecodeError:
-        logger.warning("LLM returned invalid JSON for analysis, using defaults")
-        analysis = {
-            "commentary": "Analysis unavailable",
-            "classification": "none",
-            "decision": "stop" if hard_stop else "continue",
-            "next_goal": "explore",
-            "planner_hint": "",
-        }
+        analysis: AnalyzerOutput = await structured_llm.ainvoke([
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": "Analyze the latest experiment."},
+        ])
+    except Exception as e:
+        logger.warning("Structured output failed for analyzer: %s", e)
+        analysis = AnalyzerOutput(
+            commentary="Analysis unavailable (structured output error)",
+            classification="none",
+            decision="stop" if hard_stop else "continue",
+            next_goal="explore",
+        )
 
     # Apply LLM decisions
-    commentary = analysis.get("commentary", "")
-    classification_str = analysis.get("classification", "none")
+    commentary = analysis.commentary
     try:
-        classification = OptimizationClassification(classification_str)
+        classification = OptimizationClassification(analysis.classification)
     except ValueError:
         classification = OptimizationClassification.NONE
 
-    decision = analysis.get("decision", "continue")
+    decision = analysis.decision
     if hard_stop:
         decision = "stop"
 
-    next_goal_str = analysis.get("next_goal", "explore")
+    next_goal_str = analysis.next_goal
     try:
-        next_goal = OptimizationGoal(f"optimize_{next_goal_str}" if not next_goal_str.startswith("optimize") else next_goal_str)
+        next_goal = OptimizationGoal(
+            f"optimize_{next_goal_str}" if not next_goal_str.startswith("optimize") else next_goal_str
+        )
     except ValueError:
         next_goal = OptimizationGoal.EXPLORE
 
     if decision == "stop" and not stop_reason:
-        stop_reason = analysis.get("stop_reason", "LLM decided search space is exhausted")
+        stop_reason = analysis.stop_reason or "LLM decided search space is exhausted"
 
     # Update summary with analysis
     summary.llm_commentary = commentary

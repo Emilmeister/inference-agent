@@ -113,5 +113,9 @@ class SGLangEngine(BaseEngine):
                     str(experiment.speculative_num_steps),
                 ])
 
+        # Extra user-defined args from config
+        if self.config.docker.sglang_extra_args:
+            serve_args.extend(self.config.docker.sglang_extra_args)
+
         args.extend(serve_args)
         return args
