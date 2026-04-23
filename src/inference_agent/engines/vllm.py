@@ -81,23 +81,26 @@ class VLLMEngine(BaseEngine):
         if experiment.enforce_eager:
             serve_args.append("--enforce-eager")
 
-        if experiment.speculative_algorithm:
+        if (
+            experiment.speculative_algorithm
+            and experiment.speculative_draft_model
+            and experiment.speculative_draft_model.lower() not in ("none", "null", "")
+        ):
             # vLLM uses --speculative-config as JSON
             import json
-            spec_config: dict = {}
-            if experiment.speculative_draft_model:
-                spec_config["model"] = experiment.speculative_draft_model
+            spec_config = {"model": experiment.speculative_draft_model}
             if experiment.speculative_num_steps:
-                spec_config["num_speculative_tokens"] = (
-                    experiment.speculative_num_steps
-                )
-            if spec_config:
-                serve_args.extend([
-                    "--speculative-config",
-                    json.dumps(spec_config),
-                ])
+                spec_config["num_speculative_tokens"] = experiment.speculative_num_steps
+            serve_args.extend([
+                "--speculative-config",
+                json.dumps(spec_config),
+            ])
 
-        # Extra user-defined args from config (tool parsers, reasoning, etc.)
+        # LLM-generated extra args
+        if experiment.extra_engine_args:
+            serve_args.extend(experiment.extra_engine_args)
+
+        # Fixed user-defined args from config (tool parsers, reasoning, etc.)
         if self.config.docker.vllm_extra_args:
             serve_args.extend(self.config.docker.vllm_extra_args)
 

@@ -105,9 +105,9 @@ class ExperimentConfig(BaseModel):
     num_continuous_decode_steps: int = 1
     dp_size: int | None = None  # sglang data parallelism
 
-    # NOTE: tool_call_parser, reasoning_parser, enable_auto_tool_choice
-    # are now managed via docker.vllm_extra_args / sglang_extra_args in config.yaml
-    # to avoid duplication.
+    # LLM-generated extra args (for flags not covered by dedicated fields)
+    extra_engine_args: list[str] = Field(default_factory=list)
+    extra_env: dict[str, str] = Field(default_factory=dict)
 
     # LLM rationale
     rationale: str = ""
@@ -341,6 +341,17 @@ class PlannerOutput(BaseModel):
     speculative_num_steps: int | None = Field(default=None, description="Speculative decode steps")
     num_continuous_decode_steps: int = Field(default=1, description="Continuous decode steps (SGLang)")
     dp_size: int | None = Field(default=None, description="Data parallelism size (SGLang)")
+    extra_engine_args: list[str] = Field(
+        default_factory=list,
+        description="Extra CLI flags for the engine that are NOT covered by other fields in this schema. "
+        "Each element is a single CLI token, e.g. ['--mamba-scheduler-strategy', 'extra_buffer', '--disable-radix-cache']. "
+        "Use ONLY for parameters that have no dedicated field above. Never duplicate flags already set by other fields.",
+    )
+    extra_env: dict[str, str] = Field(
+        default_factory=dict,
+        description="Extra environment variables to pass to the container via -e, e.g. {'SGLANG_ENABLE_SPEC_V2': '1'}. "
+        "Use ONLY when the engine requires env vars not covered by CLI flags.",
+    )
     rationale: str = Field(description="Explanation of why these parameters were chosen")
 
 

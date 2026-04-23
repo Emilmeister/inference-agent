@@ -55,4 +55,7 @@ class BaseEngine(abc.ABC):
         ]
         if self.config.model_revision:
             args.extend(["-e", f"HF_TOKEN={self.config.model_revision}"])
+        # LLM-generated env vars
+        for key, val in experiment.extra_env.items():
+            args.extend(["-e", f"{key}={val}"])
         return args

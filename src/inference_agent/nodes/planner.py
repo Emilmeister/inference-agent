@@ -67,10 +67,15 @@ benefits from prefix caching.
 - data_parallel_size > 1 is great for throughput when model fits in fewer GPUs.
 - enforce_eager=true in vLLM can reduce latency for small batches.
 - num_continuous_decode_steps > 1 in SGLang reduces scheduling overhead.
-- If is_vlm=true: for vLLM text-only benchmarks, consider adding --limit-mm-per-prompt \
-  to limit multimodal inputs; the model still works for text.
+- If is_vlm=true: for vLLM text-only benchmarks, the model may need special handling. \
+  Do NOT set speculative_algorithm for vLLM with VLM models unless you have a valid draft model path.
 - If has_mtp=true: SGLang can use NEXTN speculative decoding with the model's built-in \
-  MTP layers (--speculative-algo NEXTN --speculative-num-steps N). No draft model needed.
+  MTP layers. Set speculative_algorithm="NEXTN" and speculative_num_steps=3. No draft model needed. \
+  IMPORTANT: NEXTN on SGLang requires disable_radix_cache (handled automatically). \
+  Do NOT combine NEXTN with enable_prefix_caching=true — set it to false.
+- For speculative decoding on vLLM: you MUST provide a valid speculative_draft_model path \
+  (a real HuggingFace model ID). If you don't have a draft model, do NOT set speculative_algorithm.
+- For the FIRST few experiments, do NOT use speculative decoding — get baselines first.
 - IMPORTANT — max_model_len strategy: \
   max_model_len is a KEY parameter to benchmark. It controls how much KV cache is allocated \
   and directly affects throughput, latency, and max concurrent requests. \
@@ -233,5 +238,7 @@ def _build_experiment_config(
         speculative_num_steps=output.speculative_num_steps,
         num_continuous_decode_steps=output.num_continuous_decode_steps,
         dp_size=output.dp_size,
+        extra_engine_args=output.extra_engine_args,
+        extra_env=output.extra_env,
         rationale=output.rationale,
     )

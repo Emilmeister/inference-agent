@@ -27,6 +27,14 @@ class SGLangEngine(BaseEngine):
 
     def build_docker_args(self, experiment: ExperimentConfig) -> list[str]:
         args = self.build_common_docker_args(experiment)
+
+        # NEXTN speculative decoding needs SGLANG_ENABLE_SPEC_V2=1 env var
+        if (
+            experiment.speculative_algorithm
+            and experiment.speculative_algorithm.upper() == "NEXTN"
+        ):
+            args.extend(["-e", "SGLANG_ENABLE_SPEC_V2=1"])
+
         args.append(self.image())
 
         # sglang launch_server command
@@ -112,8 +120,18 @@ class SGLangEngine(BaseEngine):
                     "--speculative-num-steps",
                     str(experiment.speculative_num_steps),
                 ])
+            # NEXTN speculative decoding on mamba/hybrid models requires
+            # --mamba-scheduler-strategy extra_buffer + SGLANG_ENABLE_SPEC_V2=1
+            if experiment.speculative_algorithm.upper() == "NEXTN":
+                serve_args.extend([
+                    "--mamba-scheduler-strategy", "extra_buffer",
+                ])
 
-        # Extra user-defined args from config
+        # LLM-generated extra args
+        if experiment.extra_engine_args:
+            serve_args.extend(experiment.extra_engine_args)
+
+        # Fixed user-defined args from config
         if self.config.docker.sglang_extra_args:
             serve_args.extend(self.config.docker.sglang_extra_args)
 
