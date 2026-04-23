@@ -93,7 +93,9 @@ async def executor_node(state: AgentState) -> dict:
 
     # 3. Wait for health check
     logger.info("Waiting for engine health check (timeout 300s)...")
-    healthy = await wait_for_healthy(engine.health_url(), timeout_sec=300)
+    healthy = await wait_for_healthy(
+        engine.health_url(), timeout_sec=300, container_name=container_name,
+    )
     if not healthy:
         logs = await get_container_logs(container_name)
         logger.error("FAILED: Engine did not become healthy. Last logs:\n%s", logs[-500:])

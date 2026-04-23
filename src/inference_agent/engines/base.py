@@ -51,7 +51,7 @@ class BaseEngine(abc.ABC):
             "--network", dc.network,
             "-v", f"{dc.model_cache_dir}:{dc.model_cache_dir}",
             "-d",  # detached
-            "--rm",  # auto-remove on stop
+            # NOTE: no --rm so we can read logs from crashed containers
         ]
         if self.config.model_revision:
             args.extend(["-e", f"HF_TOKEN={self.config.model_revision}"])

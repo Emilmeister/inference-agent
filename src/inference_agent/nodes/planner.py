@@ -71,9 +71,19 @@ benefits from prefix caching.
   to limit multimodal inputs; the model still works for text.
 - If has_mtp=true: SGLang can use NEXTN speculative decoding with the model's built-in \
   MTP layers (--speculative-algo NEXTN --speculative-num-steps N). No draft model needed.
-- IMPORTANT: do NOT set max_model_len to a very small value (e.g. 4096) for models that \
-  support large contexts — it wastes GPU memory on unnecessary KV cache resizing and can \
-  cause startup failures. Prefer null (let engine auto-detect) or a value matching VRAM capacity.
+- IMPORTANT — max_model_len strategy: \
+  max_model_len is a KEY parameter to benchmark. It controls how much KV cache is allocated \
+  and directly affects throughput, latency, and max concurrent requests. \
+  Use binary-search logic: start with a moderate value that fits in VRAM, then explore up/down. \
+  Rough heuristic: each GPU can hold ~2K-4K context per GB of VRAM for a typical 7-10B model \
+  (bf16). So 40GB ≈ 80K-160K max, but with model weights loaded it's less. \
+  For the FIRST experiment, start with a safe value (e.g. 32768 for 40GB, 8192 for 24GB). \
+  If it succeeds, try doubling. If it OOMs, halve. \
+  NEVER set max_model_len to the model's full max_position_embeddings (e.g. 262144) unless \
+  you have enough VRAM — it WILL OOM. NEVER set it to null — always set an explicit value.
+- If a previous experiment FAILED (status="failed"), read the error carefully. Common fixes: \
+  halve max_model_len, reduce gpu_memory_utilization/mem_fraction_static, remove kv_cache_dtype=fp8 \
+  (not all models support it), try the other engine. Do NOT repeat the same config that failed.
 {user_instructions}
 Generate the next experiment configuration.
 """
@@ -99,7 +109,7 @@ async def planner_node(state: AgentState) -> dict:
     # Format history for LLM (last 15 experiments)
     history_for_llm = []
     for h in history[-15:]:
-        history_for_llm.append({
+        entry: dict = {
             "id": h.experiment_id,
             "engine": h.engine.value,
             "status": h.status.value,
@@ -109,7 +119,11 @@ async def planner_node(state: AgentState) -> dict:
             "tpot_p95": h.low_concurrency_tpot_p95,
             "smoke_pass": f"{h.smoke_tests_passed}/{h.smoke_tests_total}",
             "classification": h.optimization_classification.value,
-        })
+        }
+        # Include error details for failed experiments so LLM can learn from failures
+        if h.error:
+            entry["error"] = h.error
+        history_for_llm.append(entry)
 
     # Add user instructions section if provided
     user_instructions = ""
@@ -145,9 +159,12 @@ async def planner_node(state: AgentState) -> dict:
         ])
     except Exception as e:
         logger.error("Structured output failed, using fallback: %s", e)
+        # Safe fallback: ~4K context per GB of VRAM per GPU
+        safe_ctx = min(hardware.gpus[0].vram_total_mb // 10 if hardware.gpus else 32768, hardware.model_max_context)
         result = PlannerOutput(
             engine=hardware.available_engines[0].value if hardware.available_engines else "vllm",
             tensor_parallel_size=hardware.gpu_count,
+            max_model_len=safe_ctx,
             rationale=f"Fallback: structured output failed ({e})",
         )
 
@@ -155,11 +172,12 @@ async def planner_node(state: AgentState) -> dict:
     experiment = _build_experiment_config(result, hardware, config)
 
     logger.info(
-        "Planned: %s, TP=%d, quant=%s, rationale: %s",
+        "Planned: %s, TP=%d, ctx=%s, quant=%s, rationale: %s",
         experiment.engine.value,
         experiment.tensor_parallel_size,
+        experiment.max_model_len,
         experiment.quantization or "none",
-        experiment.rationale[:100],
+        experiment.rationale[:120],
     )
 
     return {"current_config": experiment}
@@ -183,10 +201,12 @@ def _build_experiment_config(
         valid_tps = [i for i in range(1, hardware.gpu_count + 1) if hardware.gpu_count % i == 0]
         tp = min(valid_tps, key=lambda x: abs(x - tp))
 
-    # Validate max_model_len
+    # Validate max_model_len — must be set, capped to model max
     max_model_len = output.max_model_len
-    if max_model_len is not None and max_model_len > hardware.model_max_context:
+    if max_model_len > hardware.model_max_context:
         max_model_len = hardware.model_max_context
+    # Sanity: at least 512
+    max_model_len = max(max_model_len, 512)
 
     return ExperimentConfig(
         engine=engine,

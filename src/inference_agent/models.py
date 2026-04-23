@@ -254,6 +254,7 @@ class ExperimentSummary(BaseModel):
     low_concurrency_tpot_p95: float = 0.0
     smoke_tests_passed: int = 0
     smoke_tests_total: int = 3
+    error: str | None = None  # error message + container logs for failed experiments
 
     optimization_classification: OptimizationClassification = (
         OptimizationClassification.NONE
@@ -303,6 +304,7 @@ class ExperimentSummary(BaseModel):
             low_concurrency_ttft_p95=result.benchmark.low_concurrency_ttft_p95_ms,
             low_concurrency_tpot_p95=result.benchmark.low_concurrency_tpot_p95_ms,
             smoke_tests_passed=smoke_passed,
+            error=result.error[:500] if result.error else None,
             optimization_classification=result.optimization_classification,
             scores=result.scores,
             llm_commentary=result.llm_commentary,
@@ -319,7 +321,7 @@ class PlannerOutput(BaseModel):
     tensor_parallel_size: int = Field(default=1, description="Tensor parallelism size")
     pipeline_parallel_size: int = Field(default=1, description="Pipeline parallelism size")
     data_parallel_size: int = Field(default=1, description="Data parallelism size")
-    max_model_len: int | None = Field(default=None, description="Max model context length override")
+    max_model_len: int = Field(description="Max context length to allocate KV cache for. MUST be set explicitly based on available VRAM. Use binary search: start safe (e.g. 32768 for 40GB), double if success, halve if OOM.")
     gpu_memory_utilization: float = Field(default=0.9, description="GPU memory fraction (vLLM)")
     mem_fraction_static: float | None = Field(default=None, description="Static memory fraction (SGLang)")
     max_num_seqs: int | None = Field(default=None, description="Max concurrent sequences (vLLM)")

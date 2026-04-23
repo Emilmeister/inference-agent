@@ -49,10 +49,25 @@ async def stop_container(name: str, timeout: int = 30) -> None:
         pass
 
 
+async def _is_container_running(name: str) -> bool:
+    """Check if a Docker container is still running."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "inspect", "-f", "{{.State.Running}}", name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+        return stdout.decode().strip() == "true"
+    except Exception:
+        return False
+
+
 async def wait_for_healthy(
     url: str,
     timeout_sec: int = 300,
     poll_interval: float = 5.0,
+    container_name: str | None = None,
 ) -> bool:
     """Poll a health endpoint until it returns 200 or timeout."""
     deadline = asyncio.get_event_loop().time() + timeout_sec
@@ -60,6 +75,17 @@ async def wait_for_healthy(
     async with aiohttp.ClientSession() as session:
         while asyncio.get_event_loop().time() < deadline:
             attempts += 1
+
+            # Check if container is still running
+            if container_name and attempts % 6 == 0:  # every ~30s
+                alive = await _is_container_running(container_name)
+                if not alive:
+                    logger.error(
+                        "Container '%s' is no longer running (crashed/OOM?).",
+                        container_name,
+                    )
+                    return False
+
             try:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
