@@ -56,8 +56,10 @@ async def wait_for_healthy(
 ) -> bool:
     """Poll a health endpoint until it returns 200 or timeout."""
     deadline = asyncio.get_event_loop().time() + timeout_sec
+    attempts = 0
     async with aiohttp.ClientSession() as session:
         while asyncio.get_event_loop().time() < deadline:
+            attempts += 1
             try:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
@@ -65,8 +67,11 @@ async def wait_for_healthy(
                         return True
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 pass
+            if attempts % 12 == 0:  # every ~60 seconds
+                elapsed = int(timeout_sec - (deadline - asyncio.get_event_loop().time()))
+                logger.info("  Still waiting for health check... (%ds/%ds)", elapsed, timeout_sec)
             await asyncio.sleep(poll_interval)
-    logger.error("Health check timed out after %ds: %s", timeout_sec, url)
+    logger.error("Health check timed out after %ds (%d attempts): %s", timeout_sec, attempts, url)
     return False
 
 

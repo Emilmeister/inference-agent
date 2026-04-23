@@ -67,6 +67,13 @@ benefits from prefix caching.
 - data_parallel_size > 1 is great for throughput when model fits in fewer GPUs.
 - enforce_eager=true in vLLM can reduce latency for small batches.
 - num_continuous_decode_steps > 1 in SGLang reduces scheduling overhead.
+- If is_vlm=true: for vLLM text-only benchmarks, consider adding --limit-mm-per-prompt \
+  to limit multimodal inputs; the model still works for text.
+- If has_mtp=true: SGLang can use NEXTN speculative decoding with the model's built-in \
+  MTP layers (--speculative-algo NEXTN --speculative-num-steps N). No draft model needed.
+- IMPORTANT: do NOT set max_model_len to a very small value (e.g. 4096) for models that \
+  support large contexts — it wastes GPU memory on unnecessary KV cache resizing and can \
+  cause startup failures. Prefer null (let engine auto-detect) or a value matching VRAM capacity.
 {user_instructions}
 Generate the next experiment configuration.
 """

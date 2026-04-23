@@ -97,15 +97,7 @@ class VLLMEngine(BaseEngine):
                     json.dumps(spec_config),
                 ])
 
-        # Tool calling / reasoning support
-        if experiment.enable_auto_tool_choice:
-            serve_args.append("--enable-auto-tool-choice")
-        if experiment.tool_call_parser:
-            serve_args.extend(["--tool-call-parser", experiment.tool_call_parser])
-        if experiment.reasoning_parser:
-            serve_args.extend(["--reasoning-parser", experiment.reasoning_parser])
-
-        # Extra user-defined args from config
+        # Extra user-defined args from config (tool parsers, reasoning, etc.)
         if self.config.docker.vllm_extra_args:
             serve_args.extend(self.config.docker.vllm_extra_args)
 

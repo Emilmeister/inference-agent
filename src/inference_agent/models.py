@@ -56,6 +56,8 @@ class HardwareProfile(BaseModel):
     model_size_params: int | None = None
     model_architecture: str | None = None
     model_max_context: int = 4096
+    is_vlm: bool = False           # vision-language model (needs --language-model-only for vllm)
+    has_mtp: bool = False           # has Multi-Token Prediction layers (SGLang NEXTN)
     available_engines: list[EngineType] = []
 
 
@@ -103,10 +105,9 @@ class ExperimentConfig(BaseModel):
     num_continuous_decode_steps: int = 1
     dp_size: int | None = None  # sglang data parallelism
 
-    # Tool calling / reasoning support (fixed per engine, not varied)
-    enable_auto_tool_choice: bool = True  # vllm: --enable-auto-tool-choice
-    tool_call_parser: str | None = None  # vllm: --tool-call-parser (hermes, llama3_json, etc.)
-    reasoning_parser: str | None = None  # vllm: --reasoning-parser
+    # NOTE: tool_call_parser, reasoning_parser, enable_auto_tool_choice
+    # are now managed via docker.vllm_extra_args / sglang_extra_args in config.yaml
+    # to avoid duplication.
 
     # LLM rationale
     rationale: str = ""

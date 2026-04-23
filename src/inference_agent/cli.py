@@ -123,13 +123,19 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Setup logging
+    # Setup logging — only our code is verbose, silence noisy libraries
     level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(
         level=level,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        format="%(asctime)s %(levelname)-5s [%(name)s] %(message)s",
         datefmt="%H:%M:%S",
     )
+    # Silence noisy third-party loggers
+    for noisy in [
+        "httpcore", "httpx", "openai", "urllib3", "docker",
+        "asyncio", "huggingface_hub", "filelock",
+    ]:
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
     if args.cleanup:
         stop_all_bench_containers()

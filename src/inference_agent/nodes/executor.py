@@ -50,13 +50,20 @@ async def executor_node(state: AgentState) -> dict:
     start_time = time.time()
     container_name = engine.container_name(experiment)
 
+    exp_num = state.get("experiments_count", 0) + 1
+    max_exp = config.experiments.max_experiments
+    logger.info("")
+    logger.info("=" * 60)
     logger.info(
-        "=== Experiment %s: %s (TP=%d, quant=%s) ===",
+        "EXPERIMENT %d/%d: %s | %s | TP=%d | quant=%s",
+        exp_num, max_exp,
         experiment.experiment_id,
-        experiment.engine.value,
+        experiment.engine.value.upper(),
         experiment.tensor_parallel_size,
         experiment.quantization or "none",
     )
+    logger.info("Rationale: %s", experiment.rationale[:150])
+    logger.info("=" * 60)
 
     # 1. Stop any previous container
     await stop_container(container_name)
@@ -85,9 +92,11 @@ async def executor_node(state: AgentState) -> dict:
         }
 
     # 3. Wait for health check
+    logger.info("Waiting for engine health check (timeout 300s)...")
     healthy = await wait_for_healthy(engine.health_url(), timeout_sec=300)
     if not healthy:
         logs = await get_container_logs(container_name)
+        logger.error("FAILED: Engine did not become healthy. Last logs:\n%s", logs[-500:])
         await stop_container(container_name)
         return {
             "current_result": ExperimentResult(
@@ -101,6 +110,8 @@ async def executor_node(state: AgentState) -> dict:
                 duration_seconds=time.time() - start_time,
             )
         }
+
+    logger.info("Engine is healthy! Starting benchmark...")
 
     # 4. Start GPU monitoring
     gpu_monitor = GPUMonitor(interval_ms=1000)
