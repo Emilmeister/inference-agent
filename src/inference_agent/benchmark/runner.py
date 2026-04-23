@@ -5,8 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import random
-import string
 import time
 
 import aiohttp
@@ -60,6 +58,7 @@ async def _send_request(
     prompt: str,
     max_tokens: int,
     model: str,
+    _debug_first: bool = False,
 ) -> dict:
     """Send a single chat completion request and measure timing."""
     payload = {
@@ -68,6 +67,7 @@ async def _send_request(
         "max_tokens": max_tokens,
         "temperature": 0.1,
         "stream": True,
+        "stream_options": {"include_usage": True},
     }
 
     result = {
@@ -84,6 +84,8 @@ async def _send_request(
     first_token_time = None
     last_token_time = None
     token_count = 0
+    usage_completion_tokens = 0
+    sse_events_parsed = 0
 
     try:
         async with session.post(
@@ -103,22 +105,46 @@ async def _send_request(
                 while "\n" in buffer:
                     line_str, buffer = buffer.split("\n", 1)
                     line_str = line_str.strip()
-                    if not line_str.startswith("data: "):
+                    # Handle both "data: {...}" and "data:{...}"
+                    if not line_str.startswith("data:"):
                         continue
-                    data_str = line_str[6:]
+                    data_str = line_str[5:].lstrip()
                     if data_str == "[DONE]":
                         break
 
                     now = time.perf_counter()
                     try:
                         data = json.loads(data_str)
+                        sse_events_parsed += 1
+
+                        # Log first few events for debugging
+                        if _debug_first and sse_events_parsed <= 3:
+                            choices = data.get("choices", [])
+                            delta = choices[0].get("delta", {}) if choices else {}
+                            logger.info(
+                                "  SSE event #%d: delta keys=%s, "
+                                "content=%r, reasoning=%r",
+                                sse_events_parsed,
+                                list(delta.keys()),
+                                delta.get("content"),
+                                delta.get("reasoning_content"),
+                            )
+
+                        # Capture usage (usually in the last event)
+                        usage = data.get("usage")
+                        if usage and isinstance(usage, dict):
+                            ct = usage.get("completion_tokens")
+                            if ct and ct > 0:
+                                usage_completion_tokens = ct
+
                         choices = data.get("choices", [])
                         if choices:
                             delta = choices[0].get("delta", {})
-                            # Count both content and reasoning_content tokens
-                            has_token = bool(
-                                delta.get("content")
-                                or delta.get("reasoning_content")
+                            content = delta.get("content")
+                            reasoning = delta.get("reasoning_content")
+                            has_token = (
+                                (isinstance(content, str) and len(content) > 0)
+                                or (isinstance(reasoning, str) and len(reasoning) > 0)
                             )
                             if has_token:
                                 token_count += 1
@@ -129,7 +155,13 @@ async def _send_request(
                                         (now - last_token_time) * 1000
                                     )
                                 last_token_time = now
-                    except (json.JSONDecodeError, KeyError):
+                    except json.JSONDecodeError as e:
+                        if _debug_first and sse_events_parsed == 0:
+                            logger.warning(
+                                "  SSE JSON parse error: %s, raw: %s",
+                                e, data_str[:200],
+                            )
+                    except (KeyError, IndexError):
                         pass
 
     except asyncio.TimeoutError:
@@ -141,6 +173,16 @@ async def _send_request(
 
     end_time = time.perf_counter()
     result["e2e_latency_ms"] = (end_time - start_time) * 1000
+
+    # Fallback: if manual token counting got 0, use usage-reported count
+    if token_count == 0 and usage_completion_tokens > 0:
+        logger.warning(
+            "SSE token counting=0 but usage reports %d tokens "
+            "(%d SSE events parsed). Using usage count.",
+            usage_completion_tokens, sse_events_parsed,
+        )
+        token_count = usage_completion_tokens
+
     result["output_tokens"] = token_count
 
     if first_token_time is not None:
@@ -173,13 +215,20 @@ async def run_benchmark_phase(
     start_time = time.perf_counter()
     active_tasks: set[asyncio.Task] = set()
 
+    first_request_done = False
+
     connector = aiohttp.TCPConnector(limit=concurrency + 10)
     async with aiohttp.ClientSession(connector=connector) as session:
 
         async def _worker():
+            nonlocal first_request_done
             while time.perf_counter() - start_time < duration_sec:
+                # Log SSE debug info for the very first request of each phase
+                debug = not first_request_done
+                first_request_done = True
                 res = await _send_request(
-                    session, url, prompt, max_output_tokens, model_name
+                    session, url, prompt, max_output_tokens, model_name,
+                    _debug_first=debug,
                 )
                 all_results.append(res)
 
