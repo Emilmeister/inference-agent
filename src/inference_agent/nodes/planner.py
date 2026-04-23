@@ -47,8 +47,9 @@ running on a GPU server.
 
 ## Rules
 1. CRITICAL: For the FIRST 2 experiments, run BASELINES for BOTH engines: \
-experiment #1 = vLLM baseline (TP=1, default params, no speculative), \
-experiment #2 = SGLang baseline (TP=1, default params, no speculative). \
+experiment #1 = vLLM baseline (TP=1, default params, no speculative, kv_cache_dtype=auto, scheduling_policy=fcfs), \
+experiment #2 = SGLang baseline (TP=1, default params, no speculative, kv_cache_dtype=auto, scheduling_policy=fcfs). \
+BASELINE means DEFAULT values — do NOT change kv_cache_dtype, quantization, or scheduling_policy for baselines. \
 Experiments #3-5: try small variations (chunked prefill, prefix caching, different max_model_len). \
 Only AFTER baselines, start exploring speculative decoding, quantization, etc.
 2. After baselines, analyze trends and try improvements based on the optimization goal.
@@ -63,9 +64,10 @@ AND throughput is maximized.
 10. ALTERNATE between engines: don't run more than 3 experiments in a row with the same engine.
 
 ## Best Practices
-- vLLM: chunked prefill + prefix caching works well together for throughput.
+- vLLM: chunked prefill + prefix caching works well together for throughput. \
+  vLLM scheduling_policy supports ONLY: "fcfs" or "priority". Do NOT use "lpm" with vLLM.
 - SGLang: radix cache (prefix caching) is ON by default. lpm schedule policy \
-benefits from prefix caching.
+benefits from prefix caching. SGLang scheduling_policy supports: "fcfs" or "lpm".
 - fp8 quantization usually gives ~1.5-2x throughput with minimal quality loss.
 - Higher gpu_memory_utilization (0.95) allows more KV cache but risks OOM.
 - data_parallel_size > 1 is great for throughput when model fits in fewer GPUs.
@@ -223,6 +225,13 @@ def _build_experiment_config(
     # Sanity: at least 512
     max_model_len = max(max_model_len, 512)
 
+    # Validate scheduling_policy per engine
+    scheduling_policy = output.scheduling_policy
+    if engine == EngineType.VLLM and scheduling_policy not in ("fcfs", "priority"):
+        scheduling_policy = "fcfs"
+    elif engine == EngineType.SGLANG and scheduling_policy not in ("fcfs", "lpm"):
+        scheduling_policy = "fcfs"
+
     return ExperimentConfig(
         engine=engine,
         tensor_parallel_size=tp,
@@ -235,7 +244,7 @@ def _build_experiment_config(
         max_running_requests=output.max_running_requests,
         max_num_batched_tokens=output.max_num_batched_tokens,
         max_prefill_tokens=output.max_prefill_tokens,
-        scheduling_policy=output.scheduling_policy,
+        scheduling_policy=scheduling_policy,
         quantization=output.quantization,
         dtype=output.dtype,
         kv_cache_dtype=output.kv_cache_dtype,

@@ -19,7 +19,7 @@ async def _chat_completion(
     payload_extra: dict,
 ) -> dict:
     """Send a chat completion request and return the parsed response."""
-    payload = {"model": model, "max_tokens": 512, **payload_extra}
+    payload = {"model": model, "max_tokens": 1024, **payload_extra}
     async with session.post(
         url, json=payload, timeout=aiohttp.ClientTimeout(total=60)
     ) as resp:
@@ -95,14 +95,18 @@ async def test_json_mode(
                     "role": "user",
                     "content": (
                         "List 3 programming languages with their year of creation. "
-                        "Respond in JSON format."
+                        "Respond in JSON format. Do not think, just respond with JSON directly."
                     ),
                 }
             ],
+            "max_tokens": 1024,
             "response_format": {"type": "json_object"},
         })
 
-        content = data["choices"][0]["message"]["content"]
+        message = data["choices"][0]["message"]
+        content = message.get("content") or ""
+        if not content:
+            return False, "No content in response (reasoning model may not support JSON mode)"
         parsed = json.loads(content)
         if not isinstance(parsed, dict):
             return False, f"Expected JSON object, got {type(parsed).__name__}"
@@ -152,13 +156,17 @@ async def test_json_schema(
             "messages": [
                 {
                     "role": "user",
-                    "content": "List 3 programming languages with their year of creation.",
+                    "content": "List 3 programming languages with their year of creation. Do not think, just respond directly.",
                 }
             ],
+            "max_tokens": 1024,
             "response_format": schema,
         })
 
-        content = data["choices"][0]["message"]["content"]
+        message = data["choices"][0]["message"]
+        content = message.get("content") or ""
+        if not content:
+            return False, "No content in response (reasoning model may not support JSON schema)"
         parsed = json.loads(content)
 
         # Validate structure

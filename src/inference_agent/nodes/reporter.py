@@ -25,8 +25,6 @@ def save_experiment(result: ExperimentResult, experiments_dir: str) -> str:
 
 
 async def reporter_node(state: AgentState) -> dict:
-    """Save the current experiment result to a JSON file."""
-    config = state["config"]
-    result = state["current_result"]
-    save_experiment(result, config.storage.experiments_dir)
+    """Reporter is a no-op — analyzer already saves the enriched result."""
+    # save_experiment() is called from analyzer_node after LLM enrichment
     return {}
