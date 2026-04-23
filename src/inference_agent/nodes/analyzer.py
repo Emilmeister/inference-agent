@@ -115,6 +115,15 @@ def _check_plateau(
     if len(history) < window:
         return False
 
+    # Don't declare plateau if we have no successful experiments yet —
+    # keep trying until at least one experiment produces real metrics
+    has_any_success = any(
+        h.peak_throughput > 0 or h.low_concurrency_ttft_p95 > 0
+        for h in history
+    )
+    if not has_any_success:
+        return False
+
     recent = history[-window:]
 
     # Check throughput improvement

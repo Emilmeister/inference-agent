@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from inference_agent.engines.base import BaseEngine
+from inference_agent.engines.base import BaseEngine, dedup_flags
 from inference_agent.models import AgentConfig, ExperimentConfig
 
 
@@ -103,6 +103,9 @@ class VLLMEngine(BaseEngine):
         # Fixed user-defined args from config (tool parsers, reasoning, etc.)
         if self.config.docker.vllm_extra_args:
             serve_args.extend(self.config.docker.vllm_extra_args)
+
+        # Deduplicate flags (extra_engine_args / config may overlap)
+        serve_args = dedup_flags(serve_args)
 
         args.extend(serve_args)
         return args

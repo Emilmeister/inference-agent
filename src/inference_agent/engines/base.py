@@ -3,8 +3,35 @@
 from __future__ import annotations
 
 import abc
+import logging
 
 from inference_agent.models import AgentConfig, ExperimentConfig
+
+logger = logging.getLogger(__name__)
+
+
+def dedup_flags(args: list[str]) -> list[str]:
+    """Remove duplicate CLI flags, keeping the first occurrence.
+
+    Handles both value flags (``--flag value``) and boolean flags (``--flag``).
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg.startswith("--"):
+            if arg in seen:
+                # Skip duplicate flag (and its value if present)
+                if i + 1 < len(args) and not args[i + 1].startswith("-"):
+                    i += 2
+                else:
+                    i += 1
+                continue
+            seen.add(arg)
+        result.append(arg)
+        i += 1
+    return result
 
 
 class BaseEngine(abc.ABC):

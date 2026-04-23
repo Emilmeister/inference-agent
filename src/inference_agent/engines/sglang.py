@@ -2,8 +2,21 @@
 
 from __future__ import annotations
 
-from inference_agent.engines.base import BaseEngine
+import logging
+
+from inference_agent.engines.base import BaseEngine, dedup_flags
 from inference_agent.models import AgentConfig, ExperimentConfig
+
+logger = logging.getLogger(__name__)
+
+# Flags automatically managed for NEXTN — strip from extra_engine_args
+_NEXTN_AUTO_FLAGS = {
+    "--mamba-scheduler-strategy",
+    "--speculative-algorithm",
+    "--speculative-algo",
+    "--speculative-eagle-topk",
+    "--speculative-num-draft-tokens",
+}
 
 
 class SGLangEngine(BaseEngine):
@@ -28,12 +41,16 @@ class SGLangEngine(BaseEngine):
     def build_docker_args(self, experiment: ExperimentConfig) -> list[str]:
         args = self.build_common_docker_args(experiment)
 
-        # NEXTN speculative decoding needs SGLANG_ENABLE_SPEC_V2=1 env var
-        if (
+        is_nextn = (
             experiment.speculative_algorithm
             and experiment.speculative_algorithm.upper() == "NEXTN"
-        ):
-            args.extend(["-e", "SGLANG_ENABLE_SPEC_V2=1"])
+        )
+
+        # NEXTN speculative decoding needs SGLANG_ENABLE_SPEC_V2=1 env var
+        if is_nextn:
+            # Only add if not already in extra_env
+            if "SGLANG_ENABLE_SPEC_V2" not in experiment.extra_env:
+                args.extend(["-e", "SGLANG_ENABLE_SPEC_V2=1"])
 
         args.append(self.image())
 
@@ -63,7 +80,6 @@ class SGLangEngine(BaseEngine):
             ])
 
         if experiment.max_model_len is not None:
-            # SGLang uses --context-length
             serve_args.extend(["--context-length", str(experiment.max_model_len)])
 
         if experiment.max_running_requests is not None:
@@ -96,8 +112,30 @@ class SGLangEngine(BaseEngine):
             else:
                 serve_args.extend(["--chunked-prefill-size", "8192"])
 
-        if not experiment.enable_prefix_caching:
-            serve_args.append("--disable-radix-cache")
+        # NEXTN + disable-radix-cache requires no_buffer strategy.
+        # NEXTN + radix-cache (default) requires extra_buffer.
+        # So: if NEXTN is enabled, force the correct mamba strategy
+        # and DON'T add --disable-radix-cache when using extra_buffer.
+        if is_nextn:
+            if not experiment.enable_prefix_caching:
+                # User wants radix cache off → must use no_buffer
+                serve_args.append("--disable-radix-cache")
+                serve_args.extend([
+                    "--mamba-scheduler-strategy", "no_buffer",
+                ])
+                logger.info(
+                    "NEXTN + disable-radix-cache: using no_buffer strategy"
+                )
+            else:
+                # Radix cache ON (default for NEXTN) → extra_buffer
+                serve_args.extend([
+                    "--mamba-scheduler-strategy", "extra_buffer",
+                ])
+            # Avoid SGLang bug: speculative_eagle_topk must not be None
+            serve_args.extend(["--speculative-eagle-topk", "1"])
+        else:
+            if not experiment.enable_prefix_caching:
+                serve_args.append("--disable-radix-cache")
 
         if experiment.num_continuous_decode_steps > 1:
             serve_args.extend([
@@ -120,20 +158,42 @@ class SGLangEngine(BaseEngine):
                     "--speculative-num-steps",
                     str(experiment.speculative_num_steps),
                 ])
-            # NEXTN speculative decoding on mamba/hybrid models requires
-            # --mamba-scheduler-strategy extra_buffer + SGLANG_ENABLE_SPEC_V2=1
-            if experiment.speculative_algorithm.upper() == "NEXTN":
-                serve_args.extend([
-                    "--mamba-scheduler-strategy", "extra_buffer",
-                ])
 
-        # LLM-generated extra args
+        # LLM-generated extra args (filter out NEXTN auto-managed flags)
         if experiment.extra_engine_args:
-            serve_args.extend(experiment.extra_engine_args)
+            filtered = _filter_auto_flags(
+                experiment.extra_engine_args, _NEXTN_AUTO_FLAGS if is_nextn else set()
+            )
+            serve_args.extend(filtered)
 
         # Fixed user-defined args from config
         if self.config.docker.sglang_extra_args:
             serve_args.extend(self.config.docker.sglang_extra_args)
 
+        # Deduplicate flags (extra_engine_args / config may overlap)
+        serve_args = dedup_flags(serve_args)
+
         args.extend(serve_args)
         return args
+
+
+def _filter_auto_flags(
+    extra_args: list[str], auto_flags: set[str]
+) -> list[str]:
+    """Remove flags from extra_args that are auto-managed by the engine."""
+    if not auto_flags:
+        return list(extra_args)
+    result: list[str] = []
+    i = 0
+    while i < len(extra_args):
+        arg = extra_args[i]
+        if arg in auto_flags:
+            # Skip this flag and its value if present
+            if i + 1 < len(extra_args) and not extra_args[i + 1].startswith("-"):
+                i += 2
+            else:
+                i += 1
+            continue
+        result.append(arg)
+        i += 1
+    return result

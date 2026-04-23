@@ -46,8 +46,11 @@ running on a GPU server.
 {exp_count} / {max_experiments}
 
 ## Rules
-1. For the FIRST 3-5 experiments, try baseline configs: default params with TP=1, \
-TP=max_gpus for both vllm and sglang.
+1. CRITICAL: For the FIRST 2 experiments, run BASELINES for BOTH engines: \
+experiment #1 = vLLM baseline (TP=1, default params, no speculative), \
+experiment #2 = SGLang baseline (TP=1, default params, no speculative). \
+Experiments #3-5: try small variations (chunked prefill, prefix caching, different max_model_len). \
+Only AFTER baselines, start exploring speculative decoding, quantization, etc.
 2. After baselines, analyze trends and try improvements based on the optimization goal.
 3. If goal is "optimize_throughput": focus on batching, DP, quantization, high concurrency.
 4. If goal is "optimize_latency": focus on TP, enforce_eager, lower batch sizes.
@@ -57,6 +60,7 @@ AND throughput is maximized.
 7. Never repeat an exact configuration that was already tested.
 8. max_model_len must not exceed {model_max_context}.
 9. tensor_parallel_size must divide evenly into {gpu_count} GPUs.
+10. ALTERNATE between engines: don't run more than 3 experiments in a row with the same engine.
 
 ## Best Practices
 - vLLM: chunked prefill + prefix caching works well together for throughput.
@@ -71,8 +75,12 @@ benefits from prefix caching.
   Do NOT set speculative_algorithm for vLLM with VLM models unless you have a valid draft model path.
 - If has_mtp=true: SGLang can use NEXTN speculative decoding with the model's built-in \
   MTP layers. Set speculative_algorithm="NEXTN" and speculative_num_steps=3. No draft model needed. \
-  IMPORTANT: NEXTN on SGLang requires disable_radix_cache (handled automatically). \
-  Do NOT combine NEXTN with enable_prefix_caching=true — set it to false.
+  IMPORTANT FOR NEXTN: The engine auto-handles the following — do NOT set them manually or in extra_engine_args: \
+    * --mamba-scheduler-strategy (auto-set based on radix cache setting) \
+    * --speculative-eagle-topk (auto-set to 1) \
+    * SGLANG_ENABLE_SPEC_V2 env var (auto-set) \
+  Just set speculative_algorithm="NEXTN" and speculative_num_steps=3, and enable_prefix_caching=true. \
+  If NEXTN OOMs: reduce max_model_len or increase mem_fraction_static to 0.85-0.9.
 - For speculative decoding on vLLM: you MUST provide a valid speculative_draft_model path \
   (a real HuggingFace model ID). If you don't have a draft model, do NOT set speculative_algorithm.
 - For the FIRST few experiments, do NOT use speculative decoding — get baselines first.
@@ -88,7 +96,9 @@ benefits from prefix caching.
   you have enough VRAM — it WILL OOM. NEVER set it to null — always set an explicit value.
 - If a previous experiment FAILED (status="failed"), read the error carefully. Common fixes: \
   halve max_model_len, reduce gpu_memory_utilization/mem_fraction_static, remove kv_cache_dtype=fp8 \
-  (not all models support it), try the other engine. Do NOT repeat the same config that failed.
+  (not all models support it), try the OTHER engine. Do NOT repeat the same config that failed.
+- extra_engine_args: Use ONLY for engine flags that have no dedicated field in this schema. \
+  Do NOT use it for flags the engine manages automatically (speculative params for NEXTN, etc.).
 {user_instructions}
 Generate the next experiment configuration.
 """
