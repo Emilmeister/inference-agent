@@ -16,6 +16,7 @@ _NEXTN_AUTO_FLAGS = {
     "--speculative-algo",
     "--speculative-eagle-topk",
     "--speculative-num-draft-tokens",
+    "--speculative-num-steps",
 }
 
 
@@ -73,10 +74,18 @@ class SGLangEngine(BaseEngine):
         if experiment.dp_size and experiment.dp_size > 1:
             serve_args.extend(["--dp-size", str(experiment.dp_size)])
 
-        if experiment.mem_fraction_static is not None:
+        mem_frac = experiment.mem_fraction_static
+        # NEXTN speculative decoding needs extra memory for draft buffers
+        if is_nextn and mem_frac is not None and mem_frac < 0.9:
+            logger.info(
+                "NEXTN: bumping mem_fraction_static from %.2f to 0.90",
+                mem_frac,
+            )
+            mem_frac = 0.9
+        if mem_frac is not None:
             serve_args.extend([
                 "--mem-fraction-static",
-                str(experiment.mem_fraction_static),
+                str(mem_frac),
             ])
 
         if experiment.max_model_len is not None:

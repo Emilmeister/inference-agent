@@ -111,20 +111,16 @@ def _check_plateau(
     window: int,
     threshold: float,
 ) -> bool:
-    """Check if the last `window` experiments showed no improvement on any goal."""
-    if len(history) < window:
+    """Check if the last `window` SUCCESSFUL experiments showed no improvement."""
+    # Only count successful experiments (failed ones don't tell us about perf)
+    successful = [
+        h for h in history
+        if h.peak_throughput > 0 or h.low_concurrency_ttft_p95 > 0
+    ]
+    if len(successful) < window:
         return False
 
-    # Don't declare plateau if we have no successful experiments yet —
-    # keep trying until at least one experiment produces real metrics
-    has_any_success = any(
-        h.peak_throughput > 0 or h.low_concurrency_ttft_p95 > 0
-        for h in history
-    )
-    if not has_any_success:
-        return False
-
-    recent = history[-window:]
+    recent = successful[-window:]
 
     # Check throughput improvement
     throughput_improved = any(
