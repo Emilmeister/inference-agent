@@ -126,11 +126,13 @@ async def _send_request(
                         choices = data.get("choices", [])
                         if choices:
                             delta = choices[0].get("delta", {})
-                            content = delta.get("content")
-                            reasoning = delta.get("reasoning_content")
-                            has_token = (
-                                (isinstance(content, str) and len(content) > 0)
-                                or (isinstance(reasoning, str) and len(reasoning) > 0)
+                            # Check all text fields in delta for token content
+                            # (different engines use different field names:
+                            #  content, reasoning_content, reasoning, etc.)
+                            has_token = any(
+                                isinstance(v, str) and len(v) > 0
+                                for k, v in delta.items()
+                                if k not in ("role", "tool_calls", "function_call", "refusal")
                             )
                             if has_token:
                                 token_count += 1
@@ -158,11 +160,6 @@ async def _send_request(
 
     # Fallback: if manual token counting got 0, use usage-reported count
     if token_count == 0 and usage_completion_tokens > 0:
-        logger.warning(
-            "SSE token counting=0 but usage reports %d tokens "
-            "(%d SSE events parsed). Using usage count.",
-            usage_completion_tokens, sse_events_parsed,
-        )
         token_count = usage_completion_tokens
 
     result["output_tokens"] = token_count
