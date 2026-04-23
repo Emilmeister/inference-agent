@@ -58,7 +58,6 @@ async def _send_request(
     prompt: str,
     max_tokens: int,
     model: str,
-    _debug_first: bool = False,
 ) -> dict:
     """Send a single chat completion request and measure timing."""
     payload = {
@@ -117,19 +116,6 @@ async def _send_request(
                         data = json.loads(data_str)
                         sse_events_parsed += 1
 
-                        # Log first few events for debugging
-                        if _debug_first and sse_events_parsed <= 3:
-                            choices = data.get("choices", [])
-                            delta = choices[0].get("delta", {}) if choices else {}
-                            logger.info(
-                                "  SSE event #%d: delta keys=%s, "
-                                "content=%r, reasoning=%r",
-                                sse_events_parsed,
-                                list(delta.keys()),
-                                delta.get("content"),
-                                delta.get("reasoning_content"),
-                            )
-
                         # Capture usage (usually in the last event)
                         usage = data.get("usage")
                         if usage and isinstance(usage, dict):
@@ -155,12 +141,8 @@ async def _send_request(
                                         (now - last_token_time) * 1000
                                     )
                                 last_token_time = now
-                    except json.JSONDecodeError as e:
-                        if _debug_first and sse_events_parsed == 0:
-                            logger.warning(
-                                "  SSE JSON parse error: %s, raw: %s",
-                                e, data_str[:200],
-                            )
+                    except json.JSONDecodeError:
+                        pass
                     except (KeyError, IndexError):
                         pass
 
@@ -215,20 +197,13 @@ async def run_benchmark_phase(
     start_time = time.perf_counter()
     active_tasks: set[asyncio.Task] = set()
 
-    first_request_done = False
-
     connector = aiohttp.TCPConnector(limit=concurrency + 10)
     async with aiohttp.ClientSession(connector=connector) as session:
 
         async def _worker():
-            nonlocal first_request_done
             while time.perf_counter() - start_time < duration_sec:
-                # Log SSE debug info for the very first request of each phase
-                debug = not first_request_done
-                first_request_done = True
                 res = await _send_request(
                     session, url, prompt, max_output_tokens, model_name,
-                    _debug_first=debug,
                 )
                 all_results.append(res)
 
