@@ -2,7 +2,7 @@
 
 import pytest
 
-from inference_agent.utils.codex import _extract_json
+from inference_agent.utils.codex import _extract_json, _find_after_banner
 
 
 class TestExtractJson:
@@ -41,6 +41,65 @@ class TestExtractJson:
     def test_empty_string_raises(self):
         with pytest.raises(ValueError):
             _extract_json("")
+
+    def test_empty_string_extracts_nothing(self):
+        with pytest.raises(ValueError):
+            _extract_json("   ")
+
+
+class TestFindAfterBanner:
+    def test_no_banner(self):
+        assert _find_after_banner("just an error message") == 0
+
+    def test_single_separator(self):
+        stderr = "OpenAI Codex v0.124.0\n--------\nsome content"
+        assert _find_after_banner(stderr) == 0
+
+    def test_full_banner_with_error(self):
+        stderr = (
+            "OpenAI Codex v0.124.0 (research preview)\n"
+            "--------\n"
+            "workdir: /home/user1/project\n"
+            "model: gpt-5.4\n"
+            "provider: openai\n"
+            "session id: abc-123\n"
+            "--------\n"
+            "user\n"
+            "Some prompt text here...\n"
+            "\n"
+            "Error: API request failed with status 401\n"
+        )
+        pos = _find_after_banner(stderr)
+        remaining = stderr[pos:]
+        assert "Error: API request failed" in remaining
+
+    def test_banner_no_error_marker(self):
+        stderr = (
+            "OpenAI Codex v0.124.0\n"
+            "--------\n"
+            "workdir: /tmp\n"
+            "--------\n"
+            "user\n"
+            "prompt content only\n"
+        )
+        pos = _find_after_banner(stderr)
+        # Returns position after second --------
+        assert pos > 0
+        assert "user" in stderr[pos:]
+
+    def test_error_marker_denied(self):
+        stderr = (
+            "OpenAI Codex v0.124.0\n"
+            "--------\n"
+            "info: stuff\n"
+            "--------\n"
+            "user\n"
+            "long prompt...\n"
+            "permission denied: /tmp/result.json\n"
+        )
+        pos = _find_after_banner(stderr)
+        remaining = stderr[pos:]
+        assert "denied" in remaining
 
     def test_complex_codex_output(self):
         """Simulate codex wrapping JSON in explanation text."""

@@ -81,27 +81,40 @@ async def codex_structured_output(
         stderr_text = stderr.decode("utf-8", errors="replace")
 
         if proc.returncode != 0:
-            # Log detailed diagnostics
+            # Split stderr into banner and actual error content.
+            # Codex prints a banner (workdir, model, sandbox, session id, etc.)
+            # followed by "--------" then the prompt echo, then the real error.
+            # We want to find the error AFTER the banner.
+            banner_end = _find_after_banner(stderr_text)
+            error_body = stderr_text[banner_end:].strip()
+
             logger.error(
                 "codex exec failed (rc=%d) for %s",
                 proc.returncode,
                 output_model.__name__,
             )
-            logger.error("codex stderr (first 500 chars): %s", stderr_text[:500])
-            logger.error("codex stdout (first 500 chars): %s", stdout_text[:500])
+            if error_body:
+                logger.error("codex error: %s", error_body[:2000])
+            else:
+                logger.error("codex stderr (no error body found): %s", stderr_text[-1000:])
+            if stdout_text.strip():
+                logger.error("codex stdout: %s", stdout_text[:500])
 
-            # Check for common failure patterns
-            if "api key" in stderr_text.lower() or "authentication" in stderr_text.lower():
-                logger.error("Possible API key issue — check OPENAI_API_KEY or codex auth")
-            if "rate limit" in stderr_text.lower():
-                logger.error("Rate limited — consider adding retry/backoff")
-            if "sandbox" in stderr_text.lower():
-                logger.error("Sandbox restriction — check codex permissions")
+            # Check for common failure patterns in error body (not banner)
+            check_text = (error_body or stderr_text).lower()
+            if "api key" in check_text or "authentication" in check_text or "unauthorized" in check_text:
+                logger.error("HINT: API key issue — check OPENAI_API_KEY or `codex auth`")
+            if "rate limit" in check_text or "429" in check_text:
+                logger.error("HINT: Rate limited — consider retry/backoff")
+            if "could not write" in check_text or "permission denied" in check_text:
+                logger.error("HINT: File write permission issue — check sandbox/tmpdir")
+            if "output-schema" in check_text or "schema" in check_text:
+                logger.error("HINT: Schema-related error — check output schema compatibility")
 
-            # Raise with concise error (first line of stderr)
-            first_line = stderr_text.strip().split("\n")[0][:300] if stderr_text.strip() else "no stderr"
+            # Raise with the actual error, not the banner
+            error_summary = error_body[:300] if error_body else stderr_text.strip().split("\n")[-1][:300]
             raise RuntimeError(
-                f"codex exec failed (rc={proc.returncode}): {first_line}"
+                f"codex exec failed (rc={proc.returncode}): {error_summary}"
             )
 
         # Read result
@@ -120,6 +133,51 @@ async def codex_structured_output(
 
         logger.info("Codex result parsed successfully for %s", output_model.__name__)
         return output_model.model_validate(result_data)
+
+
+def _find_after_banner(stderr: str) -> int:
+    """Find the position in stderr after the codex banner.
+
+    Codex stderr starts with a banner like:
+        OpenAI Codex v0.124.0 (research preview)
+        --------
+        workdir: ...
+        model: ...
+        ...
+        session id: ...
+        --------
+        user
+        <prompt echo>
+
+    We want to skip past all of this to find the actual error message.
+    The banner has two "--------" separators. After the second one comes
+    the role ("user"/"assistant") and the prompt echo, then the error.
+    """
+    # Find the second "--------" separator
+    first = stderr.find("--------")
+    if first == -1:
+        return 0
+    second = stderr.find("--------", first + 8)
+    if second == -1:
+        return 0
+
+    # After the second separator, skip the prompt echo.
+    # Look for the next line that looks like an error, not prompt content.
+    # The prompt is usually very long; find end of stderr content after it.
+    rest = stderr[second + 8:]
+
+    # The prompt echo is the largest chunk. If there's content after it,
+    # it's typically on the last few lines. Return position of last 20%
+    # of remaining stderr as a heuristic, or look for error patterns.
+    for marker in ("error:", "Error:", "ERROR", "panic:", "Traceback", "failed", "denied"):
+        idx = rest.find(marker)
+        if idx != -1:
+            # Go back to start of line
+            line_start = rest.rfind("\n", 0, idx)
+            return second + 8 + (line_start + 1 if line_start != -1 else idx)
+
+    # No error marker found — return everything after the banner
+    return second + 8
 
 
 def _extract_json(text: str) -> dict:
