@@ -261,6 +261,8 @@ class ExperimentSummary(BaseModel):
     )
     scores: ExperimentScores = Field(default_factory=ExperimentScores)
     llm_commentary: str = ""
+    docker_command: str = ""
+    rationale: str = ""
 
     @classmethod
     def from_result(cls, result: ExperimentResult) -> ExperimentSummary:
@@ -304,10 +306,12 @@ class ExperimentSummary(BaseModel):
             low_concurrency_ttft_p95=result.benchmark.low_concurrency_ttft_p95_ms,
             low_concurrency_tpot_p95=result.benchmark.low_concurrency_tpot_p95_ms,
             smoke_tests_passed=smoke_passed,
-            error=result.error[:500] if result.error else None,
+            error=result.error if result.error else None,
             optimization_classification=result.optimization_classification,
             scores=result.scores,
             llm_commentary=result.llm_commentary,
+            docker_command=result.docker_command,
+            rationale=result.config.rationale,
         )
 
 

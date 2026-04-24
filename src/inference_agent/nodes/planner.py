@@ -197,6 +197,8 @@ async def planner_node(state: AgentState) -> dict:
             "engine": h.engine.value,
             "status": h.status.value,
             "config": h.config_digest,
+            "docker_command": h.docker_command,
+            "rationale": h.rationale,
             "peak_throughput": h.peak_throughput,
             "ttft_p95": h.low_concurrency_ttft_p95,
             "tpot_p95": h.low_concurrency_tpot_p95,
@@ -206,6 +208,9 @@ async def planner_node(state: AgentState) -> dict:
         # Include error details for failed experiments so LLM can learn from failures
         if h.error:
             entry["error"] = h.error
+        # Include LLM commentary from analyzer for context
+        if h.llm_commentary:
+            entry["analysis"] = h.llm_commentary
         history_for_llm.append(entry)
 
     # Determine if we need to force a specific engine (alternation rule)

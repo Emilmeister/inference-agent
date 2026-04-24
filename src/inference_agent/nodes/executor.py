@@ -69,10 +69,11 @@ async def executor_node(state: AgentState) -> dict:
     await stop_container(container_name)
 
     # 2. Build and run Docker container
+    docker_args = engine.build_docker_args(experiment)
+    docker_command = " ".join(docker_args)
+    logger.info("Docker command: %s", docker_command)
+
     try:
-        docker_args = engine.build_docker_args(experiment)
-        docker_command = " ".join(docker_args)
-        logger.info("Docker command: %s", docker_command)
         container_id = await run_container(docker_args, timeout=60)
         logger.info("Container started: %s", container_id[:12])
     except RuntimeError as e:
@@ -86,7 +87,8 @@ async def executor_node(state: AgentState) -> dict:
                 hardware=hardware,
                 config=experiment,
                 status=ExperimentStatus.FAILED,
-                error=f"Container start failed: {e}\nLogs: {logs[:1000]}",
+                error=f"Container start failed: {e}\nLogs: {logs[:5000]}",
+                docker_command=docker_command,
                 duration_seconds=time.time() - start_time,
             )
         }
@@ -108,7 +110,8 @@ async def executor_node(state: AgentState) -> dict:
                 hardware=hardware,
                 config=experiment,
                 status=ExperimentStatus.FAILED,
-                error=f"Health check timed out\nLogs: {logs[:1000]}",
+                error=f"Health check timed out\nLogs: {logs[:5000]}",
+                docker_command=docker_command,
                 duration_seconds=time.time() - start_time,
             )
         }
