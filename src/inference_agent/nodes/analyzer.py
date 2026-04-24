@@ -330,7 +330,7 @@ async def analyzer_node(state: AgentState) -> dict:
 
     logger.info(
         "Analysis: %s | classification=%s | decision=%s | next_goal=%s",
-        commentary[:100],
+        commentary,
         classification.value,
         decision,
         next_goal.value,

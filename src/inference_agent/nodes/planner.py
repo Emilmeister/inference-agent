@@ -152,12 +152,24 @@ def _get_forced_engine(
         return None
     last_engines = [h.engine for h in history[-2:]]
     if len(set(last_engines)) == 1:
-        # Last 2 were the same engine — force the other one
         current = last_engines[0]
         other = [e for e in available if e != current]
         if other:
             return other[0]
     return None
+
+
+def _should_disable_speculative(
+    history: list[ExperimentSummary],
+    engine: EngineType,
+    threshold: int = 3,
+) -> bool:
+    """Disable speculative decoding if last N experiments with this engine all failed."""
+    engine_history = [h for h in history if h.engine == engine]
+    if len(engine_history) < threshold:
+        return False
+    recent = engine_history[-threshold:]
+    return all(h.status.value == "failed" for h in recent)
 
 
 async def planner_node(state: AgentState) -> dict:
@@ -200,6 +212,16 @@ async def planner_node(state: AgentState) -> dict:
     forced_engine = _get_forced_engine(history, hardware.available_engines)
     if forced_engine:
         logger.info("Forcing engine=%s (alternation rule)", forced_engine.value)
+
+    # Check if speculative decoding should be disabled for each engine
+    spec_disabled: dict[EngineType, bool] = {}
+    for eng in hardware.available_engines:
+        spec_disabled[eng] = _should_disable_speculative(history, eng)
+        if spec_disabled[eng]:
+            logger.info(
+                "Auto-disabling speculative decoding for %s (last 3 experiments failed)",
+                eng.value,
+            )
 
     # Build engine-specific prompt section
     if forced_engine == EngineType.VLLM:
@@ -257,6 +279,16 @@ async def planner_node(state: AgentState) -> dict:
         result.engine = forced_engine.value
 
     # Convert PlannerOutput to ExperimentConfig with validation
+    resolved_engine = EngineType.VLLM if "vllm" in result.engine.lower() else EngineType.SGLANG
+    if spec_disabled.get(resolved_engine, False):
+        if result.speculative_algorithm:
+            logger.info(
+                "Stripping speculative_algorithm=%s (auto-disabled for %s)",
+                result.speculative_algorithm, resolved_engine.value,
+            )
+            result.speculative_algorithm = None
+            result.speculative_draft_model = None
+            result.speculative_num_steps = None
     experiment = _build_experiment_config(result, hardware, config)
 
     logger.info(
@@ -265,7 +297,7 @@ async def planner_node(state: AgentState) -> dict:
         experiment.tensor_parallel_size,
         experiment.max_model_len,
         experiment.quantization or "none",
-        experiment.rationale[:120],
+        experiment.rationale,
     )
 
     return {"current_config": experiment}
@@ -303,6 +335,14 @@ def _build_experiment_config(
     elif engine == EngineType.SGLANG and scheduling_policy not in ("fcfs", "lpm"):
         scheduling_policy = "fcfs"
 
+    # Strip cross-engine env vars
+    extra_env = dict(output.extra_env)
+    if engine == EngineType.VLLM:
+        # Remove SGLang-specific env vars
+        for k in list(extra_env.keys()):
+            if k.startswith("SGLANG"):
+                extra_env.pop(k)
+
     return ExperimentConfig(
         engine=engine,
         tensor_parallel_size=tp,
@@ -329,6 +369,6 @@ def _build_experiment_config(
         num_continuous_decode_steps=output.num_continuous_decode_steps,
         dp_size=output.dp_size,
         extra_engine_args=output.extra_engine_args,
-        extra_env=output.extra_env,
+        extra_env=extra_env,
         rationale=output.rationale,
     )

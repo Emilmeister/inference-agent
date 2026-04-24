@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import time
 
 import aiohttp
@@ -32,39 +33,67 @@ def _compute_percentiles(values: list[float]) -> PercentileStats:
     )
 
 
-def _generate_prompt(length_tokens: int) -> str:
-    """Generate a synthetic prompt of approximately `length_tokens` tokens.
+_WORD_POOL = [
+    "The", "system", "processes", "data", "through", "multiple", "layers",
+    "of", "transformation", "and", "analysis", "to", "produce", "accurate",
+    "results", "that", "can", "be", "used", "for", "decision", "making",
+    "in", "complex", "environments", "where", "performance", "matters",
+    "a", "model", "generates", "tokens", "using", "attention", "mechanism",
+    "the", "input", "sequence", "is", "encoded", "into", "hidden", "states",
+    "each", "layer", "applies", "normalization", "before", "computing",
+    "output", "logits", "are", "projected", "from", "final", "representation",
+    "batch", "size", "affects", "throughput", "while", "context", "length",
+    "determines", "memory", "requirements", "on", "GPU", "hardware",
+    "optimization", "techniques", "include", "quantization", "pruning",
+    "speculative", "decoding", "prefix", "caching", "continuous", "batching",
+    "server", "handles", "concurrent", "requests", "with", "scheduling",
+    "policy", "controls", "request", "priority", "queue", "management",
+]
 
-    Rough heuristic: ~4 chars per token for English text.
+_TASK_PREFIXES = [
+    "Please analyze the following text and provide a detailed summary:\n\n",
+    "Read the text below carefully and explain the key points:\n\n",
+    "Summarize the main ideas from this passage:\n\n",
+    "What are the important concepts described in this text?\n\n",
+    "Provide a comprehensive analysis of the following:\n\n",
+    "Extract and explain the core arguments from this text:\n\n",
+    "Review the following content and highlight the main themes:\n\n",
+    "Describe what this text is about in detail:\n\n",
+]
+
+
+def _generate_prompt(length_tokens: int) -> str:
+    """Generate a unique synthetic prompt of approximately `length_tokens` tokens.
+
+    Each call produces a different prompt by shuffling the word pool and
+    picking a random task prefix, so prefix caching cannot cheat.
     """
     chars_needed = length_tokens * 4
-    # Generate semi-realistic text by repeating words
-    words = [
-        "The", "system", "processes", "data", "through", "multiple", "layers",
-        "of", "transformation", "and", "analysis", "to", "produce", "accurate",
-        "results", "that", "can", "be", "used", "for", "decision", "making",
-        "in", "complex", "environments", "where", "performance", "matters",
-    ]
-    text_parts = []
+    words = _WORD_POOL.copy()
+    random.shuffle(words)
+    text_parts: list[str] = []
     while len(" ".join(text_parts)) < chars_needed:
+        random.shuffle(words)
         text_parts.extend(words)
     text = " ".join(text_parts)[:chars_needed]
-    return f"Please analyze the following text and provide a detailed summary:\n\n{text}"
+    prefix = random.choice(_TASK_PREFIXES)
+    return f"{prefix}{text}"
 
 
 async def _send_request(
     session: aiohttp.ClientSession,
     url: str,
-    prompt: str,
+    prompt_length: int,
     max_tokens: int,
     model: str,
 ) -> dict:
     """Send a single chat completion request and measure timing."""
+    prompt = _generate_prompt(prompt_length)
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
-        "temperature": 0.1,
+        "temperature": round(random.random(), 2),
         "stream": True,
         "stream_options": {"include_usage": True},
     }
@@ -188,11 +217,9 @@ async def run_benchmark_phase(
 ) -> ConcurrencyResult:
     """Run a single benchmark phase with given concurrency and prompt length."""
     url = f"{api_base_url}/chat/completions"
-    prompt = _generate_prompt(prompt_length)
 
     all_results: list[dict] = []
     start_time = time.perf_counter()
-    active_tasks: set[asyncio.Task] = set()
 
     connector = aiohttp.TCPConnector(limit=concurrency + 10)
     async with aiohttp.ClientSession(connector=connector) as session:
@@ -200,7 +227,7 @@ async def run_benchmark_phase(
         async def _worker():
             while time.perf_counter() - start_time < duration_sec:
                 res = await _send_request(
-                    session, url, prompt, max_output_tokens, model_name,
+                    session, url, prompt_length, max_output_tokens, model_name,
                 )
                 all_results.append(res)
 
