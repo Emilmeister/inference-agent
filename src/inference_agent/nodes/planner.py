@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 import logging
 
-from langchain_openai import ChatOpenAI
-
 from inference_agent.models import (
     EngineType,
     ExperimentConfig,
@@ -16,6 +14,7 @@ from inference_agent.models import (
     PlannerOutput,
 )
 from inference_agent.state import AgentState
+from inference_agent.utils.codex import codex_structured_output
 
 logger = logging.getLogger(__name__)
 
@@ -179,16 +178,6 @@ async def planner_node(state: AgentState) -> dict:
     history = state.get("experiment_history", [])
     goal = state.get("next_optimization_goal", OptimizationGoal.EXPLORE)
 
-    llm = ChatOpenAI(
-        base_url=config.agent_llm.base_url,
-        api_key=config.agent_llm.api_key,
-        model=config.agent_llm.model,
-        temperature=0.3,
-    )
-
-    # Use structured output
-    structured_llm = llm.with_structured_output(PlannerOutput)
-
     # Format history for LLM (last 15 experiments)
     history_for_llm = []
     for h in history[-15:]:
@@ -264,19 +253,18 @@ async def planner_node(state: AgentState) -> dict:
 
     logger.info("Asking LLM to plan experiment #%d...", state.get("experiments_count", 0) + 1)
 
+    full_prompt = prompt + "\n\nGenerate the next experiment configuration."
+
     try:
-        result: PlannerOutput = await structured_llm.ainvoke([
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": "Generate the next experiment configuration."},
-        ])
+        result: PlannerOutput = await codex_structured_output(full_prompt, PlannerOutput)
     except Exception as e:
-        logger.error("Structured output failed, using fallback: %s", e)
+        logger.error("Codex structured output failed, using fallback: %s", e)
         safe_ctx = min(hardware.gpus[0].vram_total_mb // 10 if hardware.gpus else 32768, hardware.model_max_context)
         result = PlannerOutput(
             engine=hardware.available_engines[0].value if hardware.available_engines else "vllm",
             tensor_parallel_size=hardware.gpu_count,
             max_model_len=safe_ctx,
-            rationale=f"Fallback: structured output failed ({e})",
+            rationale=f"Fallback: codex structured output failed ({e})",
         )
 
     # Override engine if alternation rule requires it

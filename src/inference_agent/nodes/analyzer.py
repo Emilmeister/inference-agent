@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 import logging
 
-from langchain_openai import ChatOpenAI
-
 from inference_agent.models import (
     AnalyzerOutput,
     ExperimentResult,
@@ -18,6 +16,7 @@ from inference_agent.models import (
 )
 from inference_agent.nodes.reporter import save_experiment
 from inference_agent.state import AgentState
+from inference_agent.utils.codex import codex_structured_output
 
 logger = logging.getLogger(__name__)
 
@@ -230,14 +229,7 @@ async def analyzer_node(state: AgentState) -> dict:
         hard_stop = True
         stop_reason = f"Plateau: no improvement in last {config.experiments.plateau_window} experiments"
 
-    # Ask LLM for analysis using structured output
-    llm = ChatOpenAI(
-        base_url=config.agent_llm.base_url,
-        api_key=config.agent_llm.api_key,
-        model=config.agent_llm.model,
-        temperature=0.2,
-    )
-    structured_llm = llm.with_structured_output(AnalyzerOutput)
+    # Ask LLM for analysis using codex
 
     # Prepare leaderboard data
     sorted_by_tp = sorted(all_history, key=lambda h: h.peak_throughput, reverse=True)[:5]
@@ -287,15 +279,14 @@ async def analyzer_node(state: AgentState) -> dict:
         plateau_threshold=config.experiments.plateau_threshold * 100,
     )
 
+    full_prompt = prompt + "\n\nAnalyze the latest experiment."
+
     try:
-        analysis: AnalyzerOutput = await structured_llm.ainvoke([
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": "Analyze the latest experiment."},
-        ])
+        analysis: AnalyzerOutput = await codex_structured_output(full_prompt, AnalyzerOutput)
     except Exception as e:
-        logger.warning("Structured output failed for analyzer: %s", e)
+        logger.warning("Codex structured output failed for analyzer: %s", e)
         analysis = AnalyzerOutput(
-            commentary="Analysis unavailable (structured output error)",
+            commentary="Analysis unavailable (codex error)",
             classification="none",
             decision="stop" if hard_stop else "continue",
             next_goal="explore",
