@@ -19,18 +19,17 @@ from inference_agent.state import AgentState
 
 logger = logging.getLogger(__name__)
 
-PLANNER_SYSTEM_PROMPT = """\
+_PROMPT_HEADER = """\
 You are an expert LLM inference optimization engineer. Your job is to choose \
-the next configuration to benchmark for an LLM inference engine (vLLM or SGLang) \
-running on a GPU server.
+the next configuration to benchmark for an LLM inference engine running on a GPU server.
 
 ## Hardware Profile
 {hardware_json}
 
-## Available Engines
-{engines}
+## Engine for This Experiment
+{engine_instruction}
 
-## Optimization Goal for This Experiment
+## Optimization Goal
 {optimization_goal}
 
 ## Previous Experiments (most recent last)
@@ -46,64 +45,119 @@ running on a GPU server.
 {exp_count} / {max_experiments}
 
 ## Rules
-1. CRITICAL: For the FIRST 2 experiments, run BASELINES for BOTH engines: \
-experiment #1 = vLLM baseline (TP=1, default params, no speculative, kv_cache_dtype=auto, scheduling_policy=fcfs), \
-experiment #2 = SGLang baseline (TP=1, default params, no speculative, kv_cache_dtype=auto, scheduling_policy=fcfs). \
-BASELINE means DEFAULT values — do NOT change kv_cache_dtype, quantization, or scheduling_policy for baselines. \
-Experiments #3-5: try small variations (chunked prefill, prefix caching, different max_model_len). \
-Only AFTER baselines, start exploring speculative decoding, quantization, etc.
-2. After baselines, analyze trends and try improvements based on the optimization goal.
+1. For BASELINES: use default params — no quantization, no speculative decoding, \
+kv_cache_dtype=auto, scheduling_policy=fcfs.
+2. After baselines, analyze trends and improve based on the optimization goal.
 3. If goal is "optimize_throughput": focus on batching, DP, quantization, high concurrency.
 4. If goal is "optimize_latency": focus on TP, enforce_eager, lower batch sizes.
 5. If goal is "optimize_balanced": find configs where TTFT p95 < {latency_threshold} ms \
 AND throughput is maximized.
-6. If goal is "explore": try something new — different engine, quantization, speculative decoding.
+6. If goal is "explore": try something new — quantization, speculative decoding, different max_model_len.
 7. Never repeat an exact configuration that was already tested.
-8. max_model_len must not exceed {model_max_context}.
+8. max_model_len must not exceed {model_max_context}. NEVER set it to the full model max unless you \
+have enough VRAM. Use binary search: start safe (32768 for 40GB), double if success, halve if OOM.
 9. tensor_parallel_size must divide evenly into {gpu_count} GPUs.
-10. ALTERNATE between engines: don't run more than 3 experiments in a row with the same engine.
+10. CRITICAL: If a feature (NEXTN, quantization, etc.) consistently gives WORSE results than baseline, \
+STOP using it and move on to other optimizations.
+11. If a previous experiment FAILED, read the error, fix the root cause, do NOT repeat the same config.
+"""
 
-## Best Practices
-- vLLM: chunked prefill + prefix caching works well together for throughput. \
-  vLLM scheduling_policy supports ONLY: "fcfs" or "priority". Do NOT use "lpm" with vLLM.
-- SGLang: radix cache (prefix caching) is ON by default. lpm schedule policy \
-benefits from prefix caching. SGLang scheduling_policy supports: "fcfs" or "lpm".
-- fp8 quantization usually gives ~1.5-2x throughput with minimal quality loss.
+_VLLM_SECTION = """
+## vLLM-Specific Parameters
+You are configuring a **vLLM** experiment. Only use vLLM-relevant parameters:
+- gpu_memory_utilization (float, default 0.9): GPU memory fraction. Higher = more KV cache but OOM risk.
+- max_num_seqs (int): Max concurrent sequences (default 256).
+- max_num_batched_tokens (int): Max batched tokens per iteration.
+- enable_chunked_prefill (bool): Enable chunked prefill for better throughput.
+- enable_prefix_caching (bool): Enable prefix caching.
+- enforce_eager (bool): Disable CUDA graphs — reduces latency for small batches.
+- scheduling_policy: ONLY "fcfs" (default) or "priority". Do NOT use "lpm".
+- speculative_draft_model: Real HuggingFace model ID for speculative decoding. \
+  Do NOT set speculative_algorithm without a valid draft model path.
+
+## vLLM Best Practices
+- Chunked prefill + prefix caching work well together for throughput.
+- enforce_eager=true can reduce latency for small batches but hurts throughput.
 - Higher gpu_memory_utilization (0.95) allows more KV cache but risks OOM.
-- data_parallel_size > 1 is great for throughput when model fits in fewer GPUs.
-- enforce_eager=true in vLLM can reduce latency for small batches.
-- num_continuous_decode_steps > 1 in SGLang reduces scheduling overhead.
-- If is_vlm=true: for vLLM text-only benchmarks, the model may need special handling. \
-  Do NOT set speculative_algorithm for vLLM with VLM models unless you have a valid draft model path.
-- If has_mtp=true: SGLang can use NEXTN speculative decoding with the model's built-in \
-  MTP layers. Set speculative_algorithm="NEXTN" and speculative_num_steps=3. No draft model needed. \
-  IMPORTANT FOR NEXTN: The engine auto-handles the following — do NOT set them manually or in extra_engine_args: \
-    * --mamba-scheduler-strategy (auto-set based on radix cache setting) \
-    * --speculative-eagle-topk (auto-set to 1) \
-    * SGLANG_ENABLE_SPEC_V2 env var (auto-set) \
-  Just set speculative_algorithm="NEXTN" and speculative_num_steps=3, and enable_prefix_caching=true. \
-  If NEXTN OOMs: reduce max_model_len or increase mem_fraction_static to 0.85-0.9.
-- For speculative decoding on vLLM: you MUST provide a valid speculative_draft_model path \
-  (a real HuggingFace model ID). If you don't have a draft model, do NOT set speculative_algorithm.
-- For the FIRST few experiments, do NOT use speculative decoding — get baselines first.
-- IMPORTANT — max_model_len strategy: \
-  max_model_len is a KEY parameter to benchmark. It controls how much KV cache is allocated \
-  and directly affects throughput, latency, and max concurrent requests. \
-  Use binary-search logic: start with a moderate value that fits in VRAM, then explore up/down. \
-  Rough heuristic: each GPU can hold ~2K-4K context per GB of VRAM for a typical 7-10B model \
-  (bf16). So 40GB ≈ 80K-160K max, but with model weights loaded it's less. \
-  For the FIRST experiment, start with a safe value (e.g. 32768 for 40GB, 8192 for 24GB). \
-  If it succeeds, try doubling. If it OOMs, halve. \
-  NEVER set max_model_len to the model's full max_position_embeddings (e.g. 262144) unless \
-  you have enough VRAM — it WILL OOM. NEVER set it to null — always set an explicit value.
-- If a previous experiment FAILED (status="failed"), read the error carefully. Common fixes: \
-  halve max_model_len, reduce gpu_memory_utilization/mem_fraction_static, remove kv_cache_dtype=fp8 \
-  (not all models support it), try the OTHER engine. Do NOT repeat the same config that failed.
-- extra_engine_args: Use ONLY for engine flags that have no dedicated field in this schema. \
-  Do NOT use it for flags the engine manages automatically (speculative params for NEXTN, etc.).
+- fp8 quantization usually gives ~1.5-2x throughput with minimal quality loss.
+
+Leave SGLang-specific fields at defaults: mem_fraction_static=null, \
+max_running_requests=null, max_prefill_tokens=null, chunked_prefill_size=null, \
+num_continuous_decode_steps=1, dp_size=null.
+"""
+
+_SGLANG_SECTION = """
+## SGLang-Specific Parameters
+You are configuring an **SGLang** experiment. Only use SGLang-relevant parameters:
+- mem_fraction_static (float): Static memory fraction (default ~0.8). \
+  For NEXTN, engine auto-bumps to 0.9.
+- max_running_requests (int): Max running requests.
+- max_prefill_tokens (int): Max prefill tokens per batch.
+- scheduling_policy: "fcfs" (default) or "lpm". lpm benefits from prefix caching.
+- chunked_prefill_size (int): Chunked prefill token size. Set to enable chunked prefill.
+- enable_prefix_caching (bool): Maps to radix cache (ON by default in SGLang). \
+  Set to false only if needed.
+- num_continuous_decode_steps (int): Reduce scheduling overhead (default 1, try 2-4).
+- dp_size (int): Data parallelism.
+- speculative_algorithm: Set to "NEXTN" for MTP speculative decoding (if has_mtp=true). \
+  Engine auto-handles mamba-scheduler-strategy, speculative-eagle-topk, env vars — \
+  do NOT set them manually. Try SGLang WITHOUT NEXTN first to get a baseline, \
+  then compare WITH NEXTN. If NEXTN is slower, STOP using it.
+- speculative_num_steps (int): Steps for speculative decoding (3 for NEXTN).
+
+## SGLang Best Practices
+- Radix cache (prefix caching) ON by default — lpm scheduling benefits from it.
+- num_continuous_decode_steps > 1 reduces scheduling overhead.
+- NEXTN is OPTIONAL: compare with and without. If slower, abandon it.
+- fp8 quantization usually gives ~1.5-2x throughput with minimal quality loss.
+
+Leave vLLM-specific fields at defaults: gpu_memory_utilization=0.9, \
+max_num_seqs=null, max_num_batched_tokens=null, enforce_eager=false.
+"""
+
+_BOTH_ENGINES_SECTION = """
+## Available Engines: vLLM and SGLang
+Choose ONE engine and set only its relevant parameters.
+
+### vLLM parameters
+- gpu_memory_utilization, max_num_seqs, max_num_batched_tokens, \
+enable_chunked_prefill, enable_prefix_caching, enforce_eager
+- scheduling_policy: ONLY "fcfs" or "priority"
+- speculative_draft_model: needs a real HuggingFace model path
+
+### SGLang parameters
+- mem_fraction_static, max_running_requests, max_prefill_tokens, chunked_prefill_size, \
+num_continuous_decode_steps, dp_size, enable_prefix_caching (radix cache)
+- scheduling_policy: "fcfs" or "lpm"
+- speculative_algorithm: "NEXTN" for MTP (optional, try without first)
+
+Set ONLY the parameters for your chosen engine. Leave the other engine's fields at defaults.
+"""
+
+_PROMPT_FOOTER = """
+## extra_engine_args
+Use ONLY for engine CLI flags that have no dedicated field in this schema. \
+Do NOT duplicate flags the engine manages automatically.
 {user_instructions}
 Generate the next experiment configuration.
 """
+
+
+def _get_forced_engine(
+    history: list[ExperimentSummary],
+    available: list[EngineType],
+) -> EngineType | None:
+    """Force engine switch if last 2 experiments used the same engine."""
+    if len(available) < 2 or len(history) < 2:
+        return None
+    last_engines = [h.engine for h in history[-2:]]
+    if len(set(last_engines)) == 1:
+        # Last 2 were the same engine — force the other one
+        current = last_engines[0]
+        other = [e for e in available if e != current]
+        if other:
+            return other[0]
+    return None
 
 
 async def planner_node(state: AgentState) -> dict:
@@ -142,14 +196,29 @@ async def planner_node(state: AgentState) -> dict:
             entry["error"] = h.error
         history_for_llm.append(entry)
 
-    # Add user instructions section if provided
+    # Determine if we need to force a specific engine (alternation rule)
+    forced_engine = _get_forced_engine(history, hardware.available_engines)
+    if forced_engine:
+        logger.info("Forcing engine=%s (alternation rule)", forced_engine.value)
+
+    # Build engine-specific prompt section
+    if forced_engine == EngineType.VLLM:
+        engine_section = _VLLM_SECTION
+        engine_instruction = "You MUST use **vLLM** for this experiment."
+    elif forced_engine == EngineType.SGLANG:
+        engine_section = _SGLANG_SECTION
+        engine_instruction = "You MUST use **SGLang** for this experiment."
+    else:
+        engine_section = _BOTH_ENGINES_SECTION
+        engine_instruction = f"Choose from: {', '.join(e.value for e in hardware.available_engines)}"
+
     user_instructions = ""
     if config.planner_instructions:
         user_instructions = f"\n## User Instructions\n{config.planner_instructions}\n"
 
-    prompt = PLANNER_SYSTEM_PROMPT.format(
+    prompt = _PROMPT_HEADER.format(
         hardware_json=hardware.model_dump_json(indent=2),
-        engines=", ".join(e.value for e in hardware.available_engines),
+        engine_instruction=engine_instruction,
         optimization_goal=goal.value,
         history_json=json.dumps(history_for_llm, indent=2) if history_for_llm else "No experiments yet.",
         best_throughput=state.get("best_throughput", 0),
@@ -164,8 +233,7 @@ async def planner_node(state: AgentState) -> dict:
         latency_threshold=config.benchmark.latency_threshold_ms,
         model_max_context=hardware.model_max_context,
         gpu_count=hardware.gpu_count,
-        user_instructions=user_instructions,
-    )
+    ) + engine_section + _PROMPT_FOOTER.format(user_instructions=user_instructions)
 
     logger.info("Asking LLM to plan experiment #%d...", state.get("experiments_count", 0) + 1)
 
@@ -176,7 +244,6 @@ async def planner_node(state: AgentState) -> dict:
         ])
     except Exception as e:
         logger.error("Structured output failed, using fallback: %s", e)
-        # Safe fallback: ~4K context per GB of VRAM per GPU
         safe_ctx = min(hardware.gpus[0].vram_total_mb // 10 if hardware.gpus else 32768, hardware.model_max_context)
         result = PlannerOutput(
             engine=hardware.available_engines[0].value if hardware.available_engines else "vllm",
@@ -184,6 +251,10 @@ async def planner_node(state: AgentState) -> dict:
             max_model_len=safe_ctx,
             rationale=f"Fallback: structured output failed ({e})",
         )
+
+    # Override engine if alternation rule requires it
+    if forced_engine:
+        result.engine = forced_engine.value
 
     # Convert PlannerOutput to ExperimentConfig with validation
     experiment = _build_experiment_config(result, hardware, config)
