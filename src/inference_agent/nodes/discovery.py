@@ -97,10 +97,13 @@ def _detect_available_engines() -> list[EngineType]:
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
 
-    # If no images found locally, assume both are pullable
     if not engines:
-        logger.info("No engine images found locally, assuming both are available")
-        engines = [EngineType.VLLM, EngineType.SGLANG]
+        logger.warning(
+            "No engine Docker images found locally. "
+            "Pull at least one image before running: "
+            "'docker pull vllm/vllm-openai:latest' or "
+            "'docker pull lmsysorg/sglang:latest'"
+        )
 
     return engines
 
@@ -144,7 +147,14 @@ async def discovery_node(state: AgentState) -> dict:
         text_config.get("max_position_embeddings", 0),
     )
     if max_context == 0:
-        max_context = 4096  # absolute fallback
+        max_context = 4096
+        logger.warning(
+            "Could not determine max context length from model config for '%s'. "
+            "Falling back to %d — this may be incorrect. "
+            "Check model config.json on HuggingFace.",
+            config.model_name,
+            max_context,
+        )
 
     # Check rope_scaling in both places
     rope_scaling = model_config.get("rope_scaling") or text_config.get("rope_scaling")
@@ -172,6 +182,16 @@ async def discovery_node(state: AgentState) -> dict:
 
     # Filter engines to only those requested in config
     available = [e for e in engines if e in config.experiments.engines]
+
+    if not available:
+        requested = [e.value for e in config.experiments.engines]
+        found = [e.value for e in engines]
+        raise RuntimeError(
+            f"No usable engine images found. "
+            f"Requested engines: {requested}. "
+            f"Images found locally: {found or 'none'}. "
+            f"Pull the required Docker images first."
+        )
 
     hardware = HardwareProfile(
         gpus=gpus,

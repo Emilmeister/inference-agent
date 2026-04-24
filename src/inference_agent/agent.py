@@ -11,6 +11,7 @@ from inference_agent.nodes.discovery import discovery_node
 from inference_agent.nodes.executor import executor_node
 from inference_agent.nodes.planner import planner_node
 from inference_agent.nodes.reporter import reporter_node
+from inference_agent.nodes.validator import validator_node
 from inference_agent.state import AgentState
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,13 @@ def _should_continue(state: AgentState) -> str:
     return "continue"
 
 
+def _after_validator(state: AgentState) -> str:
+    """Route after validation: run executor or skip to analyzer."""
+    if state.get("skip_executor"):
+        return "skip"
+    return "run"
+
+
 def build_graph() -> StateGraph:
     """Build the LangGraph agent graph."""
     graph = StateGraph(AgentState)
@@ -32,6 +40,7 @@ def build_graph() -> StateGraph:
     # Add nodes
     graph.add_node("discovery", discovery_node)
     graph.add_node("planner", planner_node)
+    graph.add_node("validator", validator_node)
     graph.add_node("executor", executor_node)
     graph.add_node("reporter", reporter_node)
     graph.add_node("analyzer", analyzer_node)
@@ -40,10 +49,21 @@ def build_graph() -> StateGraph:
     graph.set_entry_point("discovery")
 
     # Define edges
-    # Reporter must run AFTER analyzer so that LLM commentary,
-    # scores, and Pareto classification are included in the JSON file.
+    # Flow: discovery → planner → validator → executor → analyzer → reporter → loop
+    # If validation fails, skip executor and go directly to analyzer.
     graph.add_edge("discovery", "planner")
-    graph.add_edge("planner", "executor")
+    graph.add_edge("planner", "validator")
+
+    # Conditional: validator → executor (pass) or → analyzer (fail)
+    graph.add_conditional_edges(
+        "validator",
+        _after_validator,
+        {
+            "run": "executor",
+            "skip": "analyzer",
+        },
+    )
+
     graph.add_edge("executor", "analyzer")
     graph.add_edge("analyzer", "reporter")
 

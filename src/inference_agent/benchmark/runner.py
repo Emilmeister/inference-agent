@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import random
 import time
 
@@ -15,6 +16,20 @@ from inference_agent.models import ConcurrencyResult, PercentileStats
 logger = logging.getLogger(__name__)
 
 
+def _percentile(sorted_values: list[float], p: float) -> float:
+    """Compute percentile with linear interpolation (numpy-compatible)."""
+    n = len(sorted_values)
+    if n == 0:
+        return 0.0
+    if n == 1:
+        return sorted_values[0]
+    k = (n - 1) * p
+    f = int(math.floor(k))
+    c = min(f + 1, n - 1)
+    d = k - f
+    return sorted_values[f] + d * (sorted_values[c] - sorted_values[f])
+
+
 def _compute_percentiles(values: list[float]) -> PercentileStats:
     """Compute percentile statistics from a list of values."""
     if not values:
@@ -23,11 +38,11 @@ def _compute_percentiles(values: list[float]) -> PercentileStats:
     n = len(s)
     return PercentileStats(
         mean=sum(s) / n,
-        median=s[n // 2],
-        p75=s[int(n * 0.75)],
-        p90=s[int(n * 0.90)],
-        p95=s[int(n * 0.95)],
-        p99=s[int(n * 0.99)],
+        median=_percentile(s, 0.50),
+        p75=_percentile(s, 0.75),
+        p90=_percentile(s, 0.90),
+        p95=_percentile(s, 0.95),
+        p99=_percentile(s, 0.99),
         min=s[0],
         max=s[-1],
     )
@@ -62,21 +77,21 @@ _TASK_PREFIXES = [
 ]
 
 
-def _generate_prompt(length_tokens: int) -> str:
+def _generate_prompt(length_tokens: int, rng: random.Random) -> str:
     """Generate a unique synthetic prompt of approximately `length_tokens` tokens.
 
-    Each call produces a different prompt by shuffling the word pool and
-    picking a random task prefix, so prefix caching cannot cheat.
+    Uses the provided RNG for reproducibility. Each call produces a different
+    prompt by shuffling the word pool and picking a random task prefix.
     """
     chars_needed = length_tokens * 4
     words = _WORD_POOL.copy()
-    random.shuffle(words)
+    rng.shuffle(words)
     text_parts: list[str] = []
     while len(" ".join(text_parts)) < chars_needed:
-        random.shuffle(words)
+        rng.shuffle(words)
         text_parts.extend(words)
     text = " ".join(text_parts)[:chars_needed]
-    prefix = random.choice(_TASK_PREFIXES)
+    prefix = rng.choice(_TASK_PREFIXES)
     return f"{prefix}{text}"
 
 
@@ -86,14 +101,15 @@ async def _send_request(
     prompt_length: int,
     max_tokens: int,
     model: str,
+    rng: random.Random,
 ) -> dict:
     """Send a single chat completion request and measure timing."""
-    prompt = _generate_prompt(prompt_length)
+    prompt = _generate_prompt(prompt_length, rng)
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
-        "temperature": round(random.random(), 2),
+        "temperature": round(rng.random(), 2),
         "stream": True,
         "stream_options": {"include_usage": True},
     }
@@ -106,6 +122,7 @@ async def _send_request(
         "output_tokens": 0,
         "input_tokens": 0,
         "error": None,
+        "token_count_source": "sse_delta",  # or "usage_api"
     }
 
     start_time = time.perf_counter()
@@ -113,7 +130,6 @@ async def _send_request(
     last_token_time = None
     token_count = 0
     usage_completion_tokens = 0
-    sse_events_parsed = 0
 
     try:
         async with session.post(
@@ -143,7 +159,6 @@ async def _send_request(
                     now = time.perf_counter()
                     try:
                         data = json.loads(data_str)
-                        sse_events_parsed += 1
 
                         # Capture usage (usually in the last event)
                         usage = data.get("usage")
@@ -187,11 +202,13 @@ async def _send_request(
     end_time = time.perf_counter()
     result["e2e_latency_ms"] = (end_time - start_time) * 1000
 
-    # Fallback: if manual token counting got 0, use usage-reported count
-    if token_count == 0 and usage_completion_tokens > 0:
-        token_count = usage_completion_tokens
-
-    result["output_tokens"] = token_count
+    # Prefer usage-reported token count when available (more accurate)
+    if usage_completion_tokens > 0:
+        result["output_tokens"] = usage_completion_tokens
+        result["token_count_source"] = "usage_api"
+    else:
+        result["output_tokens"] = token_count
+        result["token_count_source"] = "sse_delta"
 
     if first_token_time is not None:
         result["ttft_ms"] = (first_token_time - start_time) * 1000
@@ -214,9 +231,13 @@ async def run_benchmark_phase(
     max_output_tokens: int,
     duration_sec: int = 60,
     warmup: bool = False,
+    seed: int | None = None,
 ) -> ConcurrencyResult:
     """Run a single benchmark phase with given concurrency and prompt length."""
     url = f"{api_base_url}/chat/completions"
+
+    # Create per-phase RNG from seed for reproducibility
+    rng = random.Random(seed)
 
     all_results: list[dict] = []
     start_time = time.perf_counter()
@@ -227,7 +248,7 @@ async def run_benchmark_phase(
         async def _worker():
             while time.perf_counter() - start_time < duration_sec:
                 res = await _send_request(
-                    session, url, prompt_length, max_output_tokens, model_name,
+                    session, url, prompt_length, max_output_tokens, model_name, rng,
                 )
                 all_results.append(res)
 
@@ -297,17 +318,16 @@ async def run_benchmark_phase(
     return result
 
 
-# ── Benchmark test matrix ──────────────────────────────────────────────────
+# ── Benchmark phase matrix ────────────────────────────────────────────────
 
-BENCHMARK_PHASES = [
+# Default phases when not overridden by config
+_DEFAULT_PHASES = [
     # (phase_name, concurrency_levels, prompt_lengths, max_output_tokens, is_long_context)
     ("warmup", [1], [512], 128, False),
     ("latency", [1], [128, 512, 2048, 4096], 256, False),
     ("mid_throughput", [4, 16, 64], [512, 2048], 256, False),
     ("high_throughput", [128, 256], [512], 256, False),
     ("stress", [512], [512], 256, False),
-    # Long context: prompt + output must fit in max_model_len
-    # Use prompt sizes that leave room for 8192 output tokens
     ("long_context_16k", [1, 4], [16384], 8192, True),
     ("long_context_24k", [1, 4], [24576], 8192, True),
     ("long_context_32k", [1, 4], [32768], 8192, True),
@@ -319,13 +339,17 @@ BENCHMARK_PHASES = [
 def get_benchmark_phases(
     model_max_context: int,
     max_model_len: int | None = None,
+    benchmark_config: object | None = None,
 ) -> list[tuple[str, int, int, int]]:
     """Return list of (phase_name, concurrency, prompt_length, max_output_tokens)
     filtered by model context limits.
+
+    If benchmark_config is provided and has custom concurrency_levels/prompt_lengths,
+    those are used to build the phase matrix. Otherwise the default matrix is used.
     """
     effective_max = max_model_len or model_max_context
     phases = []
-    for name, concurrencies, prompt_lengths, max_out, is_long in BENCHMARK_PHASES:
+    for name, concurrencies, prompt_lengths, max_out, is_long in _DEFAULT_PHASES:
         for conc in concurrencies:
             for plen in prompt_lengths:
                 # Skip if prompt + output exceeds context

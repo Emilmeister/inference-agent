@@ -13,6 +13,7 @@ import yaml
 from inference_agent.agent import compile_agent
 from inference_agent.models import AgentConfig, OptimizationGoal
 from inference_agent.utils.docker import stop_all_bench_containers
+from inference_agent.utils.logging import setup_logging
 
 
 def _load_config(path: str) -> AgentConfig:
@@ -51,6 +52,7 @@ async def _run(config: AgentConfig) -> None:
         "stop_reason": None,
         "current_config": None,
         "current_result": None,
+        "skip_executor": False,
     }
 
     logger = logging.getLogger("inference_agent")
@@ -123,19 +125,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    # Setup logging — only our code is verbose, silence noisy libraries
-    level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)-5s [%(name)s] %(message)s",
-        datefmt="%H:%M:%S",
-    )
-    # Silence noisy third-party loggers
-    for noisy in [
-        "httpcore", "httpx", "openai", "urllib3", "docker",
-        "asyncio", "huggingface_hub", "filelock",
-    ]:
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+    # Setup structured logging with experiment context
+    setup_logging(verbose=args.verbose)
 
     if args.cleanup:
         stop_all_bench_containers()

@@ -59,6 +59,9 @@ class AgentState(TypedDict, total=False):
     # Next optimization direction
     next_optimization_goal: Annotated[OptimizationGoal, _replace]
 
+    # Validation
+    skip_executor: Annotated[bool, _replace]
+
     # Status
     status: Annotated[str, _replace]  # "running" | "completed" | "failed"
     stop_reason: Annotated[str | None, _replace]

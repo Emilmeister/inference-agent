@@ -115,6 +115,31 @@ async def get_container_logs(name: str, tail: int = 100) -> str:
         return f"Failed to get logs: {e}"
 
 
+async def get_image_digest(image: str) -> str:
+    """Get the digest of a Docker image. Returns empty string on failure."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "inspect", "--format", "{{index .RepoDigests 0}}", image,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        digest = stdout.decode().strip()
+        if digest and "@sha256:" in digest:
+            return digest
+        # Fallback to image ID
+        proc2 = await asyncio.create_subprocess_exec(
+            "docker", "inspect", "--format", "{{.Id}}", image,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout2, _ = await asyncio.wait_for(proc2.communicate(), timeout=10)
+        return stdout2.decode().strip()
+    except Exception as e:
+        logger.debug("Failed to get image digest for %s: %s", image, e)
+        return ""
+
+
 def stop_all_bench_containers() -> None:
     """Stop all containers with bench- prefix. For cleanup."""
     try:

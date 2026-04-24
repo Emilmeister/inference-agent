@@ -14,7 +14,6 @@ from inference_agent.models import (
     OptimizationGoal,
     ParetoPoint,
 )
-from inference_agent.nodes.reporter import save_experiment
 from inference_agent.state import AgentState
 from inference_agent.utils.codex import codex_structured_output
 
@@ -338,10 +337,6 @@ async def analyzer_node(state: AgentState) -> dict:
             "scores": scores,
         }
     )
-
-    # Save JSON file HERE — after LLM enrichment, guaranteeing
-    # commentary, scores, and Pareto data are included
-    save_experiment(enriched_result, config.storage.experiments_dir)
 
     return {
         "experiment_history": [summary],
