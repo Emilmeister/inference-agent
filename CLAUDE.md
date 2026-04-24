@@ -11,8 +11,8 @@ LangGraph граф: `discovery → planner → validator → executor → analyz
 - **discovery** — детектит GPU (nvidia-smi), читает model config с HuggingFace, определяет доступные Docker images. Fails fast если нет engine images.
 - **planner** — LLM (codex exec) выбирает следующую конфигурацию на основе истории экспериментов
 - **validator** — проверяет конфиг против hardware profile и engine capabilities до запуска Docker. Невалидные конфигурации скипают executor.
-- **executor** — запускает движок в Docker, прогоняет бенчмарк (async HTTP load generator), собирает GPU метрики, smoke tests. Структурированные ошибки по стадиям.
-- **analyzer** — LLM анализирует результаты, строит Pareto-фронт, решает continue/stop. Не пишет файлы.
+- **executor** — запускает движок в Docker, проводит correctness gate (smoke tests до performance), прогоняет бенчмарк (async HTTP load generator), проводит post-benchmark correctness check, собирает GPU метрики. Структурированные ошибки и failure classification по стадиям.
+- **analyzer** — LLM анализирует результаты, строит Pareto-фронт, решает continue/stop. Eligibility-filtered лидерборды (только correctness-eligible эксперименты). Не пишет файлы.
 - **reporter** — атомарно пишет enriched результат в JSON файл `experiments/{id}.json`
 
 ## Project structure
@@ -32,7 +32,7 @@ src/inference_agent/
   nodes/             — LangGraph nodes (discovery, planner, validator, executor, reporter, analyzer)
   benchmark/         — load generator (runner.py), smoke tests, GPU monitor (nvidia-smi)
   utils/             — Docker helpers, Prometheus metrics parser, structured logging
-tests/               — unit tests (72 tests)
+tests/               — unit tests (193 tests)
 streamlit_app/app.py — dashboard с upload JSON файлов
 config.yaml          — конфигурация по умолчанию
 ```
@@ -74,9 +74,25 @@ inference-agent --cleanup
 
 Analyzer ведёт три лидерборда и строит Pareto-фронт в пространстве (throughput, TTFT_p95).
 
+## Executor flow
+
+Для каждой конфигурации: start engine → healthcheck → **correctness gate** (basic_chat, tool_calling, tool_required, json_mode, json_schema) → **performance phases** → **post-benchmark correctness check** → aggregate → classify failure.
+
+Correctness gate ПЕРЕД performance: если engine не умеет tool calling или JSON schema, performance-фазы не запускаются, статус `failed_correctness`, эксперимент не участвует в лидербордах.
+
 ## Benchmark phases
 
-Для каждой конфигурации запускаются фазы: warmup → latency (c=1) → mid throughput (c=4,16,64) → high throughput (c=128,256) → stress (c=512) → long context (16K/24K/32K/64K/100K с max_output=8192). Long context фазы скипаются если model_max_context < prompt_length. Seed для промптов можно задать в config для воспроизводимости.
+Фазы строятся из `BenchmarkConfig.concurrency_levels × prompt_lengths` с workload classification:
+- **agent_short** — c<64, prompt<8K (основной для agent-задач)
+- **throughput** — 64<=c<512, short prompts (пиковая пропускная способность)
+- **stress** — c>=512 (поиск saturation, не участвует в peak throughput)
+- **long_context** — prompt>=8K, c<=4 (RAG-сценарии)
+
+Агрегация workload-aware: `peak_throughput` только из agent_short+throughput, `low_concurrency_ttft_p95` — median по c=1 agent_short (не min по всем).
+
+Error-rate gate per phase: фазы с error_rate > `phase_error_rate_threshold` отбраковываются.
+
+Seed для промптов можно задать в config для воспроизводимости.
 
 ## Testing on real hardware
 

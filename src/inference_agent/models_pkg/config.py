@@ -38,6 +38,7 @@ class BenchmarkConfig(BaseModel):
     duration_per_level_sec: int = 60
     timeout_sec: int = 600
     latency_threshold_ms: float = 500.0
+    phase_error_rate_threshold: float = 0.1  # phases with error_rate above this are invalid
     seed: int | None = None  # seed for reproducible prompt generation
 
 

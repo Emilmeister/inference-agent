@@ -20,6 +20,7 @@ def _make_summary(
     ttft_p95: float = 50.0,
     status: ExperimentStatus = ExperimentStatus.SUCCESS,
     engine: EngineType = EngineType.VLLM,
+    correctness_gate_passed: bool = True,
 ) -> ExperimentSummary:
     return ExperimentSummary(
         experiment_id=exp_id,
@@ -27,6 +28,7 @@ def _make_summary(
         status=status,
         peak_throughput=throughput,
         low_concurrency_ttft_p95=ttft_p95,
+        correctness_gate_passed=correctness_gate_passed,
     )
 
 
@@ -61,8 +63,18 @@ class TestComputeParetoFront:
 
     def test_failed_experiments_excluded(self):
         history = [
-            _make_summary("a", throughput=200, ttft_p95=30, status=ExperimentStatus.FAILED),
+            _make_summary("a", throughput=200, ttft_p95=30, status=ExperimentStatus.FAILED, correctness_gate_passed=False),
             _make_summary("b", throughput=100, ttft_p95=50),
+        ]
+        pareto = _compute_pareto_front(history)
+        assert len(pareto) == 1
+        assert pareto[0].config_id == "b"
+
+    def test_correctness_failed_excluded(self):
+        """Experiments that failed correctness gate are not eligible for Pareto."""
+        history = [
+            _make_summary("a", throughput=200, ttft_p95=30, correctness_gate_passed=False),
+            _make_summary("b", throughput=100, ttft_p95=50, correctness_gate_passed=True),
         ]
         pareto = _compute_pareto_front(history)
         assert len(pareto) == 1

@@ -29,6 +29,7 @@ class ExperimentStatus(str, Enum):
     SUCCESS = "success"
     FAILED = "failed"
     PARTIAL = "partial"
+    FAILED_CORRECTNESS = "failed_correctness"
 
 
 class OptimizationClassification(str, Enum):
@@ -142,6 +143,10 @@ class ConcurrencyResult(BaseModel):
     max_output_tokens: int
     num_requests: int = 0
 
+    # Phase identification
+    workload_id: str = ""    # agent_short | throughput | stress | long_context
+    phase_id: str = ""       # unique id: e.g. "c1_p512"
+
     ttft_ms: PercentileStats = Field(default_factory=PercentileStats)
     tpot_ms: PercentileStats = Field(default_factory=PercentileStats)
     itl_ms: PercentileStats = Field(default_factory=PercentileStats)
@@ -157,6 +162,7 @@ class ConcurrencyResult(BaseModel):
     decode_time_ms: PercentileStats = Field(default_factory=PercentileStats)
 
     errors: int = 0
+    error_rate: float = 0.0  # errors / num_requests
     error_details: list[str] = Field(default_factory=list)
 
 
@@ -199,12 +205,21 @@ class BenchmarkResult(BaseModel):
 
 
 class SmokeTestResult(BaseModel):
+    basic_chat: bool = False
+    basic_chat_detail: str = ""
     tool_calling: bool = False
     tool_calling_detail: str = ""
+    tool_required: bool = False
+    tool_required_detail: str = ""
     json_mode: bool = False
     json_mode_detail: str = ""
     json_schema: bool = False
     json_schema_detail: str = ""
+
+    @property
+    def gate_passed(self) -> bool:
+        """Correctness gate: basic_chat AND tool_calling AND json_schema must pass."""
+        return self.basic_chat and self.tool_calling and self.json_schema
 
 
 # ── Experiment Errors ─────────────────────────────────────────────────────
@@ -247,9 +262,15 @@ class ExperimentResult(BaseModel):
     )
     scores: ExperimentScores = Field(default_factory=ExperimentScores)
     docker_command: str = ""  # one-liner docker run command for reproduction
+    docker_args: list[str] = Field(default_factory=list)  # full argv for reproduction
     docker_image_digest: str = ""  # immutable image digest for reproducibility
+    engine_version: str = ""  # engine version string (from /version or --version)
     benchmark_seed: int | None = None  # seed used for prompt generation
     duration_seconds: float = 0.0
+    time_to_healthy_sec: float = 0.0  # seconds from container start to healthy
+    failure_classification: str | None = None  # startup_crash | healthcheck_timeout | oom | correctness_failure | runtime_crash | benchmark_error
+    correctness_gate_passed: bool = False
+    post_benchmark_correctness: SmokeTestResult | None = None  # re-check after load
 
 
 # ── Experiment Summary (compact, for LLM context) ─────────────────────────
@@ -266,7 +287,9 @@ class ExperimentSummary(BaseModel):
     low_concurrency_ttft_p95: float = 0.0
     low_concurrency_tpot_p95: float = 0.0
     smoke_tests_passed: int = 0
-    smoke_tests_total: int = 3
+    smoke_tests_total: int = 5
+    correctness_gate_passed: bool = False
+    failure_classification: str | None = None
     error: str | None = None  # error message + container logs for failed experiments
 
     optimization_classification: OptimizationClassification = (
@@ -305,7 +328,9 @@ class ExperimentSummary(BaseModel):
             digest["continuous_decode_steps"] = config.num_continuous_decode_steps
 
         smoke_passed = sum([
+            result.smoke_tests.basic_chat,
             result.smoke_tests.tool_calling,
+            result.smoke_tests.tool_required,
             result.smoke_tests.json_mode,
             result.smoke_tests.json_schema,
         ])
@@ -319,6 +344,8 @@ class ExperimentSummary(BaseModel):
             low_concurrency_ttft_p95=result.benchmark.low_concurrency_ttft_p95_ms,
             low_concurrency_tpot_p95=result.benchmark.low_concurrency_tpot_p95_ms,
             smoke_tests_passed=smoke_passed,
+            correctness_gate_passed=result.correctness_gate_passed,
+            failure_classification=result.failure_classification,
             error=result.error if result.error else None,
             optimization_classification=result.optimization_classification,
             scores=result.scores,

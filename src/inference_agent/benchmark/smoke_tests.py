@@ -1,4 +1,4 @@
-"""Smoke tests for tool-calling and structured output."""
+"""Smoke tests for correctness gate — basic chat, tool-calling, structured output."""
 
 from __future__ import annotations
 
@@ -29,12 +29,33 @@ async def _chat_completion(
         return await resp.json()
 
 
+async def test_basic_chat(
+    session: aiohttp.ClientSession,
+    url: str,
+    model: str,
+) -> tuple[bool, str]:
+    """Test that the engine responds to a basic chat request."""
+    try:
+        data = await _chat_completion(session, url, model, {
+            "messages": [
+                {"role": "user", "content": "Say hello in one word."}
+            ],
+        })
+        message = data["choices"][0]["message"]
+        content = message.get("content") or ""
+        if not content.strip():
+            return False, "Empty content in response"
+        return True, f"PASS: got response ({len(content)} chars)"
+    except Exception as e:
+        return False, f"ERROR: {e}"
+
+
 async def test_tool_calling(
     session: aiohttp.ClientSession,
     url: str,
     model: str,
 ) -> tuple[bool, str]:
-    """Test that the model can produce a tool call."""
+    """Test that the model can produce a tool call (tool_choice=auto)."""
     try:
         data = await _chat_completion(session, url, model, {
             "messages": [
@@ -77,6 +98,59 @@ async def test_tool_calling(
             return False, f"Missing 'city' in arguments: {args}"
 
         return True, f"PASS: tool_calls with get_weather(city={args['city']})"
+
+    except Exception as e:
+        return False, f"ERROR: {e}"
+
+
+async def test_tool_required(
+    session: aiohttp.ClientSession,
+    url: str,
+    model: str,
+) -> tuple[bool, str]:
+    """Test forced tool_choice — model MUST call the specified function."""
+    try:
+        data = await _chat_completion(session, url, model, {
+            "messages": [
+                {"role": "user", "content": "Tell me the weather in Tokyo."}
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get current weather for a city",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "city": {
+                                    "type": "string",
+                                    "description": "City name",
+                                }
+                            },
+                            "required": ["city"],
+                        },
+                    },
+                }
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "get_weather"},
+            },
+        })
+
+        message = data["choices"][0]["message"]
+        tool_calls = message.get("tool_calls", [])
+        if not tool_calls:
+            return False, "No tool_calls with forced tool_choice"
+
+        tc = tool_calls[0]
+        func = tc.get("function", {})
+        if func.get("name") != "get_weather":
+            return False, f"Expected get_weather, got {func.get('name')}"
+
+        args = json.loads(func.get("arguments", "{}"))
+        return True, f"PASS: forced tool_choice get_weather(city={args.get('city', '?')})"
 
     except Exception as e:
         return False, f"ERROR: {e}"
@@ -182,7 +256,7 @@ async def test_json_schema(
             if not isinstance(lang["year"], int):
                 return False, f"Year is not int: {lang['year']}"
 
-        names = [l["name"] for l in langs]
+        names = [lang["name"] for lang in langs]
         return True, f"PASS: {len(langs)} languages: {names}"
 
     except json.JSONDecodeError as e:
@@ -192,17 +266,35 @@ async def test_json_schema(
 
 
 async def run_smoke_tests(api_base_url: str, model: str) -> SmokeTestResult:
-    """Run all smoke tests against the running engine."""
+    """Run all smoke tests against the running engine.
+
+    Returns SmokeTestResult with gate_passed property indicating
+    whether the correctness gate is met (basic_chat + tool_calling + json_schema).
+    """
     url = f"{api_base_url}/chat/completions"
     result = SmokeTestResult()
 
     async with aiohttp.ClientSession() as session:
-        # Tool calling
-        logger.info("Smoke test: tool calling...")
+        # Basic chat (most fundamental — if this fails, engine is broken)
+        logger.info("Smoke test: basic chat...")
+        result.basic_chat, result.basic_chat_detail = await test_basic_chat(
+            session, url, model
+        )
+        logger.info("  %s", result.basic_chat_detail)
+
+        # Tool calling (auto)
+        logger.info("Smoke test: tool calling (auto)...")
         result.tool_calling, result.tool_calling_detail = await test_tool_calling(
             session, url, model
         )
         logger.info("  %s", result.tool_calling_detail)
+
+        # Tool calling (required/forced)
+        logger.info("Smoke test: tool calling (required)...")
+        result.tool_required, result.tool_required_detail = await test_tool_required(
+            session, url, model
+        )
+        logger.info("  %s", result.tool_required_detail)
 
         # JSON mode
         logger.info("Smoke test: JSON mode...")
@@ -217,5 +309,14 @@ async def run_smoke_tests(api_base_url: str, model: str) -> SmokeTestResult:
             session, url, model
         )
         logger.info("  %s", result.json_schema_detail)
+
+    passed = sum([
+        result.basic_chat, result.tool_calling, result.tool_required,
+        result.json_mode, result.json_schema,
+    ])
+    logger.info(
+        "Smoke tests: %d/5 passed, gate=%s",
+        passed, "PASS" if result.gate_passed else "FAIL",
+    )
 
     return result

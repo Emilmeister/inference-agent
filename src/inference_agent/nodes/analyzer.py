@@ -9,6 +9,7 @@ from inference_agent.models import (
     AnalyzerOutput,
     ExperimentResult,
     ExperimentScores,
+    ExperimentStatus,
     ExperimentSummary,
     OptimizationClassification,
     OptimizationGoal,
@@ -66,17 +67,28 @@ Respond with JSON:
 """
 
 
+def _is_eligible(h: ExperimentSummary) -> bool:
+    """Check if an experiment is eligible for performance leaderboards.
+
+    Eligibility requires:
+    - Experiment succeeded (status=success)
+    - Correctness gate passed (basic_chat + tool_calling + json_schema)
+    - Non-zero performance metrics
+    """
+    return (
+        h.status.value == "success"
+        and h.correctness_gate_passed
+        and h.peak_throughput > 0
+        and h.low_concurrency_ttft_p95 > 0
+    )
+
+
 def _compute_pareto_front(
     history: list[ExperimentSummary],
 ) -> list[ParetoPoint]:
     """Compute Pareto front in (throughput↑, latency↓) space."""
-    # Only consider successful experiments with valid metrics
-    candidates = [
-        h for h in history
-        if h.status.value == "success"
-        and h.peak_throughput > 0
-        and h.low_concurrency_ttft_p95 > 0
-    ]
+    # Only consider eligible experiments (correctness gate + success + valid metrics)
+    candidates = [h for h in history if _is_eligible(h)]
 
     if not candidates:
         return []
@@ -188,17 +200,25 @@ async def analyzer_node(state: AgentState) -> dict:
     tp = result.benchmark.peak_output_tokens_per_sec
     lat = result.benchmark.low_concurrency_ttft_p95_ms
 
-    if tp > best_throughput:
+    # Only update leaderboards if this experiment is eligible
+    # (correctness gate passed, success status, valid metrics)
+    is_eligible_result = (
+        result.status == ExperimentStatus.SUCCESS
+        and result.correctness_gate_passed
+        and tp > 0 and lat > 0
+    )
+
+    if is_eligible_result and tp > best_throughput:
         best_throughput = tp
         best_throughput_id = result.experiment_id
 
-    if 0 < lat < best_latency:
+    if is_eligible_result and 0 < lat < best_latency:
         best_latency = lat
         best_latency_id = result.experiment_id
 
-    # Update balanced: best throughput among configs with acceptable latency
+    # Update balanced: best throughput among eligible configs with acceptable latency
     latency_threshold = config.benchmark.latency_threshold_ms
-    if lat > 0 and lat < latency_threshold and tp > best_balanced_tp:
+    if is_eligible_result and lat < latency_threshold and tp > best_balanced_tp:
         best_balanced_tp = tp
         best_balanced_lat = lat
         best_balanced_id = result.experiment_id
@@ -230,16 +250,16 @@ async def analyzer_node(state: AgentState) -> dict:
 
     # Ask LLM for analysis using codex
 
-    # Prepare leaderboard data
-    sorted_by_tp = sorted(all_history, key=lambda h: h.peak_throughput, reverse=True)[:5]
+    # Prepare leaderboard data (only eligible experiments)
+    eligible = [h for h in all_history if _is_eligible(h)]
+    sorted_by_tp = sorted(eligible, key=lambda h: h.peak_throughput, reverse=True)[:5]
     sorted_by_lat = sorted(
-        [h for h in all_history if h.low_concurrency_ttft_p95 > 0],
+        eligible,
         key=lambda h: h.low_concurrency_ttft_p95,
     )[:5]
     balanced_candidates = [
-        h for h in all_history
-        if h.low_concurrency_ttft_p95 > 0
-        and h.low_concurrency_ttft_p95 < latency_threshold
+        h for h in eligible
+        if h.low_concurrency_ttft_p95 < latency_threshold
     ]
     sorted_balanced = sorted(balanced_candidates, key=lambda h: h.peak_throughput, reverse=True)[:5]
 

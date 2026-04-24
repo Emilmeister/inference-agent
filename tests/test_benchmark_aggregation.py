@@ -38,13 +38,15 @@ class TestAggregateBenchmark:
         assert result.peak_output_tokens_per_sec == 500.0
 
     def test_low_concurrency_latency(self):
+        """Low-concurrency latency uses median (not min) of c=1 phases."""
         results = [
             _make_conc_result(concurrency=1, ttft_p95=30),
             _make_conc_result(concurrency=1, ttft_p95=50),
             _make_conc_result(concurrency=64, ttft_p95=200),
         ]
         result = _aggregate_benchmark(results, {}, {})
-        assert result.low_concurrency_ttft_p95_ms == 30.0
+        # median of [30, 50] = 40.0
+        assert result.low_concurrency_ttft_p95_ms == 40.0
 
     def test_no_low_concurrency(self):
         results = [_make_conc_result(concurrency=64)]

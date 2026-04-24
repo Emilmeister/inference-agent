@@ -11,7 +11,7 @@ import time
 
 import aiohttp
 
-from inference_agent.models import ConcurrencyResult, PercentileStats
+from inference_agent.models import BenchmarkConfig, ConcurrencyResult, PercentileStats
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +232,8 @@ async def run_benchmark_phase(
     duration_sec: int = 60,
     warmup: bool = False,
     seed: int | None = None,
+    workload_id: str = "",
+    phase_id: str = "",
 ) -> ConcurrencyResult:
     """Run a single benchmark phase with given concurrency and prompt length."""
     url = f"{api_base_url}/chat/completions"
@@ -283,12 +285,15 @@ async def run_benchmark_phase(
         total_input_tokens += r["input_tokens"]
 
     successful = len(all_results) - errors
+    total_requests = len(all_results)
 
     result = ConcurrencyResult(
         concurrency=concurrency,
         prompt_length=prompt_length,
         max_output_tokens=max_output_tokens,
-        num_requests=len(all_results),
+        num_requests=total_requests,
+        workload_id=workload_id,
+        phase_id=phase_id,
         ttft_ms=_compute_percentiles(ttft_list),
         tpot_ms=_compute_percentiles(tpot_list),
         itl_ms=_compute_percentiles(itl_list),
@@ -300,6 +305,7 @@ async def run_benchmark_phase(
         if wall_time > 0
         else 0,
         errors=errors,
+        error_rate=errors / total_requests if total_requests > 0 else 0.0,
         error_details=error_details[:10],  # cap at 10
     )
 
@@ -320,44 +326,62 @@ async def run_benchmark_phase(
 
 # ── Benchmark phase matrix ────────────────────────────────────────────────
 
-# Default phases when not overridden by config
-_DEFAULT_PHASES = [
-    # (phase_name, concurrency_levels, prompt_lengths, max_output_tokens, is_long_context)
-    ("warmup", [1], [512], 128, False),
-    ("latency", [1], [128, 512, 2048, 4096], 256, False),
-    ("mid_throughput", [4, 16, 64], [512, 2048], 256, False),
-    ("high_throughput", [128, 256], [512], 256, False),
-    ("stress", [512], [512], 256, False),
-    ("long_context_16k", [1, 4], [16384], 8192, True),
-    ("long_context_24k", [1, 4], [24576], 8192, True),
-    ("long_context_32k", [1, 4], [32768], 8192, True),
-    ("long_context_64k", [1, 4], [65536], 8192, True),
-    ("long_context_100k", [1, 2], [100000], 8192, True),
-]
+# Workload classification thresholds
+_LONG_PROMPT_THRESHOLD = 8192     # prompt_length >= this → long_context workload
+_STRESS_CONCURRENCY = 512         # concurrency >= this → stress workload
+_THROUGHPUT_CONCURRENCY = 64      # concurrency >= this (but < stress) → throughput
+_MAX_LONG_CONTEXT_CONCURRENCY = 4  # long context phases limited to this concurrency
+
+
+def _classify_workload(concurrency: int, prompt_length: int) -> str:
+    """Classify a phase into a workload based on concurrency and prompt length."""
+    if prompt_length >= _LONG_PROMPT_THRESHOLD:
+        return "long_context"
+    if concurrency >= _STRESS_CONCURRENCY:
+        return "stress"
+    if concurrency >= _THROUGHPUT_CONCURRENCY:
+        return "throughput"
+    return "agent_short"
 
 
 def get_benchmark_phases(
     model_max_context: int,
     max_model_len: int | None = None,
-    benchmark_config: object | None = None,
-) -> list[tuple[str, int, int, int]]:
-    """Return list of (phase_name, concurrency, prompt_length, max_output_tokens)
-    filtered by model context limits.
+    benchmark_config: BenchmarkConfig | None = None,
+) -> list[tuple[str, str, int, int, int]]:
+    """Return list of (phase_id, workload_id, concurrency, prompt_length, max_output_tokens)
+    built from BenchmarkConfig and filtered by model context limits.
 
-    If benchmark_config is provided and has custom concurrency_levels/prompt_lengths,
-    those are used to build the phase matrix. Otherwise the default matrix is used.
+    Phases are generated from config.concurrency_levels × config.prompt_lengths,
+    classified into workloads, and filtered by effective context window.
     """
+    cfg = benchmark_config or BenchmarkConfig()
     effective_max = max_model_len or model_max_context
-    phases = []
-    for name, concurrencies, prompt_lengths, max_out, is_long in _DEFAULT_PHASES:
-        for conc in concurrencies:
-            for plen in prompt_lengths:
-                # Skip if prompt + output exceeds context
-                if plen + max_out > effective_max:
-                    logger.info(
-                        "Skipping %s (c=%d, p=%d): exceeds context %d",
-                        name, conc, plen, effective_max,
-                    )
-                    continue
-                phases.append((name, conc, plen, max_out))
+
+    phases: list[tuple[str, str, int, int, int]] = []
+
+    # Warmup phase (always first, fixed params)
+    phases.append(("warmup", "warmup", 1, min(512, effective_max - 128), 128))
+
+    for conc in sorted(cfg.concurrency_levels):
+        for plen in sorted(cfg.prompt_lengths):
+            is_long = plen >= _LONG_PROMPT_THRESHOLD
+            max_out = cfg.long_context_max_output_tokens if is_long else cfg.max_output_tokens
+
+            # Skip if prompt + output exceeds context
+            if plen + max_out > effective_max:
+                logger.info(
+                    "Skipping c=%d p=%d: prompt+output (%d) exceeds context %d",
+                    conc, plen, plen + max_out, effective_max,
+                )
+                continue
+
+            # Skip high concurrency for long context
+            if is_long and conc > _MAX_LONG_CONTEXT_CONCURRENCY:
+                continue
+
+            workload = _classify_workload(conc, plen)
+            phase_id = f"c{conc}_p{plen}"
+            phases.append((phase_id, workload, conc, plen, max_out))
+
     return phases

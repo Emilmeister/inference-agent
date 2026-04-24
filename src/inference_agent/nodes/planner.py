@@ -142,6 +142,50 @@ Generate the next experiment configuration.
 """
 
 
+def _aggregate_failure_patterns(history: list[ExperimentSummary]) -> str:
+    """Aggregate failure patterns from history into a concise summary for the LLM.
+
+    Groups failures by classification and engine, showing the planner
+    what config classes to avoid.
+    """
+    if not history:
+        return ""
+
+    failed = [h for h in history if h.status.value in ("failed", "failed_correctness", "partial")]
+    if not failed:
+        return ""
+
+    # Group by (failure_classification, engine)
+    pattern_counts: dict[tuple[str, str], int] = {}
+    pattern_examples: dict[tuple[str, str], str] = {}
+    for h in failed:
+        fc = h.failure_classification or "unknown"
+        key = (fc, h.engine.value)
+        pattern_counts[key] = pattern_counts.get(key, 0) + 1
+        if key not in pattern_examples and h.error:
+            pattern_examples[key] = h.error[:150]
+
+    # Also count correctness failures
+    correctness_failed = [h for h in history if h.status.value == "failed_correctness"]
+    if correctness_failed:
+        engines_failed_correctness = set(h.engine.value for h in correctness_failed)
+        for eng in engines_failed_correctness:
+            count = sum(1 for h in correctness_failed if h.engine.value == eng)
+            key = ("correctness_failure", eng)
+            if key not in pattern_counts:
+                pattern_counts[key] = count
+
+    lines = []
+    for (fc, eng), count in sorted(pattern_counts.items(), key=lambda x: -x[1]):
+        example = pattern_examples.get((fc, eng), "")
+        line = f"- {eng}: {fc} ({count}x)"
+        if example:
+            line += f" — e.g. {example}"
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
 def _estimate_safe_context(hardware: HardwareProfile) -> int:
     """Estimate a safe max_model_len for fallback when LLM planner is unavailable.
 
@@ -226,11 +270,14 @@ async def planner_node(state: AgentState) -> dict:
             "ttft_p95": h.low_concurrency_ttft_p95,
             "tpot_p95": h.low_concurrency_tpot_p95,
             "smoke_pass": f"{h.smoke_tests_passed}/{h.smoke_tests_total}",
+            "correctness_gate": h.correctness_gate_passed,
             "classification": h.optimization_classification.value,
         }
         # Include error details for failed experiments so LLM can learn from failures
         if h.error:
             entry["error"] = h.error
+        if h.failure_classification:
+            entry["failure_type"] = h.failure_classification
         # Include LLM commentary from analyzer for context
         if h.llm_commentary:
             entry["analysis"] = h.llm_commentary
@@ -262,6 +309,9 @@ async def planner_node(state: AgentState) -> dict:
         engine_section = _BOTH_ENGINES_SECTION
         engine_instruction = f"Choose from: {', '.join(e.value for e in hardware.available_engines)}"
 
+    # Aggregate failure patterns for the LLM
+    failure_patterns = _aggregate_failure_patterns(history)
+
     user_instructions = ""
     if config.planner_instructions:
         user_instructions = f"\n## User Instructions\n{config.planner_instructions}\n"
@@ -283,7 +333,12 @@ async def planner_node(state: AgentState) -> dict:
         latency_threshold=config.benchmark.latency_threshold_ms,
         model_max_context=hardware.model_max_context,
         gpu_count=hardware.gpu_count,
-    ) + engine_section + _PROMPT_FOOTER.format(user_instructions=user_instructions)
+    ) + engine_section
+
+    if failure_patterns:
+        prompt += f"\n## Known Failure Patterns\n{failure_patterns}\n"
+
+    prompt += _PROMPT_FOOTER.format(user_instructions=user_instructions)
 
     logger.info("Asking LLM to plan experiment #%d...", state.get("experiments_count", 0) + 1)
 

@@ -140,6 +140,50 @@ async def get_image_digest(image: str) -> str:
         return ""
 
 
+async def get_container_exit_code(name: str) -> int | None:
+    """Get the exit code of a stopped container. Returns None if unknown."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "inspect", "-f", "{{.State.ExitCode}}", name,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+        code_str = stdout.decode().strip()
+        if code_str.isdigit():
+            return int(code_str)
+        return None
+    except Exception:
+        return None
+
+
+async def get_engine_version(api_base_url: str) -> str:
+    """Get engine version from the /version endpoint. Returns empty string on failure."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{api_base_url}/version",
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("version", str(data))
+    except Exception:
+        pass
+    # Fallback: try /v1/models for basic info
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{api_base_url}/models",
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status == 200:
+                    return "available"
+    except Exception:
+        pass
+    return ""
+
+
 def stop_all_bench_containers() -> None:
     """Stop all containers with bench- prefix. For cleanup."""
     try:
