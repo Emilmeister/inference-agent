@@ -142,6 +142,40 @@ Generate the next experiment configuration.
 """
 
 
+def _estimate_safe_context(hardware: HardwareProfile) -> int:
+    """Estimate a safe max_model_len for fallback when LLM planner is unavailable.
+
+    Uses a rough heuristic: total VRAM minus estimated model weight, then
+    convert remaining VRAM to context length. Conservative but much better
+    than vram_total // 10.
+    """
+    if not hardware.gpus:
+        return min(32768, hardware.model_max_context)
+
+    total_vram_mb = sum(g.vram_total_mb for g in hardware.gpus)
+
+    # Estimate model weight in MB (params * 2 bytes for fp16)
+    if hardware.model_size_params:
+        model_weight_mb = hardware.model_size_params * 2 / (1024 * 1024)
+    else:
+        model_weight_mb = total_vram_mb * 0.5  # assume half VRAM for model
+
+    # Available VRAM for KV cache (leave 10% headroom)
+    available_mb = (total_vram_mb - model_weight_mb) * 0.9
+
+    # Rough estimate: ~2 MB per 1K context for a typical model
+    # This is very approximate but much better than vram // 10
+    estimated_ctx = int(available_mb / 2 * 1024)
+
+    # Clamp: cap fallback at 65536 (conservative — LLM planner can go higher)
+    safe_ctx = max(4096, min(estimated_ctx, 65536, hardware.model_max_context))
+
+    # Round down to nearest 4096 for cleanliness
+    safe_ctx = (safe_ctx // 4096) * 4096
+
+    return max(safe_ctx, 4096)
+
+
 def _get_forced_engine(
     history: list[ExperimentSummary],
     available: list[EngineType],
@@ -258,13 +292,14 @@ async def planner_node(state: AgentState) -> dict:
     try:
         result: PlannerOutput = await codex_structured_output(full_prompt, PlannerOutput)
     except Exception as e:
-        logger.error("Codex structured output failed, using fallback: %s", e)
-        safe_ctx = min(hardware.gpus[0].vram_total_mb // 10 if hardware.gpus else 32768, hardware.model_max_context)
+        error_summary = str(e).split("\n")[0][:200]
+        logger.error("Codex structured output failed, using fallback: %s", error_summary)
+        safe_ctx = _estimate_safe_context(hardware)
         result = PlannerOutput(
             engine=hardware.available_engines[0].value if hardware.available_engines else "vllm",
             tensor_parallel_size=hardware.gpu_count,
             max_model_len=safe_ctx,
-            rationale=f"Fallback: codex structured output failed ({e})",
+            rationale=f"Fallback: codex failed — {error_summary}",
         )
 
     # Override engine if alternation rule requires it
