@@ -34,8 +34,9 @@ async def codex_structured_output(
         schema_path = Path(tmpdir) / "schema.json"
         result_path = Path(tmpdir) / "result.json"
 
-        # Write JSON Schema from Pydantic model
+        # Write JSON Schema from Pydantic model, patched for OpenAI compatibility
         schema = output_model.model_json_schema()
+        _make_openai_compatible(schema)
         schema_path.write_text(json.dumps(schema, indent=2))
 
         # Build command — prompt via stdin for large prompts
@@ -133,6 +134,42 @@ async def codex_structured_output(
 
         logger.info("Codex result parsed successfully for %s", output_model.__name__)
         return output_model.model_validate(result_data)
+
+
+def _make_openai_compatible(schema: dict) -> None:
+    """Patch a JSON Schema in-place for OpenAI Structured Output compatibility.
+
+    OpenAI requires:
+    - "additionalProperties": false on all object types
+    - All properties listed in "required"
+    """
+    if not isinstance(schema, dict):
+        return
+
+    # Process $defs (Pydantic puts referenced sub-schemas here)
+    for def_schema in schema.get("$defs", {}).values():
+        _make_openai_compatible(def_schema)
+
+    if schema.get("type") == "object":
+        schema["additionalProperties"] = False
+
+        # Ensure all properties are required
+        props = schema.get("properties", {})
+        if props:
+            schema["required"] = list(props.keys())
+
+    # Recurse into properties
+    for prop in schema.get("properties", {}).values():
+        _make_openai_compatible(prop)
+
+    # Recurse into array items
+    if "items" in schema:
+        _make_openai_compatible(schema["items"])
+
+    # Recurse into anyOf / oneOf / allOf
+    for key in ("anyOf", "oneOf", "allOf"):
+        for sub in schema.get(key, []):
+            _make_openai_compatible(sub)
 
 
 def _find_after_banner(stderr: str) -> int:

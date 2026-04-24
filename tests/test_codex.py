@@ -2,7 +2,7 @@
 
 import pytest
 
-from inference_agent.utils.codex import _extract_json, _find_after_banner
+from inference_agent.utils.codex import _extract_json, _find_after_banner, _make_openai_compatible
 
 
 class TestExtractJson:
@@ -118,3 +118,106 @@ This should work well."""
         result = _extract_json(text)
         assert result["engine"] == "vllm"
         assert result["max_model_len"] == 32768
+
+
+class TestMakeOpenaiCompatible:
+    def test_adds_additional_properties_false(self):
+        schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+        _make_openai_compatible(schema)
+        assert schema["additionalProperties"] is False
+
+    def test_all_properties_required(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "integer"},
+            },
+            "required": ["a"],
+        }
+        _make_openai_compatible(schema)
+        assert set(schema["required"]) == {"a", "b"}
+
+    def test_nested_objects(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "inner": {
+                    "type": "object",
+                    "properties": {"x": {"type": "number"}},
+                },
+            },
+        }
+        _make_openai_compatible(schema)
+        assert schema["additionalProperties"] is False
+        assert schema["properties"]["inner"]["additionalProperties"] is False
+
+    def test_defs_processed(self):
+        schema = {
+            "type": "object",
+            "properties": {"ref": {"$ref": "#/$defs/Sub"}},
+            "$defs": {
+                "Sub": {
+                    "type": "object",
+                    "properties": {"val": {"type": "string"}},
+                }
+            },
+        }
+        _make_openai_compatible(schema)
+        assert schema["$defs"]["Sub"]["additionalProperties"] is False
+        assert schema["$defs"]["Sub"]["required"] == ["val"]
+
+    def test_array_items(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"id": {"type": "integer"}},
+                    },
+                },
+            },
+        }
+        _make_openai_compatible(schema)
+        inner = schema["properties"]["items"]["items"]
+        assert inner["additionalProperties"] is False
+
+    def test_anyof(self):
+        schema = {
+            "type": "object",
+            "properties": {
+                "value": {
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "object", "properties": {"x": {"type": "integer"}}},
+                    ]
+                }
+            },
+        }
+        _make_openai_compatible(schema)
+        obj_variant = schema["properties"]["value"]["anyOf"][1]
+        assert obj_variant["additionalProperties"] is False
+
+    def test_pydantic_planner_output_schema(self):
+        """Real-world test: PlannerOutput schema must be OpenAI-compatible."""
+        from inference_agent.models import PlannerOutput
+
+        schema = PlannerOutput.model_json_schema()
+        _make_openai_compatible(schema)
+
+        assert schema.get("additionalProperties") is False
+        assert "required" in schema
+        # All properties should be required
+        assert set(schema["required"]) == set(schema["properties"].keys())
+
+    def test_pydantic_analyzer_output_schema(self):
+        """Real-world test: AnalyzerOutput schema must be OpenAI-compatible."""
+        from inference_agent.models import AnalyzerOutput
+
+        schema = AnalyzerOutput.model_json_schema()
+        _make_openai_compatible(schema)
+
+        assert schema.get("additionalProperties") is False
+        assert set(schema["required"]) == set(schema["properties"].keys())
