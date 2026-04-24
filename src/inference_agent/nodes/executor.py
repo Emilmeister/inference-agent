@@ -62,7 +62,7 @@ async def executor_node(state: AgentState) -> dict:
         experiment.tensor_parallel_size,
         experiment.quantization or "none",
     )
-    logger.info("Rationale: %s", experiment.rationale[:150])
+    logger.info("Rationale: %s", experiment.rationale)
     logger.info("=" * 60)
 
     # 1. Stop any previous container
