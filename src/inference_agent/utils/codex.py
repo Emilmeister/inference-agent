@@ -139,9 +139,13 @@ async def codex_structured_output(
 def _make_openai_compatible(schema: dict) -> None:
     """Patch a JSON Schema in-place for OpenAI Structured Output compatibility.
 
-    OpenAI requires:
+    OpenAI strict mode requires:
     - "additionalProperties": false on all object types
     - All properties listed in "required"
+    - No free-form dict types (object with non-boolean additionalProperties)
+
+    Free-form dict properties (e.g. dict[str, str]) are removed from the schema
+    since OpenAI doesn't support them. Fields with default values will use defaults.
     """
     if not isinstance(schema, dict):
         return
@@ -151,10 +155,28 @@ def _make_openai_compatible(schema: dict) -> None:
         _make_openai_compatible(def_schema)
 
     if schema.get("type") == "object":
+        props = schema.get("properties", {})
+
+        # Remove free-form dict properties — OpenAI strict mode doesn't
+        # support objects without explicit property definitions.
+        # Pydantic encodes dict[str, str] as {"type": "object",
+        # "additionalProperties": {"type": "string"}} — the non-boolean
+        # additionalProperties is the marker.
+        to_remove = [
+            name for name, prop in props.items()
+            if (
+                prop.get("type") == "object"
+                and "additionalProperties" in prop
+                and not isinstance(prop["additionalProperties"], bool)
+                and "properties" not in prop
+            )
+        ]
+        for name in to_remove:
+            del props[name]
+
         schema["additionalProperties"] = False
 
-        # Ensure all properties are required
-        props = schema.get("properties", {})
+        # Ensure all remaining properties are required
         if props:
             schema["required"] = list(props.keys())
 

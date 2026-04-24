@@ -200,6 +200,39 @@ class TestMakeOpenaiCompatible:
         obj_variant = schema["properties"]["value"]["anyOf"][1]
         assert obj_variant["additionalProperties"] is False
 
+    def test_freeform_dict_removed(self):
+        """dict[str, str] properties should be removed (not supported by OpenAI)."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "env": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                },
+            },
+        }
+        _make_openai_compatible(schema)
+        assert "env" not in schema["properties"]
+        assert "env" not in schema["required"]
+        assert "name" in schema["properties"]
+
+    def test_typed_object_not_removed(self):
+        """Objects with explicit properties should NOT be removed."""
+        schema = {
+            "type": "object",
+            "properties": {
+                "config": {
+                    "type": "object",
+                    "properties": {"key": {"type": "string"}},
+                    "additionalProperties": {"type": "string"},
+                },
+            },
+        }
+        _make_openai_compatible(schema)
+        # Has explicit `properties`, so should be kept
+        assert "config" in schema["properties"]
+
     def test_pydantic_planner_output_schema(self):
         """Real-world test: PlannerOutput schema must be OpenAI-compatible."""
         from inference_agent.models import PlannerOutput
@@ -209,8 +242,12 @@ class TestMakeOpenaiCompatible:
 
         assert schema.get("additionalProperties") is False
         assert "required" in schema
-        # All properties should be required
+        # All remaining properties should be required
         assert set(schema["required"]) == set(schema["properties"].keys())
+        # extra_env (dict[str, str]) should be removed
+        assert "extra_env" not in schema["properties"]
+        # extra_engine_args (list[str]) should remain
+        assert "extra_engine_args" in schema["properties"]
 
     def test_pydantic_analyzer_output_schema(self):
         """Real-world test: AnalyzerOutput schema must be OpenAI-compatible."""
