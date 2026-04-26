@@ -48,8 +48,10 @@ async def claude_structured_output(
     )
     logger.debug("Claude command: claude --bare -p <prompt> --json-schema <schema> ...")
 
+    # Use DEVNULL for stdin — otherwise claude waits 3s for piped input.
     proc = await asyncio.create_subprocess_exec(
         *cmd,
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -66,7 +68,16 @@ async def claude_structured_output(
     stdout_text = stdout.decode("utf-8", errors="replace")
     stderr_text = stderr.decode("utf-8", errors="replace")
 
-    if proc.returncode != 0:
+    # Try to parse JSON response even if rc != 0 — claude returns
+    # error info inside the result payload (e.g. "Not logged in").
+    response: dict | None = None
+    if stdout_text.strip():
+        try:
+            response = json.loads(stdout_text)
+        except json.JSONDecodeError:
+            response = None
+
+    if proc.returncode != 0 or (response and response.get("is_error")):
         logger.error(
             "claude failed (rc=%d) for %s",
             proc.returncode,
@@ -74,36 +85,41 @@ async def claude_structured_output(
         )
         if stderr_text.strip():
             logger.error("claude stderr: %s", stderr_text[:2000])
-        if stdout_text.strip():
+
+        # Extract error message from response payload if available
+        if response:
+            payload_error = response.get("result") or response.get("error", "")
+            logger.error("claude error: %s", str(payload_error)[:500])
+        elif stdout_text.strip():
             logger.error("claude stdout: %s", stdout_text[:500])
 
         # Check for common failure patterns
         check_text = (stderr_text + stdout_text).lower()
-        if "api key" in check_text or "authentication" in check_text or "unauthorized" in check_text:
+        if "not logged in" in check_text or "/login" in check_text:
+            logger.error(
+                "HINT: claude is not authenticated. Set ANTHROPIC_API_KEY env var "
+                "or run `claude /login` interactively (without --bare)."
+            )
+        elif "api key" in check_text or "authentication" in check_text or "unauthorized" in check_text:
             logger.error("HINT: API key issue — check ANTHROPIC_API_KEY")
         if "rate limit" in check_text or "429" in check_text:
             logger.error("HINT: Rate limited — consider retry/backoff")
 
-        error_summary = stderr_text.strip()[:300] or stdout_text.strip()[:300]
+        if response:
+            error_summary = str(response.get("result") or response.get("error", response))[:300]
+        else:
+            error_summary = stderr_text.strip()[:300] or stdout_text.strip()[:300]
         raise RuntimeError(
             f"claude failed (rc={proc.returncode}): {error_summary}"
         )
 
-    # Parse JSON response from claude
-    try:
-        response = json.loads(stdout_text)
-    except json.JSONDecodeError as e:
-        logger.error("Failed to parse claude JSON output: %s", e)
-        logger.error("claude stdout: %s", stdout_text[:1000])
-        raise RuntimeError(f"claude returned invalid JSON: {e}")
+    if response is None:
+        raise RuntimeError(f"claude returned invalid JSON: {stdout_text[:500]}")
 
-    # Check response type
-    resp_type = response.get("type")
-    if resp_type != "success":
-        error_msg = response.get("error", response.get("result", str(response)))
-        raise RuntimeError(f"claude returned type={resp_type}: {error_msg}")
-
-    # Extract structured output
+    # Successful response — extract structured output
+    # Schema: {"type": "result", "subtype": "success", "is_error": false,
+    #          "result": "...", "structured_output": {...}|null,
+    #          "total_cost_usd": 0.01, "usage": {...}}
     data = response.get("structured_output")
     if data is None:
         # Fallback: try to extract JSON from the text result
@@ -117,13 +133,15 @@ async def claude_structured_output(
         else:
             raise RuntimeError("claude returned no structured_output and no result text")
 
-    # Log cost info
-    cost = response.get("cost", {})
+    # Log cost info (claude schema: total_cost_usd, usage.{input,output}_tokens)
+    cost_usd = response.get("total_cost_usd", 0.0)
+    usage = response.get("usage", {})
+    total_tokens = usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
     logger.info(
         "Claude result parsed for %s (cost=$%.4f, tokens=%d)",
         output_model.__name__,
-        cost.get("cost_usd", 0),
-        cost.get("total_tokens", 0),
+        cost_usd,
+        total_tokens,
     )
 
     return output_model.model_validate(data)
