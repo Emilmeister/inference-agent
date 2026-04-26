@@ -1,11 +1,13 @@
-"""Tests for codex utility — JSON extraction from various output formats."""
+"""Tests for claude CLI utility — JSON extraction fallback and backward compat."""
 
 import pytest
 
-from inference_agent.utils.codex import _extract_json, _find_after_banner, _make_openai_compatible
+from inference_agent.utils.codex import _extract_json, claude_structured_output, codex_structured_output
 
 
 class TestExtractJson:
+    """_extract_json is a fallback for when structured_output is not available."""
+
     def test_plain_json(self):
         result = _extract_json('{"key": "value"}')
         assert result == {"key": "value"}
@@ -46,63 +48,8 @@ class TestExtractJson:
         with pytest.raises(ValueError):
             _extract_json("   ")
 
-
-class TestFindAfterBanner:
-    def test_no_banner(self):
-        assert _find_after_banner("just an error message") == 0
-
-    def test_single_separator(self):
-        stderr = "OpenAI Codex v0.124.0\n--------\nsome content"
-        assert _find_after_banner(stderr) == 0
-
-    def test_full_banner_with_error(self):
-        stderr = (
-            "OpenAI Codex v0.124.0 (research preview)\n"
-            "--------\n"
-            "workdir: /home/user1/project\n"
-            "model: gpt-5.4\n"
-            "provider: openai\n"
-            "session id: abc-123\n"
-            "--------\n"
-            "user\n"
-            "Some prompt text here...\n"
-            "\n"
-            "Error: API request failed with status 401\n"
-        )
-        pos = _find_after_banner(stderr)
-        remaining = stderr[pos:]
-        assert "Error: API request failed" in remaining
-
-    def test_banner_no_error_marker(self):
-        stderr = (
-            "OpenAI Codex v0.124.0\n"
-            "--------\n"
-            "workdir: /tmp\n"
-            "--------\n"
-            "user\n"
-            "prompt content only\n"
-        )
-        pos = _find_after_banner(stderr)
-        # Returns position after second --------
-        assert pos > 0
-        assert "user" in stderr[pos:]
-
-    def test_error_marker_denied(self):
-        stderr = (
-            "OpenAI Codex v0.124.0\n"
-            "--------\n"
-            "info: stuff\n"
-            "--------\n"
-            "user\n"
-            "long prompt...\n"
-            "permission denied: /tmp/result.json\n"
-        )
-        pos = _find_after_banner(stderr)
-        remaining = stderr[pos:]
-        assert "denied" in remaining
-
-    def test_complex_codex_output(self):
-        """Simulate codex wrapping JSON in explanation text."""
+    def test_complex_output(self):
+        """Simulate LLM wrapping JSON in explanation text."""
         text = """I'll configure a baseline vLLM experiment.
 
 ```json
@@ -120,141 +67,52 @@ This should work well."""
         assert result["max_model_len"] == 32768
 
 
-class TestMakeOpenaiCompatible:
-    def test_adds_additional_properties_false(self):
-        schema = {"type": "object", "properties": {"name": {"type": "string"}}}
-        _make_openai_compatible(schema)
-        assert schema["additionalProperties"] is False
+class TestBackwardCompat:
+    """Verify that the old import name still works."""
 
-    def test_all_properties_required(self):
-        schema = {
-            "type": "object",
-            "properties": {
-                "a": {"type": "string"},
-                "b": {"type": "integer"},
-            },
-            "required": ["a"],
-        }
-        _make_openai_compatible(schema)
-        assert set(schema["required"]) == {"a", "b"}
+    def test_codex_structured_output_is_alias(self):
+        assert codex_structured_output is claude_structured_output
 
-    def test_nested_objects(self):
-        schema = {
-            "type": "object",
-            "properties": {
-                "inner": {
-                    "type": "object",
-                    "properties": {"x": {"type": "number"}},
-                },
-            },
-        }
-        _make_openai_compatible(schema)
-        assert schema["additionalProperties"] is False
-        assert schema["properties"]["inner"]["additionalProperties"] is False
 
-    def test_defs_processed(self):
-        schema = {
-            "type": "object",
-            "properties": {"ref": {"$ref": "#/$defs/Sub"}},
-            "$defs": {
-                "Sub": {
-                    "type": "object",
-                    "properties": {"val": {"type": "string"}},
-                }
-            },
-        }
-        _make_openai_compatible(schema)
-        assert schema["$defs"]["Sub"]["additionalProperties"] is False
-        assert schema["$defs"]["Sub"]["required"] == ["val"]
+class TestPydanticSchemas:
+    """Verify that Pydantic schemas are valid JSON Schema for claude --json-schema."""
 
-    def test_array_items(self):
-        schema = {
-            "type": "object",
-            "properties": {
-                "items": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {"id": {"type": "integer"}},
-                    },
-                },
-            },
-        }
-        _make_openai_compatible(schema)
-        inner = schema["properties"]["items"]["items"]
-        assert inner["additionalProperties"] is False
-
-    def test_anyof(self):
-        schema = {
-            "type": "object",
-            "properties": {
-                "value": {
-                    "anyOf": [
-                        {"type": "string"},
-                        {"type": "object", "properties": {"x": {"type": "integer"}}},
-                    ]
-                }
-            },
-        }
-        _make_openai_compatible(schema)
-        obj_variant = schema["properties"]["value"]["anyOf"][1]
-        assert obj_variant["additionalProperties"] is False
-
-    def test_freeform_dict_removed(self):
-        """dict[str, str] properties should be removed (not supported by OpenAI)."""
-        schema = {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"},
-                "env": {
-                    "type": "object",
-                    "additionalProperties": {"type": "string"},
-                },
-            },
-        }
-        _make_openai_compatible(schema)
-        assert "env" not in schema["properties"]
-        assert "env" not in schema["required"]
-        assert "name" in schema["properties"]
-
-    def test_typed_object_not_removed(self):
-        """Objects with explicit properties should NOT be removed."""
-        schema = {
-            "type": "object",
-            "properties": {
-                "config": {
-                    "type": "object",
-                    "properties": {"key": {"type": "string"}},
-                    "additionalProperties": {"type": "string"},
-                },
-            },
-        }
-        _make_openai_compatible(schema)
-        # Has explicit `properties`, so should be kept
-        assert "config" in schema["properties"]
-
-    def test_pydantic_planner_output_schema(self):
-        """Real-world test: PlannerOutput schema must be OpenAI-compatible."""
+    def test_planner_output_schema(self):
+        """PlannerOutput schema should be valid JSON Schema."""
         from inference_agent.models import PlannerOutput
 
         schema = PlannerOutput.model_json_schema()
-        _make_openai_compatible(schema)
 
-        assert schema.get("additionalProperties") is False
-        assert "required" in schema
-        # All remaining properties should be required
-        assert set(schema["required"]) == set(schema["properties"].keys())
-        # extra_env (dict[str, str]) should be removed
-        assert "extra_env" not in schema["properties"]
-        # extra_engine_args (list[str]) should remain
-        assert "extra_engine_args" in schema["properties"]
+        # Must be a valid JSON-serializable dict
+        json_str = __import__("json").dumps(schema)
+        parsed = __import__("json").loads(json_str)
+        assert parsed["type"] == "object"
+        assert "properties" in parsed
+        assert "engine" in parsed["properties"]
+        assert "rationale" in parsed["properties"]
 
-    def test_pydantic_analyzer_output_schema(self):
-        """Real-world test: AnalyzerOutput schema must be OpenAI-compatible."""
+    def test_analyzer_output_schema(self):
+        """AnalyzerOutput schema should be valid JSON Schema."""
         from inference_agent.models import AnalyzerOutput
 
         schema = AnalyzerOutput.model_json_schema()
-        _make_openai_compatible(schema)
 
-        assert schema.get("additionalProperties") is False
-        assert set(schema["required"]) == set(schema["properties"].keys())
+        json_str = __import__("json").dumps(schema)
+        parsed = __import__("json").loads(json_str)
+        assert parsed["type"] == "object"
+        assert "commentary" in parsed["properties"]
+        assert "decision" in parsed["properties"]
+
+    def test_planner_schema_has_extra_env(self):
+        """extra_env (dict[str, str]) should be in the schema — claude handles it natively."""
+        from inference_agent.models import PlannerOutput
+
+        schema = PlannerOutput.model_json_schema()
+        # Unlike OpenAI strict mode, claude handles free-form dicts
+        assert "extra_env" in schema["properties"]
+
+    def test_planner_schema_has_extra_engine_args(self):
+        from inference_agent.models import PlannerOutput
+
+        schema = PlannerOutput.model_json_schema()
+        assert "extra_engine_args" in schema["properties"]

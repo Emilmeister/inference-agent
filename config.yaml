@@ -2,11 +2,9 @@
 model_name: "Qwen/Qwen3.5-9B"
 model_revision: null
 
-# LLM агента (для принятия решений)
+# LLM агента (для принятия решений — Claude Code CLI)
 agent_llm:
-  base_url: "https://foundation-models.api.cloud.ru/v1"
-  api_key: "${AGENT_LLM_API_KEY}"
-  model: "zai-org/GLM-4.6"
+  model: "claude-opus-4-7"
 
 # Docker
 docker:

@@ -9,7 +9,7 @@
 LangGraph граф: `discovery → planner → validator → executor → analyzer → reporter → (planner | END)`
 
 - **discovery** — детектит GPU (nvidia-smi), читает model config с HuggingFace, определяет доступные Docker images. Fails fast если нет engine images.
-- **planner** — LLM (codex exec) выбирает следующую конфигурацию на основе истории экспериментов
+- **planner** — LLM (claude CLI) выбирает следующую конфигурацию на основе истории экспериментов
 - **validator** — проверяет конфиг против hardware profile и engine capabilities до запуска Docker. Невалидные конфигурации скипают executor.
 - **executor** — запускает движок в Docker, проводит correctness gate (smoke tests до performance), прогоняет бенчмарк (async HTTP load generator), проводит post-benchmark correctness check, собирает GPU метрики. Структурированные ошибки и failure classification по стадиям.
 - **analyzer** — LLM анализирует результаты, строит Pareto-фронт, решает continue/stop. Eligibility-filtered лидерборды (только correctness-eligible эксперименты). Не пишет файлы.
@@ -43,7 +43,7 @@ config.yaml          — конфигурация по умолчанию
 - Все nodes — async функции `async def node_name(state: AgentState) -> dict`
 - Engines строят `docker run` аргументы как `list[str]`, не используют Docker SDK (прямой subprocess)
 - Результаты экспериментов — self-contained JSON файлы с atomic writes (temp → fsync → rename)
-- LLM для агента — `codex exec` через subprocess с structured output schemas
+- LLM для агента — `claude --bare` CLI через subprocess с `--json-schema` structured output
 - Бенчмарк — свой async HTTP клиент на aiohttp (streaming SSE parsing для TTFT/TPOT)
 - Ошибки — structured `ExperimentError(stage, message, details)` вместо строк
 - Логи — structured logging с experiment_id/engine контекстом через contextvars
@@ -52,7 +52,7 @@ config.yaml          — конфигурация по умолчанию
 
 ```bash
 pip install -e .
-AGENT_LLM_API_KEY=... inference-agent -c config.yaml -v
+ANTHROPIC_API_KEY=... inference-agent -c config.yaml -v
 
 # Tests
 pip install -e ".[dev]"

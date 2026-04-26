@@ -8,9 +8,8 @@ from inference_agent.models_pkg.domain import EngineType
 
 
 class AgentLLMConfig(BaseModel):
-    base_url: str = "https://api.openai.com/v1"
-    api_key: str = ""
-    model: str = "gpt-4o"
+    model: str = "claude-sonnet-4-6"
+    max_budget_usd: float | None = None
 
 
 class DockerConfig(BaseModel):

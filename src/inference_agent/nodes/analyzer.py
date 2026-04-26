@@ -16,7 +16,7 @@ from inference_agent.models import (
     ParetoPoint,
 )
 from inference_agent.state import AgentState
-from inference_agent.utils.codex import codex_structured_output
+from inference_agent.utils.codex import claude_structured_output
 
 logger = logging.getLogger(__name__)
 
@@ -248,7 +248,7 @@ async def analyzer_node(state: AgentState) -> dict:
         hard_stop = True
         stop_reason = f"Plateau: no improvement in last {config.experiments.plateau_window} experiments"
 
-    # Ask LLM for analysis using codex
+    # Ask LLM for analysis using claude
 
     # Prepare leaderboard data (only eligible experiments)
     eligible = [h for h in all_history if _is_eligible(h)]
@@ -301,11 +301,11 @@ async def analyzer_node(state: AgentState) -> dict:
     full_prompt = prompt + "\n\nAnalyze the latest experiment."
 
     try:
-        analysis: AnalyzerOutput = await codex_structured_output(full_prompt, AnalyzerOutput)
+        analysis: AnalyzerOutput = await claude_structured_output(full_prompt, AnalyzerOutput)
     except Exception as e:
-        logger.warning("Codex structured output failed for analyzer: %s", e)
+        logger.warning("Claude structured output failed for analyzer: %s", e)
         analysis = AnalyzerOutput(
-            commentary="Analysis unavailable (codex error)",
+            commentary="Analysis unavailable (LLM error)",
             classification="none",
             decision="stop" if hard_stop else "continue",
             next_goal="explore",

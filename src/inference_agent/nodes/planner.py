@@ -14,7 +14,7 @@ from inference_agent.models import (
     PlannerOutput,
 )
 from inference_agent.state import AgentState
-from inference_agent.utils.codex import codex_structured_output
+from inference_agent.utils.codex import claude_structured_output
 
 logger = logging.getLogger(__name__)
 
@@ -345,16 +345,16 @@ async def planner_node(state: AgentState) -> dict:
     full_prompt = prompt + "\n\nGenerate the next experiment configuration."
 
     try:
-        result: PlannerOutput = await codex_structured_output(full_prompt, PlannerOutput)
+        result: PlannerOutput = await claude_structured_output(full_prompt, PlannerOutput)
     except Exception as e:
         error_summary = str(e).split("\n")[0][:200]
-        logger.error("Codex structured output failed, using fallback: %s", error_summary)
+        logger.error("Claude structured output failed, using fallback: %s", error_summary)
         safe_ctx = _estimate_safe_context(hardware)
         result = PlannerOutput(
             engine=hardware.available_engines[0].value if hardware.available_engines else "vllm",
             tensor_parallel_size=hardware.gpu_count,
             max_model_len=safe_ctx,
-            rationale=f"Fallback: codex failed — {error_summary}",
+            rationale=f"Fallback: claude failed — {error_summary}",
         )
 
     # Override engine if alternation rule requires it
