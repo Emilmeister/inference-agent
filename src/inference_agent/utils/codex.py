@@ -1,10 +1,21 @@
-"""Utility for calling Claude Code CLI with structured output."""
+"""Utility for calling Claude Code CLI with structured output.
+
+We run `claude -p` (NOT `--bare`) so that subscription/OAuth auth is used
+instead of API-key billing. To make the call behave like a stateless API
+endpoint, we:
+  - drop ANTHROPIC_API_KEY (forces subscription auth path)
+  - cd into an empty workdir (avoids loading project CLAUDE.md / .claude/*)
+  - disable tools, slash-commands, session persistence
+  - replace the default Claude Code system prompt with a minimal one
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import os
+from pathlib import Path
 from typing import TypeVar
 
 from pydantic import BaseModel
@@ -12,6 +23,24 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
+
+# Empty workdir for claude subprocess — keeps it from picking up
+# project-level CLAUDE.md, .claude/settings.json, .mcp.json, etc.
+_CLAUDE_WORKDIR = Path.home() / ".cache" / "inference-agent-claude-runner"
+
+# Minimal system prompt that replaces the default Claude Code prompt.
+# Kept short and intentionally non-agentic.
+_SYSTEM_PROMPT = (
+    "You are a deterministic structured-output assistant. "
+    "Follow the user's task and return valid JSON matching the provided schema. "
+    "Do not mention the schema. Do not use tools."
+)
+
+
+def _ensure_workdir() -> Path:
+    """Ensure the empty workdir exists for claude subprocess calls."""
+    _CLAUDE_WORKDIR.mkdir(parents=True, exist_ok=True)
+    return _CLAUDE_WORKDIR
 
 
 async def claude_structured_output(
@@ -34,10 +63,14 @@ async def claude_structured_output(
     schema_json = json.dumps(schema)
 
     cmd = [
-        "claude", "--bare",
-        "-p", prompt,
+        "claude", "-p", prompt,
         "--output-format", "json",
         "--json-schema", schema_json,
+        "--tools", "",                  # no Bash/Read/Edit/etc.
+        "--disable-slash-commands",     # no /skills, /plugins
+        "--no-session-persistence",     # stateless
+        "--system-prompt", _SYSTEM_PROMPT,
+        "--max-turns", "2",             # allow 1 retry for schema mismatch
     ]
 
     prompt_bytes = prompt.encode("utf-8")
@@ -46,7 +79,14 @@ async def claude_structured_output(
         output_model.__name__,
         len(prompt_bytes),
     )
-    logger.debug("Claude command: claude --bare -p <prompt> --json-schema <schema> ...")
+    logger.debug("Claude command: claude -p <prompt> --json-schema <schema> --tools '' ...")
+
+    # Drop ANTHROPIC_API_KEY so claude uses subscription (OAuth) auth instead
+    # of API-key billing. Run from an empty workdir so claude doesn't load
+    # project CLAUDE.md / .claude/settings / .mcp.json.
+    env = os.environ.copy()
+    env.pop("ANTHROPIC_API_KEY", None)
+    workdir = _ensure_workdir()
 
     # Use DEVNULL for stdin — otherwise claude waits 3s for piped input.
     proc = await asyncio.create_subprocess_exec(
@@ -54,6 +94,8 @@ async def claude_structured_output(
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        cwd=str(workdir),
+        env=env,
     )
 
     try:
@@ -97,11 +139,12 @@ async def claude_structured_output(
         check_text = (stderr_text + stdout_text).lower()
         if "not logged in" in check_text or "/login" in check_text:
             logger.error(
-                "HINT: claude is not authenticated. Set ANTHROPIC_API_KEY env var "
-                "or run `claude /login` interactively (without --bare)."
+                "HINT: claude is not authenticated. Run `claude` interactively "
+                "(once) and execute `/login` to OAuth into your subscription. "
+                "The token will be saved in the keychain and reused by subprocess calls."
             )
         elif "api key" in check_text or "authentication" in check_text or "unauthorized" in check_text:
-            logger.error("HINT: API key issue — check ANTHROPIC_API_KEY")
+            logger.error("HINT: authentication issue — re-run `claude /login`")
         if "rate limit" in check_text or "429" in check_text:
             logger.error("HINT: Rate limited — consider retry/backoff")
 

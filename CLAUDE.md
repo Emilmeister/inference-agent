@@ -43,7 +43,7 @@ config.yaml          — конфигурация по умолчанию
 - Все nodes — async функции `async def node_name(state: AgentState) -> dict`
 - Engines строят `docker run` аргументы как `list[str]`, не используют Docker SDK (прямой subprocess)
 - Результаты экспериментов — self-contained JSON файлы с atomic writes (temp → fsync → rename)
-- LLM для агента — `claude --bare` CLI через subprocess с `--json-schema` structured output
+- LLM для агента — `claude -p` CLI через subprocess с `--json-schema` (subscription/OAuth billing, не API key). Запускается из пустой workdir с `--tools "" --disable-slash-commands --no-session-persistence` чтобы не подтягивать project CLAUDE.md/skills/MCP
 - Бенчмарк — свой async HTTP клиент на aiohttp (streaming SSE parsing для TTFT/TPOT)
 - Ошибки — structured `ExperimentError(stage, message, details)` вместо строк
 - Логи — structured logging с experiment_id/engine контекстом через contextvars
@@ -52,7 +52,11 @@ config.yaml          — конфигурация по умолчанию
 
 ```bash
 pip install -e .
-ANTHROPIC_API_KEY=... inference-agent -c config.yaml -v
+
+# One-time: authenticate claude CLI via subscription (saved in keychain)
+claude            # → /login
+
+inference-agent -c config.yaml -v
 
 # Tests
 pip install -e ".[dev]"
