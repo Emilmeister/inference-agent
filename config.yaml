@@ -2,9 +2,17 @@
 model_name: "Qwen/Qwen3.5-9B"
 model_revision: null
 
-# LLM агента (для принятия решений — Claude Code CLI)
+# LLM агента (для принятия решений — любой OpenAI-совместимый endpoint)
+# api_key читается из переменной окружения OPENAI_API_KEY (или укажи свою через api_key_env).
+# Можно также явно положить ключ в api_key (не рекомендуется коммитить).
 agent_llm:
-  model: "claude-opus-4-7"
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4o-mini"
+  api_key_env: "OPENAI_API_KEY"
+  temperature: 0.0
+  # "json_schema" — strict structured outputs (рекомендуется для OpenAI и совр. провайдеров)
+  # "json_object" — fallback: схема инлайнится в промпт, провайдер только гарантирует JSON
+  structured_output_mode: "json_schema"
 
 # Docker
 docker:
@@ -55,7 +63,5 @@ storage:
 # Пиши сюда на какие параметры обратить внимание, что попробовать,
 # что пропустить и т.д.
 planner_instructions: |
-  Дополнительно оцени какой прирост даст MTP
-  `python -m sglang.launch_server --model-path Qwen/Qwen3.5-9B --port 8000 --tp-size 1 --mem-fraction-static 0.8 --context-length 262144 --reasoning-parser qwen3 --speculative-algo NEXTN --speculative-num-steps 3 --speculative-eagle-topk 1 --speculative-num-draft-tokens 4`
-  А для vllm оцени какой прирост дает --language-model-only
+  Делай все на свое усмотрение
 

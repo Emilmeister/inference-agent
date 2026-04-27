@@ -104,21 +104,22 @@ class TestGetBenchmarkPhases:
         )
         phases = get_benchmark_phases(model_max_context=262144, benchmark_config=cfg)
         long = [p for p in phases if p[1] == "long_context"]
-        assert len(long) == 1
-        assert long[0][4] == 4096
+        # Long-context sweep is [2, 8, 16] — 3 phases for one long prompt length.
+        assert len(long) == 3
+        assert all(p[4] == 4096 for p in long)
 
-    def test_long_context_max_concurrency(self):
-        """Long context phases are limited to concurrency <= 4."""
+    def test_long_context_uses_explicit_concurrency_sweep(self):
+        """Long context phases use a fixed [2, 8, 16] sweep, independent of
+        the global concurrency_levels."""
         cfg = BenchmarkConfig(
-            concurrency_levels=[1, 4, 16, 64, 128],
+            concurrency_levels=[1, 4, 64, 128],  # no overlap with long_context sweep
             prompt_lengths=[32768],
             long_context_max_output_tokens=256,
         )
         phases = get_benchmark_phases(model_max_context=262144, benchmark_config=cfg)
         long = [p for p in phases if p[1] == "long_context"]
         concurrencies = {p[2] for p in long}
-        # Only c=1 and c=4 should be present (c>=16 skipped for long context)
-        assert max(concurrencies) <= 4
+        assert concurrencies == {2, 8, 16}
 
     def test_phase_ids_unique(self):
         phases = get_benchmark_phases(model_max_context=262144)

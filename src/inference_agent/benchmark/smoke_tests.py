@@ -19,7 +19,7 @@ async def _chat_completion(
     payload_extra: dict,
 ) -> dict:
     """Send a chat completion request and return the parsed response."""
-    payload = {"model": model, "max_tokens": 1024, **payload_extra}
+    payload = {"model": model, "max_tokens": 8128, **payload_extra}
     async with session.post(
         url, json=payload, timeout=aiohttp.ClientTimeout(total=60)
     ) as resp:
@@ -173,7 +173,7 @@ async def test_json_mode(
                     ),
                 }
             ],
-            "max_tokens": 1024,
+            "max_tokens": 8128,
             "response_format": {"type": "json_object"},
         })
 
@@ -233,7 +233,7 @@ async def test_json_schema(
                     "content": "List 3 programming languages with their year of creation. Do not think, just respond directly.",
                 }
             ],
-            "max_tokens": 1024,
+            "max_tokens": 8128,
             "response_format": schema,
         })
 

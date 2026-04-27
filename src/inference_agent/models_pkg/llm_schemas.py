@@ -27,6 +27,13 @@ class PlannerOutput(BaseModel):
     chunked_prefill_size: int | None = Field(default=None, description="Chunked prefill size (SGLang)")
     enable_prefix_caching: bool = Field(default=False, description="Enable prefix caching")
     enforce_eager: bool = Field(default=False, description="Disable CUDA graphs (vLLM)")
+    attention_backend: str | None = Field(
+        default=None,
+        description="Attention kernel backend (both engines map to --attention-backend). "
+        "SGLang choices include flashinfer, triton, fa3, fa4, flashmla, torch_native, etc. "
+        "vLLM accepts FLASHINFER, FLASH_ATTN, XFORMERS, TORCH_SDPA, etc. "
+        "Leave null to use the engine default.",
+    )
     speculative_algorithm: str | None = Field(default=None, description="Speculative decoding algorithm")
     speculative_draft_model: str | None = Field(default=None, description="Draft model path")
     speculative_num_steps: int | None = Field(default=None, description="Speculative decode steps")

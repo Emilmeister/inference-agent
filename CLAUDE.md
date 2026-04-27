@@ -43,7 +43,7 @@ config.yaml          — конфигурация по умолчанию
 - Все nodes — async функции `async def node_name(state: AgentState) -> dict`
 - Engines строят `docker run` аргументы как `list[str]`, не используют Docker SDK (прямой subprocess)
 - Результаты экспериментов — self-contained JSON файлы с atomic writes (temp → fsync → rename)
-- LLM для агента — `claude -p` CLI через subprocess с `--json-schema` (subscription/OAuth billing, не API key). Запускается из пустой workdir с `--tools "" --disable-slash-commands --no-session-persistence` чтобы не подтягивать project CLAUDE.md/skills/MCP
+- LLM для агента — любой OpenAI-совместимый Chat Completions endpoint через `openai.AsyncOpenAI` (`base_url`, `api_key`, `model` из `agent_llm` в config). Structured output: `response_format={"type": "json_schema", strict: true}` либо `json_object` fallback. Реализация: `src/inference_agent/utils/llm.py`
 - Бенчмарк — свой async HTTP клиент на aiohttp (streaming SSE parsing для TTFT/TPOT)
 - Ошибки — structured `ExperimentError(stage, message, details)` вместо строк
 - Логи — structured logging с experiment_id/engine контекстом через contextvars
@@ -53,8 +53,8 @@ config.yaml          — конфигурация по умолчанию
 ```bash
 pip install -e .
 
-# One-time: authenticate claude CLI via subscription (saved in keychain)
-claude            # → /login
+# Set API key for the agent LLM (any OpenAI-compatible provider)
+export OPENAI_API_KEY=sk-...
 
 inference-agent -c config.yaml -v
 

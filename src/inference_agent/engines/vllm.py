@@ -81,6 +81,9 @@ class VLLMEngine(BaseEngine):
         if experiment.enforce_eager:
             serve_args.append("--enforce-eager")
 
+        if experiment.attention_backend:
+            serve_args.extend(["--attention-backend", experiment.attention_backend])
+
         if (
             experiment.speculative_algorithm
             and experiment.speculative_draft_model

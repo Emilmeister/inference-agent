@@ -2,14 +2,45 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+import os
+from typing import Literal
+
+from pydantic import BaseModel, Field, model_validator
 
 from inference_agent.models_pkg.domain import EngineType
 
 
 class AgentLLMConfig(BaseModel):
-    model: str = "claude-sonnet-4-6"
+    """Agent LLM (planner/analyzer) — any OpenAI-compatible Chat Completions endpoint.
+
+    Supports OpenAI, Cloud.ru Foundation Models, Together, OpenRouter, vLLM/SGLang
+    OpenAI-compatible servers, etc. Structured output is requested via the
+    `response_format` field per the OpenAI spec.
+    """
+
+    base_url: str = "https://api.openai.com/v1"
+    model: str = "gpt-4o-mini"
+
+    # Provide either api_key directly or api_key_env (env var name to read from).
+    # api_key takes precedence if both are set.
+    api_key: str | None = None
+    api_key_env: str = "OPENAI_API_KEY"
+
+    temperature: float = 0.0
+    max_tokens: int | None = None
+    timeout_sec: int = 600
+
+    # "json_schema" — strict structured output (recommended; OpenAI / modern providers)
+    # "json_object" — provider only enforces valid JSON; schema is inlined into prompt
+    structured_output_mode: Literal["json_schema", "json_object"] = "json_schema"
+
     max_budget_usd: float | None = None
+
+    @model_validator(mode="after")
+    def _resolve_api_key(self) -> "AgentLLMConfig":
+        if not self.api_key and self.api_key_env:
+            self.api_key = os.environ.get(self.api_key_env)
+        return self
 
 
 class DockerConfig(BaseModel):

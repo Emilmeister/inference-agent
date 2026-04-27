@@ -1,7 +1,7 @@
 """Tests for Docker args building — vLLM and SGLang engines."""
 
 from inference_agent.engines.base import dedup_flags
-from inference_agent.engines.sglang import SGLangEngine, _filter_auto_flags
+from inference_agent.engines.sglang import SGLangEngine
 from inference_agent.engines.vllm import VLLMEngine
 from inference_agent.models import AgentConfig, EngineType, ExperimentConfig
 
@@ -44,23 +44,6 @@ class TestDedupFlags:
     def test_non_flag_args_preserved(self):
         args = ["python3", "-m", "sglang", "--port", "8000"]
         assert dedup_flags(args) == args
-
-
-class TestFilterAutoFlags:
-    def test_empty_auto_flags(self):
-        extra = ["--some-flag", "value"]
-        assert _filter_auto_flags(extra, set()) == extra
-
-    def test_strips_managed_flag_with_value(self):
-        extra = ["--mamba-scheduler-strategy", "extra_buffer", "--some-other", "val"]
-        result = _filter_auto_flags(extra, {"--mamba-scheduler-strategy"})
-        assert result == ["--some-other", "val"]
-
-    def test_strips_managed_boolean_flag(self):
-        extra = ["--speculative-algorithm", "--some-other"]
-        result = _filter_auto_flags(extra, {"--speculative-algorithm"})
-        # "--some-other" starts with "-", so --speculative-algorithm is boolean
-        assert result == ["--some-other"]
 
 
 class TestVLLMEngine:
@@ -113,6 +96,14 @@ class TestVLLMEngine:
 
         assert "HF_TOKEN=hf_test123" in " ".join(args)
 
+    def test_attention_backend(self):
+        config = _make_config()
+        engine = VLLMEngine(config)
+        experiment = _make_experiment(EngineType.VLLM, attention_backend="FLASHINFER")
+        args = engine.build_docker_args(experiment)
+        idx = args.index("--attention-backend")
+        assert args[idx + 1] == "FLASHINFER"
+
     def test_container_name(self):
         config = _make_config()
         engine = VLLMEngine(config)
@@ -132,34 +123,75 @@ class TestSGLangEngine:
         assert "--tp-size" in args
         assert "--enable-metrics" in args
 
-    def test_nextn_env_var(self):
+    def test_speculative_algorithm_passes_through(self):
         config = _make_config()
         engine = SGLangEngine(config)
         experiment = _make_experiment(
             EngineType.SGLANG,
             speculative_algorithm="NEXTN",
             speculative_num_steps=3,
-            enable_prefix_caching=True,
         )
         args = engine.build_docker_args(experiment)
 
-        assert "SGLANG_ENABLE_SPEC_V2=1" in " ".join(args)
         assert "--speculative-algorithm" in args
-        assert "--mamba-scheduler-strategy" in args
+        assert "NEXTN" in args
+        # Quirk-fixes removed: the engine no longer auto-injects env vars,
+        # mamba-scheduler-strategy, or eagle-topk for NEXTN.
+        assert "SGLANG_ENABLE_SPEC_V2=1" not in " ".join(args)
+        assert "--mamba-scheduler-strategy" not in args
 
-    def test_nextn_bumps_mem_fraction(self):
+    def test_mem_fraction_passes_through_unchanged(self):
         config = _make_config()
         engine = SGLangEngine(config)
         experiment = _make_experiment(
             EngineType.SGLANG,
             speculative_algorithm="NEXTN",
             mem_fraction_static=0.7,
-            enable_prefix_caching=True,
         )
         args = engine.build_docker_args(experiment)
 
+        # No auto-bump for NEXTN — value comes through as set by the planner.
         idx = args.index("--mem-fraction-static")
-        assert args[idx + 1] == "0.9"
+        assert args[idx + 1] == "0.7"
+
+    def test_chunked_prefill_requires_explicit_size(self):
+        """Without an explicit chunked_prefill_size, no flag is added."""
+        config = _make_config()
+        engine = SGLangEngine(config)
+        experiment = _make_experiment(
+            EngineType.SGLANG,
+            enable_chunked_prefill=True,
+            chunked_prefill_size=None,
+        )
+        args = engine.build_docker_args(experiment)
+        assert "--chunked-prefill-size" not in args
+
+    def test_chunked_prefill_with_explicit_size(self):
+        config = _make_config()
+        engine = SGLangEngine(config)
+        experiment = _make_experiment(
+            EngineType.SGLANG,
+            enable_chunked_prefill=True,
+            chunked_prefill_size=4096,
+        )
+        args = engine.build_docker_args(experiment)
+        idx = args.index("--chunked-prefill-size")
+        assert args[idx + 1] == "4096"
+
+    def test_attention_backend(self):
+        config = _make_config()
+        engine = SGLangEngine(config)
+        experiment = _make_experiment(EngineType.SGLANG, attention_backend="flashinfer")
+        args = engine.build_docker_args(experiment)
+        idx = args.index("--attention-backend")
+        assert args[idx + 1] == "flashinfer"
+
+    def test_attention_backend_omitted_when_null(self):
+        config = _make_config()
+        engine = SGLangEngine(config)
+        experiment = _make_experiment(EngineType.SGLANG, attention_backend=None)
+        args = engine.build_docker_args(experiment)
+        assert "--attention-backend" not in args
 
     def test_container_name(self):
         config = _make_config()

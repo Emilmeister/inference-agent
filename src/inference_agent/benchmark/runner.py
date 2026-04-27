@@ -330,7 +330,11 @@ async def run_benchmark_phase(
 _LONG_PROMPT_THRESHOLD = 8192     # prompt_length >= this → long_context workload
 _STRESS_CONCURRENCY = 512         # concurrency >= this → stress workload
 _THROUGHPUT_CONCURRENCY = 64      # concurrency >= this (but < stress) → throughput
-_MAX_LONG_CONTEXT_CONCURRENCY = 4  # long context phases limited to this concurrency
+
+# Explicit concurrency sweep for long_context phases (decoupled from
+# global concurrency_levels — RAG-style workloads care about a different
+# slice than peak-throughput sweeps).
+_LONG_CONTEXT_CONCURRENCIES: list[int] = [2, 8, 16]
 
 
 def _classify_workload(concurrency: int, prompt_length: int) -> str:
@@ -363,25 +367,35 @@ def get_benchmark_phases(
     # Warmup phase (always first, fixed params)
     phases.append(("warmup", "warmup", 1, min(512, effective_max - 128), 128))
 
-    for conc in sorted(cfg.concurrency_levels):
-        for plen in sorted(cfg.prompt_lengths):
-            is_long = plen >= _LONG_PROMPT_THRESHOLD
-            max_out = cfg.long_context_max_output_tokens if is_long else cfg.max_output_tokens
+    short_prompts = sorted(p for p in cfg.prompt_lengths if p < _LONG_PROMPT_THRESHOLD)
+    long_prompts = sorted(p for p in cfg.prompt_lengths if p >= _LONG_PROMPT_THRESHOLD)
 
-            # Skip if prompt + output exceeds context
+    # Short / throughput / stress phases — driven by global concurrency_levels
+    for conc in sorted(cfg.concurrency_levels):
+        for plen in short_prompts:
+            max_out = cfg.max_output_tokens
             if plen + max_out > effective_max:
                 logger.info(
                     "Skipping c=%d p=%d: prompt+output (%d) exceeds context %d",
                     conc, plen, plen + max_out, effective_max,
                 )
                 continue
-
-            # Skip high concurrency for long context
-            if is_long and conc > _MAX_LONG_CONTEXT_CONCURRENCY:
-                continue
-
             workload = _classify_workload(conc, plen)
-            phase_id = f"c{conc}_p{plen}"
-            phases.append((phase_id, workload, conc, plen, max_out))
+            phases.append((f"c{conc}_p{plen}", workload, conc, plen, max_out))
 
-    return phases
+    # Long-context phases — explicit concurrency sweep, independent of global levels
+    for conc in _LONG_CONTEXT_CONCURRENCIES:
+        for plen in long_prompts:
+            max_out = cfg.long_context_max_output_tokens
+            if plen + max_out > effective_max:
+                logger.info(
+                    "Skipping long-context c=%d p=%d: prompt+output (%d) exceeds context %d",
+                    conc, plen, plen + max_out, effective_max,
+                )
+                continue
+            phases.append((f"c{conc}_p{plen}", "long_context", conc, plen, max_out))
+
+    # Sort by concurrency for stable, predictable ordering (warmup stays first)
+    head, tail = phases[:1], phases[1:]
+    tail.sort(key=lambda p: (p[2], p[3]))
+    return head + tail

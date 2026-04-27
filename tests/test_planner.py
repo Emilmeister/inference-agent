@@ -10,6 +10,7 @@ from inference_agent.models import (
 from inference_agent.nodes.planner import (
     _estimate_safe_context,
     _get_forced_engine,
+    _load_curated_docs,
     _should_disable_speculative,
 )
 
@@ -231,3 +232,33 @@ class TestShouldDisableSpeculative:
         ]
         # Last 3 are [FAILED, FAILED, SUCCESS] — not all failed
         assert _should_disable_speculative(history, EngineType.VLLM, threshold=3) is False
+
+
+# ── _load_curated_docs ────────────────────────────────────────────────────
+
+
+class TestLoadCuratedDocs:
+    def test_vllm_docs_loadable(self):
+        docs = _load_curated_docs(EngineType.VLLM)
+        assert "vLLM CLI parameters" in docs
+        assert "## ParallelConfig" in docs
+        # Sanity-check key flags the planner relies on are present
+        assert "--gpu-memory-utilization" in docs or "--gpu-memory-util" in docs
+
+    def test_sglang_docs_loadable(self):
+        docs = _load_curated_docs(EngineType.SGLANG)
+        assert "SGLang CLI parameters" in docs
+        assert "## Memory and scheduling" in docs
+        assert "--mem-fraction-static" in docs
+
+    def test_omitted_sections_absent(self):
+        """Curated docs strip frontend/SSL/multi-node noise."""
+        sglang = _load_curated_docs(EngineType.SGLANG)
+        assert "## HTTP server" not in sglang
+        assert "## LoRA" not in sglang
+        assert "## Multi-node" not in sglang
+
+        vllm = _load_curated_docs(EngineType.VLLM)
+        assert "## Frontend" not in vllm
+        assert "## LoRAConfig" not in vllm
+        assert "## ObservabilityConfig" not in vllm

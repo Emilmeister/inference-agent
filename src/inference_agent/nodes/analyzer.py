@@ -16,7 +16,7 @@ from inference_agent.models import (
     ParetoPoint,
 )
 from inference_agent.state import AgentState
-from inference_agent.utils.codex import claude_structured_output
+from inference_agent.utils.llm import structured_output
 
 logger = logging.getLogger(__name__)
 
@@ -301,9 +301,11 @@ async def analyzer_node(state: AgentState) -> dict:
     full_prompt = prompt + "\n\nAnalyze the latest experiment."
 
     try:
-        analysis: AnalyzerOutput = await claude_structured_output(full_prompt, AnalyzerOutput)
+        analysis: AnalyzerOutput = await structured_output(
+            full_prompt, AnalyzerOutput, config.agent_llm
+        )
     except Exception as e:
-        logger.warning("Claude structured output failed for analyzer: %s", e)
+        logger.warning("LLM structured output failed for analyzer: %s", e)
         analysis = AnalyzerOutput(
             commentary="Analysis unavailable (LLM error)",
             classification="none",

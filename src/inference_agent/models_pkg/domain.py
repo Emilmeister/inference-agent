@@ -105,6 +105,7 @@ class ExperimentConfig(BaseModel):
     chunked_prefill_size: int | None = None  # sglang
     enable_prefix_caching: bool = False
     enforce_eager: bool = False  # vllm
+    attention_backend: str | None = None  # both engines: --attention-backend
 
     # Speculative decoding
     speculative_algorithm: str | None = None
@@ -315,6 +316,7 @@ class ExperimentSummary(BaseModel):
             "prefix_caching": config.enable_prefix_caching,
             "enforce_eager": config.enforce_eager,
             "scheduling_policy": config.scheduling_policy,
+            "attention_backend": config.attention_backend,
         }
         if config.engine == EngineType.VLLM:
             digest["gpu_mem_util"] = config.gpu_memory_utilization
@@ -326,6 +328,14 @@ class ExperimentSummary(BaseModel):
             digest["max_prefill_tokens"] = config.max_prefill_tokens
             digest["schedule_policy"] = config.scheduling_policy
             digest["continuous_decode_steps"] = config.num_continuous_decode_steps
+
+        # Surface extra_engine_args / extra_env so the planner can compare
+        # tail-flags across runs (otherwise these are only visible via the
+        # full docker_command string, which is harder to diff).
+        if config.extra_engine_args:
+            digest["extra_args"] = list(config.extra_engine_args)
+        if config.extra_env:
+            digest["extra_env"] = dict(config.extra_env)
 
         smoke_passed = sum([
             result.smoke_tests.basic_chat,
