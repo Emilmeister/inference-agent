@@ -55,6 +55,37 @@ class DockerConfig(BaseModel):
     sglang_extra_args: list[str] = Field(default_factory=list)
 
 
+class StartupConfig(BaseModel):
+    """Engine startup / healthcheck behavior.
+
+    The total wall time spent waiting for an engine to become healthy is bounded
+    by `hard_timeout_sec`. To handle big-model loads that legitimately take long
+    but do progress, we ALSO track an idle deadline: if no progress marker shows
+    up in container logs for `idle_timeout_sec`, we abort. Idle is reset every
+    time a known progress marker appears, so the wait can extend beyond the
+    nominal timeout for slow loads, but stalls are still caught quickly.
+    """
+
+    hard_timeout_sec: int = 1800        # 30 min — generous for big models
+    idle_timeout_sec: int = 300         # 5 min without log progress = stall
+    log_scan_interval_sec: float = 10.0  # how often to fetch + scan container logs
+
+    # Pre-download model weights into the host HF cache before launching any
+    # container. Eliminates the "first launch takes 15+ min downloading 60GB"
+    # failure mode and amortizes download cost across all experiments.
+    prefetch_model: bool = True
+    prefetch_allow_patterns: list[str] = Field(
+        default_factory=lambda: [
+            "*.json",
+            "*.txt",
+            "*.jinja",
+            "*.safetensors",
+            "tokenizer.model",
+            "tokenizer.json",
+        ]
+    )
+
+
 class BenchmarkConfig(BaseModel):
     warmup_requests: int = 10
     concurrency_levels: list[int] = Field(
@@ -92,6 +123,7 @@ class AgentConfig(BaseModel):
     hf_token: str | None = None  # HuggingFace token for private models
     agent_llm: AgentLLMConfig = Field(default_factory=AgentLLMConfig)
     docker: DockerConfig = Field(default_factory=DockerConfig)
+    startup: StartupConfig = Field(default_factory=StartupConfig)
     benchmark: BenchmarkConfig = Field(default_factory=BenchmarkConfig)
     experiments: ExperimentsConfig = Field(default_factory=ExperimentsConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)

@@ -63,42 +63,210 @@ async def _is_container_running(name: str) -> bool:
         return False
 
 
+# Patterns indicating the engine has hit a non-recoverable error before the
+# health endpoint comes up. Detecting these in container logs lets us abort
+# immediately instead of waiting for the full timeout, and lets the planner
+# see a precise classification instead of generic "healthcheck_timeout".
+_FATAL_LOG_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("invalid choice:", "argparse_error"),
+    ("unrecognized arguments", "argparse_error"),
+    ("error: argument", "argparse_error"),
+    ("the following arguments are required", "argparse_error"),
+    ("torch.cuda.outofmemoryerror", "oom"),
+    ("cuda out of memory", "oom"),
+    ("out of memory", "oom"),
+    ("cuda error", "cuda_error"),
+    ("nccl error", "nccl_error"),
+    ("repositorynotfounderror", "model_not_found"),
+    ("gatedrepoerror", "model_gated"),
+    ("no space left on device", "disk_full"),
+    ("os error 28", "disk_full"),
+)
+
+# Markers indicating active loading progress. Any new marker resets the
+# idle-timeout clock so legitimately-slow loads (big models, slow disk) get
+# the time they need without needing one giant nominal timeout.
+_PROGRESS_MARKERS: tuple[str, ...] = (
+    "loading safetensors",
+    "loading weights",
+    "loading model weights",
+    "loading checkpoint shards",
+    "downloading",
+    "fetching",
+    "capturing cuda graph",
+    "capturing the model",
+    "init torch distributed",
+    "initializing model",
+    "init engine",
+    "starting api server",
+    "loading multimodal weights",
+    "model loaded",
+    "warmup complete",
+)
+
+
+def scan_engine_logs(logs: str) -> dict:
+    """Classify the state of a starting engine from its docker logs.
+
+    Returns one of:
+      {"state": "fatal", "classification": "<kind>", "marker": "..."}
+      {"state": "loading", "markers": [...]}
+      {"state": "unknown"}
+    """
+    text = logs.lower()
+    for needle, kind in _FATAL_LOG_PATTERNS:
+        if needle in text:
+            return {"state": "fatal", "classification": kind, "marker": needle}
+
+    seen = [m for m in _PROGRESS_MARKERS if m in text]
+    if seen:
+        return {"state": "loading", "markers": seen}
+
+    return {"state": "unknown"}
+
+
 async def wait_for_healthy(
     url: str,
-    timeout_sec: int = 300,
+    timeout_sec: int = 1800,
     poll_interval: float = 5.0,
     container_name: str | None = None,
-) -> bool:
-    """Poll a health endpoint until it returns 200 or timeout."""
-    deadline = asyncio.get_event_loop().time() + timeout_sec
-    attempts = 0
-    async with aiohttp.ClientSession() as session:
-        while asyncio.get_event_loop().time() < deadline:
-            attempts += 1
+    idle_timeout_sec: int = 300,
+    log_scan_interval_sec: float = 10.0,
+) -> dict:
+    """Poll a health endpoint until it returns 200 or we hit a stop condition.
 
-            # Check if container is still running
-            if container_name and attempts % 6 == 0:  # every ~30s
-                alive = await _is_container_running(container_name)
-                if not alive:
-                    logger.error(
-                        "Container '%s' is no longer running (crashed/OOM?).",
-                        container_name,
-                    )
-                    return False
+    Returns a dict with keys:
+      - healthy: bool — endpoint returned 200
+      - reason: str — one of "ok", "hard_timeout", "idle_timeout",
+        "fatal_in_logs", "container_dead"
+      - classification: str | None — failure classification (e.g.
+        "argparse_error", "oom") if available from log scan
+      - marker: str | None — the log substring that triggered classification
+      - elapsed_sec: float
+
+    Two clocks bound the wait:
+      hard deadline = start + timeout_sec  (absolute cap)
+      idle deadline = last_progress + idle_timeout_sec  (resets on every
+        new progress marker spotted in container logs)
+
+    Big-model loads (60GB+) routinely take 10+ min just to load weights from
+    a fast NVMe. The idle clock lets these complete as long as we keep seeing
+    progress, while still failing fast if the engine actually stalls.
+    """
+    loop = asyncio.get_event_loop()
+    start = loop.time()
+    hard_deadline = start + timeout_sec
+    last_progress_time = start
+    seen_markers: set[str] = set()
+    last_log_scan = 0.0
+    attempts = 0
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            now = loop.time()
+            elapsed = now - start
+
+            if now >= hard_deadline:
+                logger.error(
+                    "Health check hard timeout after %ds (%d attempts): %s",
+                    timeout_sec, attempts, url,
+                )
+                return {
+                    "healthy": False,
+                    "reason": "hard_timeout",
+                    "classification": "healthcheck_timeout",
+                    "marker": None,
+                    "elapsed_sec": elapsed,
+                }
+
+            if now - last_progress_time >= idle_timeout_sec:
+                logger.error(
+                    "Health check idle timeout: no progress for %ds (elapsed %ds): %s",
+                    idle_timeout_sec, int(elapsed), url,
+                )
+                return {
+                    "healthy": False,
+                    "reason": "idle_timeout",
+                    "classification": "healthcheck_idle",
+                    "marker": None,
+                    "elapsed_sec": elapsed,
+                }
+
+            attempts += 1
 
             try:
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                     if resp.status == 200:
-                        logger.info("Health check passed: %s", url)
-                        return True
+                        logger.info(
+                            "Health check passed after %ds (%d attempts): %s",
+                            int(elapsed), attempts, url,
+                        )
+                        return {
+                            "healthy": True,
+                            "reason": "ok",
+                            "classification": None,
+                            "marker": None,
+                            "elapsed_sec": elapsed,
+                        }
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 pass
-            if attempts % 12 == 0:  # every ~60 seconds
-                elapsed = int(timeout_sec - (deadline - asyncio.get_event_loop().time()))
-                logger.info("  Still waiting for health check... (%ds/%ds)", elapsed, timeout_sec)
+
+            # Periodic log scan + container alive check
+            if container_name and (now - last_log_scan) >= log_scan_interval_sec:
+                last_log_scan = now
+
+                alive = await _is_container_running(container_name)
+                if not alive:
+                    final_logs = await get_container_logs(container_name)
+                    scan = scan_engine_logs(final_logs)
+                    classification = scan.get("classification") or "startup_crash"
+                    logger.error(
+                        "Container '%s' exited before becoming healthy "
+                        "(elapsed %ds, classification=%s).",
+                        container_name, int(elapsed), classification,
+                    )
+                    return {
+                        "healthy": False,
+                        "reason": "container_dead",
+                        "classification": classification,
+                        "marker": scan.get("marker"),
+                        "elapsed_sec": elapsed,
+                    }
+
+                logs = await get_container_logs(container_name, tail=200)
+                scan = scan_engine_logs(logs)
+
+                if scan["state"] == "fatal":
+                    logger.error(
+                        "Detected fatal pattern in logs (elapsed %ds): %s — aborting wait.",
+                        int(elapsed), scan["marker"],
+                    )
+                    return {
+                        "healthy": False,
+                        "reason": "fatal_in_logs",
+                        "classification": scan["classification"],
+                        "marker": scan["marker"],
+                        "elapsed_sec": elapsed,
+                    }
+
+                if scan["state"] == "loading":
+                    new_markers = set(scan["markers"]) - seen_markers
+                    if new_markers:
+                        for m in sorted(new_markers):
+                            logger.info(
+                                "  Engine progressing (elapsed %ds): %s",
+                                int(elapsed), m,
+                            )
+                        seen_markers.update(new_markers)
+                        last_progress_time = now
+
+            if attempts % 12 == 0:
+                logger.info(
+                    "  Still waiting for health check... (%ds elapsed, hard cap %ds)",
+                    int(elapsed), timeout_sec,
+                )
+
             await asyncio.sleep(poll_interval)
-    logger.error("Health check timed out after %ds (%d attempts): %s", timeout_sec, attempts, url)
-    return False
 
 
 async def get_container_logs(name: str, tail: int = 100) -> str:

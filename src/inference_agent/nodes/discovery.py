@@ -7,7 +7,7 @@ import json
 import logging
 import subprocess
 
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, snapshot_download
 
 from inference_agent.models import (
     EngineType,
@@ -138,6 +138,40 @@ def _bytes_to_params(total_bytes: int, dtype_str: str | None) -> int:
     return int(total_bytes / bytes_per_param)
 
 
+def _prefetch_model(
+    model_name: str,
+    cache_dir: str,
+    revision: str | None,
+    token: str | None,
+    allow_patterns: list[str],
+) -> None:
+    """Download model weights into the host HF cache so containers find them locally.
+
+    snapshot_download is idempotent — if the model is already present at the
+    target revision, this returns quickly. Failures are logged but non-fatal:
+    the engine will fall back to its own download inside the container (just
+    slower).
+    """
+    logger.info(
+        "Prefetching %s into cache_dir=%s (this may take a while on first run)...",
+        model_name, cache_dir,
+    )
+    try:
+        path = snapshot_download(
+            repo_id=model_name,
+            revision=revision,
+            cache_dir=cache_dir,
+            token=token,
+            allow_patterns=allow_patterns or None,
+        )
+        logger.info("Prefetch complete: %s", path)
+    except Exception as e:
+        logger.warning(
+            "Prefetch failed for %s (engine will download inside container): %s",
+            model_name, e,
+        )
+
+
 def _detect_available_engines() -> list[EngineType]:
     """Check which Docker images are available locally."""
     engines = []
@@ -186,6 +220,19 @@ async def discovery_node(state: AgentState) -> dict:
         ),
         loop.run_in_executor(None, _detect_available_engines),
     )
+
+    # Prefetch weights into the host cache (mounted into containers) so
+    # subsequent docker runs don't each re-download the model.
+    if config.startup.prefetch_model:
+        await loop.run_in_executor(
+            None,
+            _prefetch_model,
+            config.model_name,
+            config.docker.model_cache_dir,
+            config.model_revision,
+            config.hf_token,
+            config.startup.prefetch_allow_patterns,
+        )
 
     # Extract model info from config.json
     model_architecture = None

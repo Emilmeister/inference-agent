@@ -6,6 +6,7 @@ from inference_agent.models_pkg.config import (
     BenchmarkConfig,
     DockerConfig,
     ExperimentsConfig,
+    StartupConfig,
     StorageConfig,
 )
 from inference_agent.models_pkg.domain import (
@@ -51,6 +52,7 @@ __all__ = [
     # Config
     "AgentLLMConfig",
     "DockerConfig",
+    "StartupConfig",
     "BenchmarkConfig",
     "ExperimentsConfig",
     "StorageConfig",

@@ -78,24 +78,39 @@ async def _start_engine(
 
     # Wait for health check
     logger.info("Waiting for engine health check...")
-    healthy = await wait_for_healthy(
-        engine.health_url(), timeout_sec=900, container_name=container_name,
+    health_result = await wait_for_healthy(
+        engine.health_url(),
+        timeout_sec=engine.config.startup.hard_timeout_sec,
+        idle_timeout_sec=engine.config.startup.idle_timeout_sec,
+        log_scan_interval_sec=engine.config.startup.log_scan_interval_sec,
+        container_name=container_name,
     )
     time_to_healthy = time.time() - startup_start
 
-    if not healthy:
+    if not health_result["healthy"]:
         logs = await get_container_logs(container_name)
         exit_code = await get_container_exit_code(container_name)
+        classification = health_result.get("classification") or "healthcheck_timeout"
+        marker = health_result.get("marker")
+        message = (
+            f"Engine did not become healthy "
+            f"(reason={health_result['reason']}, classification={classification}"
+            + (f", marker='{marker}'" if marker else "")
+            + f", elapsed={time_to_healthy:.0f}s)"
+        )
         errors.append(ExperimentError(
             stage="healthcheck",
-            message="Engine did not become healthy within 900s",
+            message=message,
             details={
                 "logs": logs[:5000],
                 "exit_code": exit_code,
                 "time_elapsed_sec": time_to_healthy,
+                "reason": health_result["reason"],
+                "classification": classification,
+                "marker": marker,
             },
         ))
-        logger.error("FAILED: Engine did not become healthy. Last logs:\n%s", logs[-500:])
+        logger.error("FAILED: %s\nLast logs:\n%s", message, logs[-500:])
         await stop_container(container_name)
         return None, errors, time_to_healthy
 
@@ -202,6 +217,12 @@ def _classify_failure(
                 return "oom"
             return "startup_crash"
         if err.stage == "healthcheck":
+            # Prefer classification from log scanner over generic timeout —
+            # tells the planner whether it was argparse, OOM, hard cap, idle
+            # stall, etc.
+            scanned = err.details.get("classification")
+            if scanned:
+                return scanned
             exit_code = err.details.get("exit_code")
             if exit_code == 137:
                 return "oom"
