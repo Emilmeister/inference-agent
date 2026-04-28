@@ -16,8 +16,8 @@ agent_llm:
 
 # Docker
 docker:
-  vllm_image: "vllm/vllm-openai:latest"
-  sglang_image: "lmsysorg/sglang:latest"
+  vllm_image: "vllm/vllm-openai:latest-cu130"
+  sglang_image: "lmsysorg/sglang:dev-cu13-gemma4"
   network: "host"
   shm_size: "16g"
   model_cache_dir: "/root/.cache/huggingface"
