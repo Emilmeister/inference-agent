@@ -7,7 +7,9 @@ from inference_agent.models import (
     GPUInfo,
     HardwareProfile,
 )
+from inference_agent.models import PlannerOutput
 from inference_agent.nodes.planner import (
+    _build_experiment_config,
     _estimate_safe_context,
     _get_forced_engine,
     _load_curated_docs,
@@ -236,6 +238,102 @@ class TestShouldDisableSpeculative:
 
 
 # ── _load_curated_docs ────────────────────────────────────────────────────
+
+
+class TestBuildExperimentConfigSanitization:
+    """LLMs in strict json_schema mode often emit literal 'null' strings or 0
+    sentinels for optional fields. _build_experiment_config must absorb those
+    so engine builders don't pass `--quantization null` to the engines."""
+
+    def _hw(self) -> HardwareProfile:
+        return _make_hardware(gpu_count=4, vram_mb=40960, max_context=262144)
+
+    def _output(self, **overrides) -> PlannerOutput:
+        defaults = dict(
+            engine="vllm",
+            tensor_parallel_size=4,
+            max_model_len=32768,
+            rationale="test",
+        )
+        defaults.update(overrides)
+        return PlannerOutput(**defaults)
+
+    def test_string_null_quantization_becomes_none(self):
+        from inference_agent.models import AgentConfig
+        cfg = AgentConfig()
+        out = self._output(quantization="null")
+        exp = _build_experiment_config(out, self._hw(), cfg)
+        assert exp.quantization is None
+
+    def test_string_none_attention_backend_becomes_none(self):
+        from inference_agent.models import AgentConfig
+        cfg = AgentConfig()
+        out = self._output(attention_backend="None")
+        exp = _build_experiment_config(out, self._hw(), cfg)
+        assert exp.attention_backend is None
+
+    def test_string_null_speculative_fields(self):
+        from inference_agent.models import AgentConfig
+        cfg = AgentConfig()
+        out = self._output(
+            speculative_algorithm="null",
+            speculative_draft_model="null",
+        )
+        exp = _build_experiment_config(out, self._hw(), cfg)
+        assert exp.speculative_algorithm is None
+        assert exp.speculative_draft_model is None
+
+    def test_real_quantization_value_preserved(self):
+        from inference_agent.models import AgentConfig
+        cfg = AgentConfig()
+        out = self._output(quantization="fp8", attention_backend="FLASH_ATTN")
+        exp = _build_experiment_config(out, self._hw(), cfg)
+        assert exp.quantization == "fp8"
+        assert exp.attention_backend == "FLASH_ATTN"
+
+    def test_zero_sentinel_for_optional_numerics(self):
+        from inference_agent.models import AgentConfig
+        cfg = AgentConfig()
+        out = self._output(
+            engine="sglang",
+            mem_fraction_static=0.0,
+            max_running_requests=0,
+        )
+        exp = _build_experiment_config(out, self._hw(), cfg)
+        assert exp.mem_fraction_static is None
+        assert exp.max_running_requests is None
+
+    def test_cross_engine_fields_stripped_for_vllm(self):
+        from inference_agent.models import AgentConfig
+        cfg = AgentConfig()
+        out = self._output(
+            engine="vllm",
+            mem_fraction_static=0.85,
+            max_running_requests=128,
+        )
+        exp = _build_experiment_config(out, self._hw(), cfg)
+        assert exp.mem_fraction_static is None
+        assert exp.max_running_requests is None
+
+    def test_cross_engine_fields_stripped_for_sglang(self):
+        from inference_agent.models import AgentConfig
+        cfg = AgentConfig()
+        out = self._output(
+            engine="sglang",
+            max_num_seqs=256,
+            max_num_batched_tokens=8192,
+        )
+        exp = _build_experiment_config(out, self._hw(), cfg)
+        assert exp.max_num_seqs is None
+        assert exp.max_num_batched_tokens is None
+
+    def test_dtype_null_falls_back_to_auto(self):
+        from inference_agent.models import AgentConfig
+        cfg = AgentConfig()
+        out = self._output(dtype="null", kv_cache_dtype="None")
+        exp = _build_experiment_config(out, self._hw(), cfg)
+        assert exp.dtype == "auto"
+        assert exp.kv_cache_dtype == "auto"
 
 
 class TestLoadCuratedDocs:

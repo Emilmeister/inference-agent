@@ -437,6 +437,29 @@ def _zero_to_none(value: int | float | None) -> int | float | None:
     return value
 
 
+_SENTINEL_STRINGS = {"null", "none", "nil", "n/a", "na", "undefined", ""}
+
+
+def _str_to_none(s: str | None) -> str | None:
+    """Treat sentinel string values like 'null' / 'none' / '' as None.
+
+    Strict json_schema clients sometimes serialize JSON null as the literal
+    string "null" for `str | None` fields. Engine builders pass these through
+    to docker run, producing invalid CLI flags like `--quantization null`.
+    """
+    if s is None:
+        return None
+    if s.strip().lower() in _SENTINEL_STRINGS:
+        return None
+    return s
+
+
+def _str_with_default(s: str | None, default: str) -> str:
+    """Same as _str_to_none but returns a default for required string fields."""
+    cleaned = _str_to_none(s)
+    return cleaned if cleaned is not None else default
+
+
 def _build_experiment_config(
     output: PlannerOutput,
     hardware: HardwareProfile,
@@ -468,8 +491,8 @@ def _build_experiment_config(
     # Sanity: at least 512
     max_model_len = max(max_model_len, 512)
 
-    # Validate scheduling_policy per engine
-    scheduling_policy = output.scheduling_policy
+    # Validate scheduling_policy per engine (also normalize 'null' sentinel)
+    scheduling_policy = _str_with_default(output.scheduling_policy, "fcfs")
     if engine == EngineType.VLLM and scheduling_policy not in ("fcfs", "priority"):
         scheduling_policy = "fcfs"
     elif engine == EngineType.SGLANG and scheduling_policy not in ("fcfs", "lpm"):
@@ -484,6 +507,17 @@ def _build_experiment_config(
     chunked_prefill_size = _zero_to_none(output.chunked_prefill_size)
     speculative_num_steps = _zero_to_none(output.speculative_num_steps)
     dp_size = _zero_to_none(output.dp_size)
+
+    # Normalize 'null'/'none'/'' sentinel strings to None for optional string fields.
+    # Without this, engine builders emit invalid CLI like `--quantization null`
+    # which vLLM/SGLang argparse rejects with `invalid choice: 'null'`.
+    quantization = _str_to_none(output.quantization)
+    attention_backend = _str_to_none(output.attention_backend)
+    speculative_algorithm = _str_to_none(output.speculative_algorithm)
+    speculative_draft_model = _str_to_none(output.speculative_draft_model)
+    # Required strings with safe defaults — if LLM emits 'null', fall back.
+    dtype = _str_with_default(output.dtype, "auto")
+    kv_cache_dtype = _str_with_default(output.kv_cache_dtype, "auto")
 
     # Strip cross-engine fields based on resolved engine
     if engine == EngineType.VLLM:
@@ -520,16 +554,16 @@ def _build_experiment_config(
         max_num_batched_tokens=max_num_batched_tokens,
         max_prefill_tokens=max_prefill_tokens,
         scheduling_policy=scheduling_policy,
-        quantization=output.quantization,
-        dtype=output.dtype,
-        kv_cache_dtype=output.kv_cache_dtype,
+        quantization=quantization,
+        dtype=dtype,
+        kv_cache_dtype=kv_cache_dtype,
         enable_chunked_prefill=output.enable_chunked_prefill,
         chunked_prefill_size=chunked_prefill_size,
         enable_prefix_caching=output.enable_prefix_caching,
         enforce_eager=output.enforce_eager,
-        attention_backend=output.attention_backend,
-        speculative_algorithm=output.speculative_algorithm,
-        speculative_draft_model=output.speculative_draft_model,
+        attention_backend=attention_backend,
+        speculative_algorithm=speculative_algorithm,
+        speculative_draft_model=speculative_draft_model,
         speculative_num_steps=speculative_num_steps,
         num_continuous_decode_steps=num_continuous_decode_steps,
         dp_size=dp_size,
