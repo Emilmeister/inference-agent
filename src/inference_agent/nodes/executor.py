@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import statistics
 import time
@@ -28,6 +29,8 @@ from inference_agent.utils.docker import (
     get_container_logs,
     get_engine_version,
     get_image_digest,
+    image_exists_locally,
+    pull_image,
     run_container,
     stop_container,
     wait_for_healthy,
@@ -62,19 +65,47 @@ async def _start_engine(
     # Stop any previous container
     await stop_container(container_name)
 
-    # Run container
+    # Ensure the engine image is present locally before `docker run -d`.
+    # `docker run` on a missing image triggers an implicit pull that can take
+    # 5-15 min for multi-GB engine images, blowing past any reasonable run
+    # timeout. Doing pull as an explicit step keeps timeouts honest and lets
+    # us classify pull failures distinctly from container start failures.
+    image = engine.image()
     startup_start = time.time()
+    if not await image_exists_locally(image):
+        logger.info(
+            "Image %s not present locally, pulling (timeout 15 min)...", image,
+        )
+        try:
+            await pull_image(image, timeout=900)
+            logger.info("Image %s pulled successfully", image)
+        except RuntimeError as e:
+            errors.append(ExperimentError(
+                stage="startup",
+                message=str(e),
+                details={"classification": "image_pull_failed", "image": image},
+            ))
+            return None, errors, time.time() - startup_start
+
+    # Run container — image is now guaranteed local, so 60s is plenty for
+    # `docker run -d` to return the container ID.
     try:
         container_id = await run_container(docker_args, timeout=60)
         logger.info("Container started: %s", container_id[:12])
-    except RuntimeError as e:
+    except (RuntimeError, asyncio.TimeoutError) as e:
         logs = await get_container_logs(container_name)
+        if isinstance(e, asyncio.TimeoutError):
+            message = "Container start timed out after 60s (docker run -d hung)"
+            classification = "startup_timeout"
+        else:
+            message = f"Container start failed: {e}"
+            classification = "startup_error"
         errors.append(ExperimentError(
             stage="startup",
-            message=f"Container start failed: {e}",
-            details={"logs": logs[:5000]},
+            message=message,
+            details={"logs": logs[:5000], "classification": classification},
         ))
-        return None, errors, 0.0
+        return None, errors, time.time() - startup_start
 
     # Wait for health check
     logger.info("Waiting for engine health check...")

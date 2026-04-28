@@ -11,8 +11,14 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 
-async def run_container(args: list[str], timeout: int = 30) -> str:
-    """Run a docker command and return the container ID."""
+async def run_container(args: list[str], timeout: int = 60) -> str:
+    """Run a docker command and return the container ID.
+
+    Assumes the image is already pulled — `docker run -d` on a present image
+    returns in seconds. If the image isn't local, Docker would do an implicit
+    pull here and a multi-GB image would blow this timeout. Use `pull_image`
+    before calling to keep responsibilities separate and timeouts honest.
+    """
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.PIPE,
@@ -23,6 +29,44 @@ async def run_container(args: list[str], timeout: int = 30) -> str:
         error = stderr.decode().strip()
         raise RuntimeError(f"Docker run failed (rc={proc.returncode}): {error}")
     return stdout.decode().strip()
+
+
+async def image_exists_locally(image: str) -> bool:
+    """Return True if Docker has the exact image:tag present locally."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "image", "inspect", image,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        return await asyncio.wait_for(proc.wait(), timeout=10) == 0
+    except (asyncio.TimeoutError, FileNotFoundError):
+        return False
+
+
+async def pull_image(image: str, timeout: int = 900) -> None:
+    """Pull a Docker image with a long, explicit timeout.
+
+    Raises RuntimeError on failure (including timeout) so callers can classify
+    the experiment as `image_pull_failed` rather than a generic startup crash.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "pull", image,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+            await proc.wait()
+        except ProcessLookupError:
+            pass
+        raise RuntimeError(f"docker pull {image} timed out after {timeout}s")
+    if proc.returncode != 0:
+        err = stderr.decode().strip()
+        raise RuntimeError(f"docker pull {image} failed (rc={proc.returncode}): {err}")
 
 
 async def stop_container(name: str, timeout: int = 30) -> None:
