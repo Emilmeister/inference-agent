@@ -71,6 +71,36 @@ export AGENT_LLM_API_KEY=sk-...
 inference-agent -c config.yaml -v
 ```
 
+#### Переопределение `agent_llm` через переменные окружения
+
+Любое поле блока `agent_llm` из `config.yaml` можно переопределить env-переменной
+с префиксом `AGENT_LLM_` (имя поля в верхнем регистре). Env имеет приоритет над YAML —
+удобно для CI, контейнеров и быстрых переключений между провайдерами без правки конфига.
+
+| Env-переменная | Поле | Пример значения |
+|----------------|------|-----------------|
+| `AGENT_LLM_BASE_URL` | `base_url` | `https://foundation-models.api.cloud.ru/v1` |
+| `AGENT_LLM_MODEL` | `model` | `gpt-4o-mini` |
+| `AGENT_LLM_API_KEY` | `api_key` (прямой ключ) | `sk-...` |
+| `AGENT_LLM_API_KEY_ENV` | `api_key_env` (имя env-переменной с ключом) | `OPENAI_API_KEY` |
+| `AGENT_LLM_TEMPERATURE` | `temperature` | `0.0` |
+| `AGENT_LLM_MAX_TOKENS` | `max_tokens` | `4096` |
+| `AGENT_LLM_TIMEOUT_SEC` | `timeout_sec` | `600` |
+| `AGENT_LLM_STRUCTURED_OUTPUT_MODE` | `structured_output_mode` | `json_schema` или `json_object` |
+| `AGENT_LLM_MAX_BUDGET_USD` | `max_budget_usd` | `5.0` |
+
+Числовые поля (`temperature`, `max_tokens`, `timeout_sec`, `max_budget_usd`)
+приводятся к нужному типу автоматически Pydantic'ом.
+
+Пример — переключиться на Cloud.ru Foundation Models без изменения `config.yaml`:
+
+```bash
+export AGENT_LLM_BASE_URL="https://foundation-models.api.cloud.ru/v1"
+export AGENT_LLM_MODEL="GigaChat/GigaChat-Max"
+export AGENT_LLM_API_KEY="$CLOUDRU_API_KEY"
+inference-agent -c config.yaml -v
+```
+
 Агент:
 1. Определит доступные GPU и параметры модели
 2. Начнёт с baseline конфигураций (дефолтные параметры, разные TP)

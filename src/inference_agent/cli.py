@@ -16,17 +16,43 @@ from inference_agent.utils.docker import stop_all_bench_containers
 from inference_agent.utils.logging import setup_logging
 
 
+# agent_llm fields that can be overridden via env vars (AGENT_LLM_<UPPER>).
+# Values are coerced by Pydantic when AgentConfig is constructed.
+_AGENT_LLM_ENV_FIELDS = (
+    "base_url",
+    "model",
+    "api_key",
+    "api_key_env",
+    "temperature",
+    "max_tokens",
+    "timeout_sec",
+    "structured_output_mode",
+    "max_budget_usd",
+)
+
+
+def _apply_agent_llm_env_overrides(raw: dict) -> None:
+    """Override agent_llm.<field> with env var AGENT_LLM_<FIELD> if set."""
+    section = raw.setdefault("agent_llm", {})
+    for field in _AGENT_LLM_ENV_FIELDS:
+        env_name = f"AGENT_LLM_{field.upper()}"
+        if env_name in os.environ:
+            section[field] = os.environ[env_name]
+
+
 def _load_config(path: str) -> AgentConfig:
-    """Load and validate config from YAML file."""
+    """Load and validate config from YAML file. Env vars override agent_llm fields."""
     with open(path) as f:
         raw = yaml.safe_load(f)
 
-    # Resolve environment variables in api_key
+    # Resolve ${VAR} placeholder in api_key
     if "agent_llm" in raw:
         api_key = raw["agent_llm"].get("api_key", "")
-        if api_key.startswith("${") and api_key.endswith("}"):
+        if isinstance(api_key, str) and api_key.startswith("${") and api_key.endswith("}"):
             env_var = api_key[2:-1]
             raw["agent_llm"]["api_key"] = os.environ.get(env_var, "")
+
+    _apply_agent_llm_env_overrides(raw)
 
     return AgentConfig(**raw)
 

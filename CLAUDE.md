@@ -56,6 +56,12 @@ pip install -e .
 # Set API key for the agent LLM (any OpenAI-compatible provider)
 export OPENAI_API_KEY=sk-...
 
+# Любое поле agent_llm можно переопределить env-переменной AGENT_LLM_<UPPER>:
+# AGENT_LLM_BASE_URL, AGENT_LLM_MODEL, AGENT_LLM_API_KEY, AGENT_LLM_API_KEY_ENV,
+# AGENT_LLM_TEMPERATURE, AGENT_LLM_MAX_TOKENS, AGENT_LLM_TIMEOUT_SEC,
+# AGENT_LLM_STRUCTURED_OUTPUT_MODE, AGENT_LLM_MAX_BUDGET_USD.
+# Реализовано в cli._apply_agent_llm_env_overrides; env приоритетнее YAML.
+
 inference-agent -c config.yaml -v
 
 # Tests
