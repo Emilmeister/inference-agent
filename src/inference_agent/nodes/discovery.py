@@ -78,6 +78,66 @@ def _read_model_config(model_name: str, revision: str | None = None) -> dict:
         return {}
 
 
+_DTYPE_BYTES = {
+    "bfloat16": 2,
+    "bf16": 2,
+    "float16": 2,
+    "fp16": 2,
+    "half": 2,
+    "float32": 4,
+    "fp32": 4,
+    "float": 4,
+    "float8": 1,
+    "fp8": 1,
+    "int8": 1,
+    "uint8": 1,
+    "int4": 0.5,
+}
+
+
+def _read_model_size_bytes(
+    model_name: str, revision: str | None = None
+) -> int | None:
+    """Read total model weight bytes from model.safetensors.index.json.
+
+    Sharded HF safetensors checkpoints publish a small index file with
+    metadata.total_size summed across all shards — this gives an exact byte
+    count without downloading any weight files. Returns None if the model is
+    not sharded or the index is unavailable; caller should fall back to a
+    formula-based estimate.
+    """
+    try:
+        idx_path = hf_hub_download(
+            repo_id=model_name,
+            filename="model.safetensors.index.json",
+            revision=revision,
+        )
+    except Exception as e:
+        logger.debug(
+            "No safetensors index for %s (likely single-file or non-safetensors): %s",
+            model_name, e,
+        )
+        return None
+
+    try:
+        with open(idx_path) as f:
+            idx = json.load(f)
+        total_size = idx.get("metadata", {}).get("total_size")
+        if isinstance(total_size, (int, float)) and total_size > 0:
+            return int(total_size)
+    except Exception as e:
+        logger.warning("Failed to parse safetensors index for %s: %s", model_name, e)
+
+    return None
+
+
+def _bytes_to_params(total_bytes: int, dtype_str: str | None) -> int:
+    """Convert weight-bytes to parameter count using the model's dtype."""
+    key = (dtype_str or "bfloat16").lower().strip()
+    bytes_per_param = _DTYPE_BYTES.get(key, 2)
+    return int(total_bytes / bytes_per_param)
+
+
 def _detect_available_engines() -> list[EngineType]:
     """Check which Docker images are available locally."""
     engines = []
@@ -113,13 +173,16 @@ async def discovery_node(state: AgentState) -> dict:
     config = state["config"]
     logger.info("Starting discovery for model: %s", config.model_name)
 
-    # Run GPU detection and model config read concurrently
+    # Run GPU detection, model config read, and weight-size lookup concurrently
     loop = asyncio.get_event_loop()
-    gpus, nvlink, model_config, engines = await asyncio.gather(
+    gpus, nvlink, model_config, model_size_bytes, engines = await asyncio.gather(
         loop.run_in_executor(None, _detect_gpus),
         loop.run_in_executor(None, _detect_nvlink),
         loop.run_in_executor(
             None, _read_model_config, config.model_name, config.model_revision
+        ),
+        loop.run_in_executor(
+            None, _read_model_size_bytes, config.model_name, config.model_revision
         ),
         loop.run_in_executor(None, _detect_available_engines),
     )
@@ -133,13 +196,37 @@ async def discovery_node(state: AgentState) -> dict:
     # For VLM/multimodal models, key params are often nested in text_config
     text_config = model_config.get("text_config", {})
 
-    # Estimate model size from hidden_size and num_layers
+    # Determine model size in parameters.
+    # Preferred: sum tensor sizes from model.safetensors.index.json (exact).
+    # Fallback: SwiGLU-aware formula from config.json (approximate, ±15%).
     hidden_size = text_config.get("hidden_size", model_config.get("hidden_size", 0))
     num_layers = text_config.get("num_hidden_layers", model_config.get("num_hidden_layers", 0))
     vocab_size = text_config.get("vocab_size", model_config.get("vocab_size", 0))
-    model_size_params = None
-    if hidden_size and num_layers:
-        model_size_params = 12 * hidden_size**2 * num_layers + vocab_size * hidden_size
+    intermediate_size = text_config.get(
+        "intermediate_size", model_config.get("intermediate_size", 0)
+    )
+    dtype_str = text_config.get("torch_dtype") or model_config.get("torch_dtype")
+
+    model_size_params: int | None = None
+    if model_size_bytes:
+        model_size_params = _bytes_to_params(model_size_bytes, dtype_str)
+        logger.info(
+            "Model size from safetensors index: %.1f GB (%s, %d params)",
+            model_size_bytes / (1024**3),
+            dtype_str or "bfloat16-assumed",
+            model_size_params,
+        )
+    elif hidden_size and num_layers:
+        # SwiGLU FFN: 3 matrices of (hidden, intermediate). If intermediate
+        # is unknown, assume 4x hidden (matches Llama family). Attention is
+        # ~4*h^2 per layer (Q/K/V/O, ignoring GQA reduction for simplicity).
+        ffn = intermediate_size or (4 * hidden_size)
+        per_layer = 4 * hidden_size * hidden_size + 3 * hidden_size * ffn
+        model_size_params = per_layer * num_layers + vocab_size * hidden_size
+        logger.info(
+            "Model size estimated from config (no safetensors index): ~%d params",
+            model_size_params,
+        )
 
     # Determine max context — check both top-level and text_config
     max_context = max(

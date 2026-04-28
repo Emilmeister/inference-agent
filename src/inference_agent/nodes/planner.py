@@ -74,8 +74,11 @@ kv_cache_dtype=auto, scheduling_policy=fcfs.
 AND throughput is maximized.
 6. If goal is "explore": try something new — quantization, speculative decoding, different max_model_len.
 7. Never repeat an exact configuration that was already tested.
-8. max_model_len must not exceed {model_max_context}. NEVER set it to the full model max unless you \
-have enough VRAM. Use binary search: start safe (32768 for 40GB), double if success, halve if OOM.
+8. max_model_len: choose ONE of {{16384, 32768, 65536, 131072, 262144}}, capped at {model_max_context}. \
+The OBJECTIVE is to maximize performance at the LARGEST context that fits VRAM. \
+Estimate available KV budget = total_vram - model_weight_bytes - ~10% headroom, then pick the \
+largest power-of-2 that plausibly fits. Halve ONLY on a confirmed OOM — do NOT anchor at 32768 \
+by default; that is a floor, not a starting point.
 9. tensor_parallel_size must divide evenly into {gpu_count} GPUs.
 10. CRITICAL: If a feature (NEXTN, quantization, etc.) consistently gives WORSE results than baseline, \
 STOP using it and move on to other optimizations.
@@ -187,38 +190,43 @@ def _aggregate_failure_patterns(history: list[ExperimentSummary]) -> str:
     return "\n".join(lines)
 
 
-def _estimate_safe_context(hardware: HardwareProfile) -> int:
-    """Estimate a safe max_model_len for fallback when LLM planner is unavailable.
+_CONTEXT_BUCKETS = (16384, 32768, 65536, 131072, 262144)
 
-    Uses a rough heuristic: total VRAM minus estimated model weight, then
-    convert remaining VRAM to context length. Conservative but much better
-    than vram_total // 10.
+
+def _estimate_safe_context(hardware: HardwareProfile) -> int:
+    """Estimate a safe max_model_len for fallback when the LLM planner fails.
+
+    Returns the largest value from _CONTEXT_BUCKETS that plausibly fits given
+    VRAM minus model weight (with ~10% headroom), capped at the model's
+    advertised max context. Floor is 16384.
     """
     if not hardware.gpus:
         return min(32768, hardware.model_max_context)
 
     total_vram_mb = sum(g.vram_total_mb for g in hardware.gpus)
 
-    # Estimate model weight in MB (params * 2 bytes for fp16)
     if hardware.model_size_params:
         model_weight_mb = hardware.model_size_params * 2 / (1024 * 1024)
     else:
-        model_weight_mb = total_vram_mb * 0.5  # assume half VRAM for model
+        model_weight_mb = total_vram_mb * 0.5
 
-    # Available VRAM for KV cache (leave 10% headroom)
-    available_mb = (total_vram_mb - model_weight_mb) * 0.9
+    available_mb = max(0, (total_vram_mb - model_weight_mb) * 0.9)
 
-    # Rough estimate: ~2 MB per 1K context for a typical model
-    # This is very approximate but much better than vram // 10
-    estimated_ctx = int(available_mb / 2 * 1024)
+    # Rough KV-bytes-per-token. Real value depends on n_layers * n_kv_heads *
+    # head_dim * 2 (bf16) which we don't always have here, so use a conservative
+    # 2 KB/token. The fallback is meant to be safe, not optimal — the LLM
+    # planner is expected to pick aggressively from the prompt's bucket list.
+    kb_per_token = 2.0
+    estimated_ctx_tokens = int(available_mb * 1024 / kb_per_token)
 
-    # Clamp: cap fallback at 65536 (conservative — LLM planner can go higher)
-    safe_ctx = max(4096, min(estimated_ctx, 65536, hardware.model_max_context))
+    cap = hardware.model_max_context
+    eligible = [b for b in _CONTEXT_BUCKETS if b <= cap and b <= estimated_ctx_tokens]
+    if eligible:
+        return max(eligible)
 
-    # Round down to nearest 4096 for cleanliness
-    safe_ctx = (safe_ctx // 4096) * 4096
-
-    return max(safe_ctx, 4096)
+    # Nothing in the bucket list fits — fall back to the smallest bucket
+    # capped at the model's max context (rounded down).
+    return min(_CONTEXT_BUCKETS[0], cap) if cap >= 4096 else max(cap, 4096)
 
 
 def _get_forced_engine(
@@ -257,9 +265,22 @@ async def planner_node(state: AgentState) -> dict:
     history = state.get("experiment_history", [])
     goal = state.get("next_optimization_goal", OptimizationGoal.EXPLORE)
 
-    # Format history for LLM (last 15 experiments)
+    # Format history for LLM (last 15 experiments).
+    # Validation failures are stored compactly: full config/docker_command/rationale
+    # would just balloon the prompt without teaching the LLM anything beyond
+    # "fields-of-the-other-engine were populated", which the sanitizer in
+    # _build_experiment_config now prevents structurally.
     history_for_llm = []
     for h in history[-15:]:
+        if (h.failure_classification or "") == "validation":
+            history_for_llm.append({
+                "id": h.experiment_id,
+                "engine": h.engine.value,
+                "status": "failed_validation",
+                "error": (h.error or "")[:200],
+            })
+            continue
+
         entry: dict = {
             "id": h.experiment_id,
             "engine": h.engine.value,
@@ -274,12 +295,10 @@ async def planner_node(state: AgentState) -> dict:
             "correctness_gate": h.correctness_gate_passed,
             "classification": h.optimization_classification.value,
         }
-        # Include error details for failed experiments so LLM can learn from failures
         if h.error:
             entry["error"] = h.error
         if h.failure_classification:
             entry["failure_type"] = h.failure_classification
-        # Include LLM commentary from analyzer for context
         if h.llm_commentary:
             entry["analysis"] = h.llm_commentary
         history_for_llm.append(entry)
@@ -404,12 +423,32 @@ async def planner_node(state: AgentState) -> dict:
     return {"current_config": experiment}
 
 
+def _zero_to_none(value: int | float | None) -> int | float | None:
+    """Treat sentinel 0/0.0 as None for optional numeric fields.
+
+    Strict json_schema mode forces every field to be present, and some LLM
+    providers emit 0 instead of null for `int | None` / `float | None`.
+    Validator and engine builders rely on None to mean "not set".
+    """
+    if value is None:
+        return None
+    if value == 0:
+        return None
+    return value
+
+
 def _build_experiment_config(
     output: PlannerOutput,
     hardware: HardwareProfile,
     config: object,
 ) -> ExperimentConfig:
-    """Convert validated PlannerOutput to ExperimentConfig with safety checks."""
+    """Convert validated PlannerOutput to ExperimentConfig with safety checks.
+
+    Cross-engine fields are stripped here based on the resolved engine, so the
+    LLM cannot fail validation by populating fields that belong to the other
+    engine (a recurring failure mode with strict json_schema clients that emit
+    0/null inconsistently).
+    """
     # Normalize engine
     engine_str = output.engine.lower()
     engine = EngineType.VLLM if "vllm" in engine_str else EngineType.SGLANG
@@ -436,10 +475,34 @@ def _build_experiment_config(
     elif engine == EngineType.SGLANG and scheduling_policy not in ("fcfs", "lpm"):
         scheduling_policy = "fcfs"
 
+    # Normalize 0-as-sentinel to None for optional numeric fields
+    mem_fraction_static = _zero_to_none(output.mem_fraction_static)
+    max_num_seqs = _zero_to_none(output.max_num_seqs)
+    max_running_requests = _zero_to_none(output.max_running_requests)
+    max_num_batched_tokens = _zero_to_none(output.max_num_batched_tokens)
+    max_prefill_tokens = _zero_to_none(output.max_prefill_tokens)
+    chunked_prefill_size = _zero_to_none(output.chunked_prefill_size)
+    speculative_num_steps = _zero_to_none(output.speculative_num_steps)
+    dp_size = _zero_to_none(output.dp_size)
+
+    # Strip cross-engine fields based on resolved engine
+    if engine == EngineType.VLLM:
+        mem_fraction_static = None
+        max_running_requests = None
+        max_prefill_tokens = None
+        chunked_prefill_size = None
+        num_continuous_decode_steps = 1
+        dp_size = None
+    else:  # SGLang
+        max_num_seqs = None
+        max_num_batched_tokens = None
+        # vLLM's gpu_memory_utilization is ignored for SGLang at the engine
+        # builder level, but normalize at config level to keep digests clean.
+        num_continuous_decode_steps = output.num_continuous_decode_steps or 1
+
     # Strip cross-engine env vars
     extra_env = dict(output.extra_env)
     if engine == EngineType.VLLM:
-        # Remove SGLang-specific env vars
         for k in list(extra_env.keys()):
             if k.startswith("SGLANG"):
                 extra_env.pop(k)
@@ -451,25 +514,25 @@ def _build_experiment_config(
         data_parallel_size=output.data_parallel_size,
         max_model_len=max_model_len,
         gpu_memory_utilization=output.gpu_memory_utilization,
-        mem_fraction_static=output.mem_fraction_static,
-        max_num_seqs=output.max_num_seqs,
-        max_running_requests=output.max_running_requests,
-        max_num_batched_tokens=output.max_num_batched_tokens,
-        max_prefill_tokens=output.max_prefill_tokens,
+        mem_fraction_static=mem_fraction_static,
+        max_num_seqs=max_num_seqs,
+        max_running_requests=max_running_requests,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_prefill_tokens=max_prefill_tokens,
         scheduling_policy=scheduling_policy,
         quantization=output.quantization,
         dtype=output.dtype,
         kv_cache_dtype=output.kv_cache_dtype,
         enable_chunked_prefill=output.enable_chunked_prefill,
-        chunked_prefill_size=output.chunked_prefill_size,
+        chunked_prefill_size=chunked_prefill_size,
         enable_prefix_caching=output.enable_prefix_caching,
         enforce_eager=output.enforce_eager,
         attention_backend=output.attention_backend,
         speculative_algorithm=output.speculative_algorithm,
         speculative_draft_model=output.speculative_draft_model,
-        speculative_num_steps=output.speculative_num_steps,
-        num_continuous_decode_steps=output.num_continuous_decode_steps,
-        dp_size=output.dp_size,
+        speculative_num_steps=speculative_num_steps,
+        num_continuous_decode_steps=num_continuous_decode_steps,
+        dp_size=dp_size,
         extra_engine_args=output.extra_engine_args,
         extra_env=extra_env,
         rationale=output.rationale,

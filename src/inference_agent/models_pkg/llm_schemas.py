@@ -12,7 +12,7 @@ class PlannerOutput(BaseModel):
     tensor_parallel_size: int = Field(default=1, description="Tensor parallelism size")
     pipeline_parallel_size: int = Field(default=1, description="Pipeline parallelism size")
     data_parallel_size: int = Field(default=1, description="Data parallelism size")
-    max_model_len: int = Field(description="Max context length to allocate KV cache for. MUST be set explicitly based on available VRAM. Use binary search: start safe (e.g. 32768 for 40GB), double if success, halve if OOM.")
+    max_model_len: int = Field(description="Max context length / KV-cache window. Choose ONE of {16384, 32768, 65536, 131072, 262144}, capped at the model's max_context. The OBJECTIVE is to find the LARGEST power-of-2 context that fits VRAM and still benchmarks well — do NOT anchor at 32768 by default. Pick the largest plausibly-fitting value first; halve only after a confirmed OOM.")
     gpu_memory_utilization: float = Field(default=0.9, description="GPU memory fraction (vLLM)")
     mem_fraction_static: float | None = Field(default=None, description="Static memory fraction (SGLang)")
     max_num_seqs: int | None = Field(default=None, description="Max concurrent sequences (vLLM)")

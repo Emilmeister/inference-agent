@@ -300,18 +300,35 @@ async def analyzer_node(state: AgentState) -> dict:
 
     full_prompt = prompt + "\n\nAnalyze the latest experiment."
 
-    try:
-        analysis: AnalyzerOutput = await structured_output(
-            full_prompt, AnalyzerOutput, config.agent_llm
-        )
-    except Exception as e:
-        logger.warning("LLM structured output failed for analyzer: %s", e)
+    # Short-circuit on validation failures: the experiment never ran, so the
+    # LLM has nothing to analyze and tends to hallucinate diagnoses (OOM,
+    # backend incompat, etc.) that mislead the planner. Use a deterministic
+    # stub instead and skip the LLM call.
+    if (result.failure_classification or "") == "validation":
         analysis = AnalyzerOutput(
-            commentary="Analysis unavailable (LLM error)",
+            commentary=(
+                f"Validation rejected the config before launch: "
+                f"{(result.error or '').removeprefix('Validation failed: ')[:200]}. "
+                "No runtime signal — try a different configuration."
+            ),
             classification="none",
             decision="stop" if hard_stop else "continue",
             next_goal="explore",
+            planner_hint="Previous config was rejected by the validator; pick different parameters.",
         )
+    else:
+        try:
+            analysis = await structured_output(
+                full_prompt, AnalyzerOutput, config.agent_llm
+            )
+        except Exception as e:
+            logger.warning("LLM structured output failed for analyzer: %s", e)
+            analysis = AnalyzerOutput(
+                commentary="Analysis unavailable (LLM error)",
+                classification="none",
+                decision="stop" if hard_stop else "continue",
+                next_goal="explore",
+            )
 
     # Apply LLM decisions
     commentary = analysis.commentary

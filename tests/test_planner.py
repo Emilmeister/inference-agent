@@ -53,24 +53,30 @@ def _make_summary(
 # ── _estimate_safe_context ────────────────────────────────────────────────
 
 
+_BUCKETS = (16384, 32768, 65536, 131072, 262144)
+
+
 class TestEstimateSafeContext:
     def test_small_model_large_gpu(self):
-        """9B model on H100 80GB — should get 65536 (cap)."""
+        """7B model on H100 80GB — should pick a bucket >= 32768."""
         hw = _make_hardware(vram_mb=81559, model_params=7_459_569_664, max_context=262144)
         ctx = _estimate_safe_context(hw)
-        assert ctx == 65536
+        assert ctx in _BUCKETS
+        assert ctx >= 32768
 
     def test_large_model_barely_fits(self):
-        """70B model on 80GB — barely fits, minimal context."""
+        """70B model on 80GB — barely fits, falls back to floor bucket."""
         hw = _make_hardware(vram_mb=81920, model_params=70_000_000_000, max_context=131072)
         ctx = _estimate_safe_context(hw)
-        assert ctx == 4096  # model weight ~133GB > 80GB, so available is near 0
+        # 70B*2 ≈ 130GB > 80GB → no bucket fits → smallest (capped at max_context)
+        assert ctx == 16384
 
     def test_medium_model_medium_gpu(self):
-        """7B model on 24GB RTX 4090 — moderate context."""
+        """7B model on 24GB RTX 4090 — moderate context, in bucket set."""
         hw = _make_hardware(vram_mb=24576, model_params=7_000_000_000, max_context=32768)
         ctx = _estimate_safe_context(hw)
-        assert 8192 <= ctx <= 32768
+        assert ctx in _BUCKETS
+        assert ctx <= 32768
 
     def test_no_gpus(self):
         """No GPUs — falls back to min(32768, max_context)."""
@@ -94,32 +100,27 @@ class TestEstimateSafeContext:
         """model_size_params=None — assumes half VRAM for model."""
         hw = _make_hardware(vram_mb=81920, model_params=None, max_context=262144)
         ctx = _estimate_safe_context(hw)
-        assert 4096 <= ctx <= 65536
+        assert ctx in _BUCKETS
 
-    def test_multi_gpu(self):
-        """Multiple GPUs — total VRAM is summed."""
-        hw = _make_hardware(vram_mb=81920, gpu_count=4, model_params=70_000_000_000, max_context=131072)
+    def test_multi_gpu_picks_large_bucket(self):
+        """Multiple GPUs — total VRAM summed; should pick a large bucket."""
+        hw = _make_hardware(vram_mb=81920, gpu_count=4, model_params=70_000_000_000, max_context=262144)
         ctx = _estimate_safe_context(hw)
-        # 4x80GB = 320GB, 70B model = ~133GB fp16, plenty of room
-        assert ctx > 4096
+        # 4x80GB - 130GB model ≈ 190GB → very large context fits
+        assert ctx in _BUCKETS
+        assert ctx >= 65536
 
-    def test_result_aligned_to_4096(self):
-        """Context should be rounded down to nearest 4096."""
+    def test_returns_power_of_two_bucket(self):
+        """Result is always a value from the bucket set (or capped fallback)."""
         hw = _make_hardware(vram_mb=30000, model_params=3_000_000_000, max_context=262144)
         ctx = _estimate_safe_context(hw)
-        assert ctx % 4096 == 0
+        assert ctx in _BUCKETS
 
-    def test_never_below_4096(self):
-        """Result is always at least 4096."""
-        hw = _make_hardware(vram_mb=1000, model_params=100_000_000_000, max_context=262144)
-        ctx = _estimate_safe_context(hw)
-        assert ctx >= 4096
-
-    def test_capped_at_65536(self):
-        """Fallback context is capped at 65536 for safety."""
+    def test_no_cap_at_65536_when_vram_allows(self):
+        """With abundant VRAM, fallback can reach 262144."""
         hw = _make_hardware(vram_mb=200000, model_params=1_000_000_000, max_context=262144)
         ctx = _estimate_safe_context(hw)
-        assert ctx <= 65536
+        assert ctx == 262144
 
     def test_respects_model_max_context(self):
         """If model max context is small, don't exceed it."""

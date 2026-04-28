@@ -146,6 +146,7 @@ async def validator_node(state: AgentState) -> dict:
                 config=experiment,
                 status=ExperimentStatus.FAILED,
                 error=error_msg,
+                failure_classification="validation",
                 errors=[
                     ExperimentError(
                         stage="validation",
