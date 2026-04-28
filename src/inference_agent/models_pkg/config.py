@@ -48,11 +48,28 @@ class DockerConfig(BaseModel):
     sglang_image: str = "lmsysorg/sglang:latest"
     network: str = "host"
     shm_size: str = "16g"
+
+    # HuggingFace cache paths.
+    #   host_cache_dir: where the AGENT writes prefetched weights on the host.
+    #     Defaults to the current user's HF cache so the agent works without
+    #     root. Override if you have a shared cache on a separate volume.
+    #   model_cache_dir: where the cache is mounted INSIDE the container. The
+    #     stock vLLM / SGLang images run as root and look at /root/.cache.
+    # The Docker mount becomes `-v host_cache_dir:model_cache_dir`.
+    host_cache_dir: str = Field(
+        default_factory=lambda: os.path.expanduser("~/.cache/huggingface")
+    )
     model_cache_dir: str = "/root/.cache/huggingface"
 
     # Fixed engine flags (not varied by LLM, always applied)
     vllm_extra_args: list[str] = Field(default_factory=list)
     sglang_extra_args: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _expand_cache_paths(self) -> "DockerConfig":
+        # Allow users to write `~/cache` literally in YAML and have it expand.
+        self.host_cache_dir = os.path.expanduser(self.host_cache_dir)
+        return self
 
 
 class StartupConfig(BaseModel):

@@ -152,6 +152,27 @@ def _prefetch_model(
     the engine will fall back to its own download inside the container (just
     slower).
     """
+    import os
+
+    # Make sure the target dir exists and is writable by us before invoking
+    # snapshot_download. snapshot_download writes refs/ files unconditionally
+    # and on a read-only path it surfaces a permission error mid-fetch instead
+    # of failing fast.
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        if not os.access(cache_dir, os.W_OK):
+            raise PermissionError(
+                f"cache_dir={cache_dir} is not writable by current user. "
+                f"Set docker.host_cache_dir to a path you own (e.g. ~/.cache/huggingface)."
+            )
+    except Exception as e:
+        logger.warning(
+            "Prefetch skipped for %s — host cache not usable: %s. "
+            "Engine will download inside the container instead.",
+            model_name, e,
+        )
+        return
+
     logger.info(
         "Prefetching %s into cache_dir=%s (this may take a while on first run)...",
         model_name, cache_dir,
@@ -228,7 +249,7 @@ async def discovery_node(state: AgentState) -> dict:
             None,
             _prefetch_model,
             config.model_name,
-            config.docker.model_cache_dir,
+            config.docker.host_cache_dir,
             config.model_revision,
             config.hf_token,
             config.startup.prefetch_allow_patterns,

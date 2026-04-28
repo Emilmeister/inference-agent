@@ -76,7 +76,7 @@ class BaseEngine(abc.ABC):
             "--gpus", "all",
             "--shm-size", dc.shm_size,
             "--network", dc.network,
-            "-v", f"{dc.model_cache_dir}:{dc.model_cache_dir}",
+            "-v", f"{dc.host_cache_dir}:{dc.model_cache_dir}",
             "-d",  # detached
             # NOTE: no --rm so we can read logs from crashed containers
         ]
