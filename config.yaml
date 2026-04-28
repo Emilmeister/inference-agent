@@ -1,5 +1,5 @@
 # Модель для бенчмарка
-model_name: "Qwen/Qwen3.5-9B"
+model_name: "google/gemma-4-31B-it"
 model_revision: null
 
 # LLM агента (для принятия решений — любой OpenAI-совместимый endpoint)
@@ -27,14 +27,16 @@ docker:
   vllm_extra_args:
     - "--enable-auto-tool-choice"
     - "--tool-call-parser"
-    - "qwen3_coder"
+    - "gemma4"
     - "--reasoning-parser"
-    - "qwen3"
+    - "gemma4"
+    - "--chat-template"
+    - "examples/tool_chat_template_gemma4.jinja"
   sglang_extra_args:
     - "--reasoning-parser"
-    - "qwen3"
+    - "gemma4"
     - "--tool-call-parser"
-    - "qwen3_coder"
+    - "gemma4"
 
 # Бенчмарк
 benchmark:
@@ -63,5 +65,5 @@ storage:
 # Пиши сюда на какие параметры обратить внимание, что попробовать,
 # что пропустить и т.д.
 planner_instructions: |
-  Делай все на свое усмотрение
+  Оптимизируй на свое усмотрение
 
