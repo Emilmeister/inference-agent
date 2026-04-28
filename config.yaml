@@ -38,6 +38,21 @@ docker:
     - "--tool-call-parser"
     - "gemma4"
 
+# Поведение при старте движка (healthcheck, pull образа).
+# Бюджет ожидания ограничен двумя часами:
+#   hard_timeout_sec — абсолютный потолок ожидания /health = 200.
+#   idle_timeout_sec — если в логах контейнера нет нового маркера прогресса
+#     (loading weights, capturing cuda graph, ...) дольше этого времени —
+#     считаем, что движок завис, и абортим.
+# Idle-таймер сбрасывается на каждом новом маркере, поэтому большие модели
+# (60+ GB), которые честно грузятся 20+ минут с диска, успешно стартуют —
+# нужно лишь поднять hard_timeout_sec.
+startup:
+  hard_timeout_sec: 1800       # 30 мин — увеличь если модель большая (60GB+ → 3600+)
+  idle_timeout_sec: 300        # 5 мин без прогресса в логах = stall
+  log_scan_interval_sec: 10.0
+  image_pull_timeout_sec: 900  # 15 мин на docker pull образа движка
+
 # Бенчмарк
 benchmark:
   warmup_requests: 10

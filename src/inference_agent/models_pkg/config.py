@@ -87,6 +87,11 @@ class StartupConfig(BaseModel):
     idle_timeout_sec: int = 300         # 5 min without log progress = stall
     log_scan_interval_sec: float = 10.0  # how often to fetch + scan container logs
 
+    # Timeout for `docker pull` of the engine image when not present locally.
+    # Multi-GB engine images on slow links can take 10+ min — bump this if
+    # registry is slow or image is large.
+    image_pull_timeout_sec: int = 900   # 15 min
+
     # Pre-download model weights into the host HF cache before launching any
     # container. Eliminates the "first launch takes 15+ min downloading 60GB"
     # failure mode and amortizes download cost across all experiments.

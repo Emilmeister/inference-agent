@@ -73,11 +73,13 @@ async def _start_engine(
     image = engine.image()
     startup_start = time.time()
     if not await image_exists_locally(image):
+        pull_timeout = engine.config.startup.image_pull_timeout_sec
         logger.info(
-            "Image %s not present locally, pulling (timeout 15 min)...", image,
+            "Image %s not present locally, pulling (timeout %ds)...",
+            image, pull_timeout,
         )
         try:
-            await pull_image(image, timeout=900)
+            await pull_image(image, timeout=pull_timeout)
             logger.info("Image %s pulled successfully", image)
         except RuntimeError as e:
             errors.append(ExperimentError(
