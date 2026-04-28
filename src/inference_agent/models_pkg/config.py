@@ -92,6 +92,13 @@ class StartupConfig(BaseModel):
     # registry is slow or image is large.
     image_pull_timeout_sec: int = 900   # 15 min
 
+    # Timeout for `docker run -d` itself (returns container ID, does NOT wait
+    # for healthcheck — that has its own budget above). With NVIDIA runtime,
+    # multi-GPU setups, or partially-pulled images, container creation can take
+    # well over a minute. Bump this if you see startup_timeout errors despite
+    # the image being locally present.
+    docker_run_timeout_sec: int = 180   # 3 min
+
     # Pre-download model weights into the host HF cache before launching any
     # container. Eliminates the "first launch takes 15+ min downloading 60GB"
     # failure mode and amortizes download cost across all experiments.

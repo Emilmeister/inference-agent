@@ -88,16 +88,25 @@ async def _start_engine(
                 details={"classification": "image_pull_failed", "image": image},
             ))
             return None, errors, time.time() - startup_start
+    else:
+        logger.info("Image %s already present locally, skipping pull", image)
 
-    # Run container — image is now guaranteed local, so 60s is plenty for
-    # `docker run -d` to return the container ID.
+    # Run container. Image is local but `docker run -d` itself can be slow
+    # under NVIDIA runtime with multi-GPU + new CUDA images — timeout is
+    # configurable via startup.docker_run_timeout_sec.
+    run_timeout = engine.config.startup.docker_run_timeout_sec
     try:
-        container_id = await run_container(docker_args, timeout=60)
+        container_id = await run_container(docker_args, timeout=run_timeout)
         logger.info("Container started: %s", container_id[:12])
     except (RuntimeError, asyncio.TimeoutError) as e:
         logs = await get_container_logs(container_name)
         if isinstance(e, asyncio.TimeoutError):
-            message = "Container start timed out after 60s (docker run -d hung)"
+            message = (
+                f"Container start timed out after {run_timeout}s "
+                f"(docker run -d did not return a container ID — likely slow "
+                f"NVIDIA runtime or partial image. Bump "
+                f"startup.docker_run_timeout_sec)"
+            )
             classification = "startup_timeout"
         else:
             message = f"Container start failed: {e}"

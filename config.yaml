@@ -52,6 +52,8 @@ startup:
   idle_timeout_sec: 300        # 5 мин без прогресса в логах = stall
   log_scan_interval_sec: 10.0
   image_pull_timeout_sec: 900  # 15 мин на docker pull образа движка
+  docker_run_timeout_sec: 180  # 3 мин на сам `docker run -d` (без healthcheck);
+                               # бамп если видишь startup_timeout при локально присутствующем образе
 
 # Бенчмарк
 benchmark:
