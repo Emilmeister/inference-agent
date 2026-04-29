@@ -52,7 +52,14 @@ the next configuration to benchmark for an LLM inference engine running on a GPU
 ## Optimization Goal
 {optimization_goal}
 
-## Previous Experiments (most recent last)
+## Top Results from Prior Runs (same hardware + model, loaded from DB)
+These are the best already-measured configurations on this exact hardware/model from \
+previous sessions. Treat them as a strong starting point: prefer iterating ON them \
+(adjusting one knob at a time) over re-running a generic baseline. Skip Rule 1 \
+(baseline) when prior tops exist — you already have a baseline.
+{loaded_top_history_json}
+
+## Previous Experiments This Session (most recent last)
 {history_json}
 
 ## Best Results So Far
@@ -258,11 +265,37 @@ def _should_disable_speculative(
     return all(h.status.value == "failed" for h in recent)
 
 
+def _summary_to_prompt_entry(h: ExperimentSummary) -> dict:
+    """Compact dict view of a summary for the LLM prompt."""
+    entry: dict = {
+        "id": h.experiment_id,
+        "engine": h.engine.value,
+        "status": h.status.value,
+        "config": h.config_digest,
+        "docker_command": h.docker_command,
+        "rationale": h.rationale,
+        "peak_throughput": h.peak_throughput,
+        "ttft_p95": h.low_concurrency_ttft_p95,
+        "tpot_p95": h.low_concurrency_tpot_p95,
+        "smoke_pass": f"{h.smoke_tests_passed}/{h.smoke_tests_total}",
+        "correctness_gate": h.correctness_gate_passed,
+        "classification": h.optimization_classification.value,
+    }
+    if h.error:
+        entry["error"] = h.error
+    if h.failure_classification:
+        entry["failure_type"] = h.failure_classification
+    if h.llm_commentary:
+        entry["analysis"] = h.llm_commentary
+    return entry
+
+
 async def planner_node(state: AgentState) -> dict:
     """Use LLM to select the next experiment configuration."""
     config = state["config"]
     hardware = state["hardware"]
     history = state.get("experiment_history", [])
+    loaded_top_history = state.get("loaded_top_history", [])
     goal = state.get("next_optimization_goal", OptimizationGoal.EXPLORE)
 
     # Format history for LLM (last 15 experiments).
@@ -280,28 +313,12 @@ async def planner_node(state: AgentState) -> dict:
                 "error": (h.error or "")[:200],
             })
             continue
+        history_for_llm.append(_summary_to_prompt_entry(h))
 
-        entry: dict = {
-            "id": h.experiment_id,
-            "engine": h.engine.value,
-            "status": h.status.value,
-            "config": h.config_digest,
-            "docker_command": h.docker_command,
-            "rationale": h.rationale,
-            "peak_throughput": h.peak_throughput,
-            "ttft_p95": h.low_concurrency_ttft_p95,
-            "tpot_p95": h.low_concurrency_tpot_p95,
-            "smoke_pass": f"{h.smoke_tests_passed}/{h.smoke_tests_total}",
-            "correctness_gate": h.correctness_gate_passed,
-            "classification": h.optimization_classification.value,
-        }
-        if h.error:
-            entry["error"] = h.error
-        if h.failure_classification:
-            entry["failure_type"] = h.failure_classification
-        if h.llm_commentary:
-            entry["analysis"] = h.llm_commentary
-        history_for_llm.append(entry)
+    # Top results from prior runs on the same hardware/model. These come from
+    # `history_loader` and are already filtered to status in {success, partial}
+    # with valid metrics, so we don't re-filter here.
+    loaded_top_for_llm = [_summary_to_prompt_entry(h) for h in loaded_top_history]
 
     # Determine if we need to force a specific engine (alternation rule)
     forced_engine = _get_forced_engine(history, hardware.available_engines)
@@ -353,6 +370,11 @@ async def planner_node(state: AgentState) -> dict:
         engine_instruction=engine_instruction,
         optimization_goal=goal.value,
         history_json=json.dumps(history_for_llm, indent=2) if history_for_llm else "No experiments yet.",
+        loaded_top_history_json=(
+            json.dumps(loaded_top_for_llm, indent=2)
+            if loaded_top_for_llm
+            else "No prior runs on this hardware/model."
+        ),
         best_throughput=state.get("best_throughput", 0),
         best_throughput_id=state.get("best_throughput_config_id", "none"),
         best_latency=state.get("best_latency_ttft_p95", float("inf")),

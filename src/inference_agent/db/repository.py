@@ -56,8 +56,11 @@ class ExperimentRepository:
           - top balanced:   highest `peak_throughput` where ttft_p95 < threshold
 
         All filters require: matching hardware (gpu_name/count/vram/nvlink) and
-        model_name, plus eligibility (correctness gate passed, status='success',
-        peak_throughput > 0).
+        model_name, plus eligibility (correctness gate passed, status in
+        {'success', 'partial'}, peak_throughput > 0). 'partial' runs are
+        included because they still produced valid headline metrics — only
+        peripheral phases (e.g. high-concurrency long-prompt) failed the
+        error-rate gate.
 
         Returns deduplicated list (max `3*limit` summaries, often fewer).
         """
@@ -71,7 +74,7 @@ class ExperimentRepository:
             & (ExperimentRow.nvlink_available == hardware.nvlink_available)
             & (ExperimentRow.model_name == model_name)
             & (ExperimentRow.correctness_gate_passed.is_(True))
-            & (ExperimentRow.status == "success")
+            & (ExperimentRow.status.in_(["success", "partial"]))
             & (ExperimentRow.peak_throughput > 0)
         )
 

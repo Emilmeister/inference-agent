@@ -230,6 +230,31 @@ async def test_eligibility_filter(repo):
 
 
 @pytest.mark.asyncio
+async def test_partial_runs_are_included(repo):
+    """`partial` runs (peripheral phase failed error-rate gate but headline
+    metrics are valid) must surface in the top-N alongside `success` runs."""
+    await repo.insert_experiment(
+        _make_result("solid", throughput=500.0, ttft_p95=80.0)
+    )
+    await repo.insert_experiment(
+        _make_result(
+            "partial_winner",
+            throughput=900.0,
+            ttft_p95=120.0,
+            status=ExperimentStatus.PARTIAL,
+        )
+    )
+
+    summaries = await repo.find_top_for_hardware(
+        hardware=_hw(),
+        model_name="Qwen/Qwen2.5-7B-Instruct",
+        latency_threshold_ms=500.0,
+    )
+    ids = {s.experiment_id for s in summaries}
+    assert ids == {"solid", "partial_winner"}
+
+
+@pytest.mark.asyncio
 async def test_balanced_threshold(repo):
     """Balanced category respects latency_threshold_ms."""
     await repo.insert_experiment(_make_result("fast", throughput=200.0, ttft_p95=100.0))
