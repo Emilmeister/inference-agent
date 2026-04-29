@@ -130,6 +130,34 @@ class TestCheckPlateau:
         # best_latency=30, and exp_4 has 25 < 30 — improvement
         assert _check_plateau(history, 200, 30, window=5, threshold=0.02) is False
 
+    def test_record_breaking_run_does_not_trip_plateau(self):
+        """Regression: caller must pass *prior* best so the new record can beat it.
+
+        This locks down the bug where a record-breaking experiment trips plateau
+        because best_* was already updated to its own value before the check.
+        """
+        history = [
+            _make_summary(f"exp_{i}", throughput=100, ttft_p95=50) for i in range(4)
+        ]
+        # Big jump on the last entry — clearly an improvement.
+        history.append(_make_summary("exp_4", throughput=800, ttft_p95=25))
+        # Pre-update best is 100 / 50 (the prior plateau). 800 trivially beats 100.
+        assert _check_plateau(history, 100, 50, window=5, threshold=0.02) is False
+        # But if the caller passed POST-update best (800/25), the new record can
+        # never beat itself, and plateau falsely triggers — that's the buggy
+        # call site we're guarding against.
+        assert _check_plateau(history, 800, 25, window=5, threshold=0.02) is True
+
+    def test_threshold_requires_meaningful_improvement(self):
+        """Variant 2: threshold actually gates 'improvement' (was previously dead)."""
+        history = [_make_summary(f"exp_{i}", throughput=100, ttft_p95=50) for i in range(4)]
+        # 1% improvement on a 2% threshold should NOT count as improvement.
+        history.append(_make_summary("exp_4", throughput=101, ttft_p95=49.5))
+        assert _check_plateau(history, 100, 50, window=5, threshold=0.02) is True
+        # 5% improvement clears the 2% bar.
+        history[-1] = _make_summary("exp_4", throughput=105, ttft_p95=47.5)
+        assert _check_plateau(history, 100, 50, window=5, threshold=0.02) is False
+
 
 class TestComputeScores:
     @staticmethod
