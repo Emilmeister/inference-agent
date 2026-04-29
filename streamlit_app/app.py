@@ -11,9 +11,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from streamlit_app.db import (
+from db import (
     Filters,
     HardwareKey,
+    delete_experiments,
     list_distinct_engines,
     list_distinct_hardware,
     list_distinct_models,
@@ -462,3 +463,57 @@ st.dataframe(
     use_container_width=True,
     hide_index=True,
 )
+
+
+# ---- Manage experiments (delete) ----
+
+st.header("Manage Experiments")
+st.caption(
+    "Permanently delete experiments from the database. This cannot be undone — "
+    "the row, JSONB payload, and any per-phase data are removed."
+)
+
+with st.expander("Delete experiments", expanded=False):
+    # Build labels with key context so the user picks the right row.
+    id_to_label = {}
+    for exp in experiments:
+        eid = exp.get("experiment_id", "")
+        if not eid:
+            continue
+        engine = exp.get("engine", "")
+        config = exp.get("config", {})
+        tp = config.get("tensor_parallel_size", "?")
+        quant = config.get("quantization") or "none"
+        status = exp.get("status", "")
+        throughput = exp.get("benchmark", {}).get("peak_output_tokens_per_sec", 0)
+        id_to_label[eid] = (
+            f"{eid} — {engine} TP={tp} q={quant} | "
+            f"{status} | {throughput:.0f} tok/s"
+        )
+
+    selected_ids = st.multiselect(
+        "Experiments to delete",
+        options=list(id_to_label.keys()),
+        format_func=lambda x: id_to_label.get(x, x),
+        key="delete_selection",
+    )
+
+    confirm = st.checkbox(
+        f"I understand this will permanently delete {len(selected_ids)} "
+        f"experiment(s).",
+        key="delete_confirm",
+        disabled=not selected_ids,
+    )
+
+    if st.button(
+        "Delete selected",
+        type="primary",
+        disabled=not (selected_ids and confirm),
+    ):
+        try:
+            deleted = delete_experiments(selected_ids)
+        except Exception as exc:
+            st.error(f"Delete failed: {exc}")
+        else:
+            st.success(f"Deleted {deleted} experiment(s).")
+            st.rerun()

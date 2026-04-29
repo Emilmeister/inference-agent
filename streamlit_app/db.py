@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import streamlit as st
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, delete, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 
@@ -134,3 +134,30 @@ def list_experiments(filters: Filters) -> list[dict]:
     with Session() as session:
         rows = session.execute(stmt).scalars().all()
     return [row.data for row in rows]
+
+
+def delete_experiments(experiment_ids: list[str]) -> int:
+    """Delete experiments by id and invalidate dashboard caches.
+
+    Returns the number of rows actually deleted. No-op for an empty list.
+    """
+    if not experiment_ids:
+        return 0
+    Session = _get_sessionmaker()
+    with Session() as session:
+        result = session.execute(
+            delete(ExperimentRow).where(
+                ExperimentRow.experiment_id.in_(experiment_ids)
+            )
+        )
+        session.commit()
+        deleted = result.rowcount or 0
+
+    # Cache invalidation: list_experiments holds the rows we just removed,
+    # the distinct_* lists may now have empty values. Cheaper to nuke all
+    # cached reads than to surgically prune.
+    list_experiments.clear()
+    list_distinct_hardware.clear()
+    list_distinct_models.clear()
+    list_distinct_engines.clear()
+    return deleted
