@@ -1,13 +1,24 @@
-"""Streamlit dashboard for visualizing inference benchmark experiments."""
+"""Streamlit dashboard for visualizing inference benchmark experiments.
+
+Source: Postgres (configured via DATABASE_* env vars + DB_PASSWORD).
+Run: `streamlit run streamlit_app/app.py`
+"""
 
 from __future__ import annotations
-
-import json
 
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+
+from streamlit_app.db import (
+    Filters,
+    HardwareKey,
+    list_distinct_engines,
+    list_distinct_hardware,
+    list_distinct_models,
+    list_experiments,
+)
 
 st.set_page_config(
     page_title="Inference Benchmark Dashboard",
@@ -17,45 +28,53 @@ st.set_page_config(
 st.title("LLM Inference Benchmark Dashboard")
 
 
-# ── File upload ────────────────────────────────────────────────────────────
+# ---- Source filters (Postgres-backed) ----
 
-uploaded_files = st.file_uploader(
-    "Upload experiment JSON files",
-    type=["json"],
-    accept_multiple_files=True,
+st.sidebar.header("Source")
+
+try:
+    hardware_options = list_distinct_hardware()
+    model_options = list_distinct_models()
+    engine_options = list_distinct_engines()
+except Exception as exc:  # pragma: no cover - surfaced to user via UI
+    st.error(f"Failed to connect to Postgres: {exc}")
+    st.stop()
+
+if not hardware_options:
+    st.info("No experiments in the database yet. Run `inference-agent` to populate it.")
+    st.stop()
+
+hw_labels = {hw.label(): hw for hw in hardware_options}
+hw_label = st.sidebar.selectbox("Hardware", list(hw_labels.keys()))
+selected_hw: HardwareKey = hw_labels[hw_label]
+
+selected_models = st.sidebar.multiselect(
+    "Model",
+    model_options,
+    default=model_options,
+)
+selected_engines_src = st.sidebar.multiselect(
+    "Engine (source filter)",
+    engine_options,
+    default=engine_options,
 )
 
-if not uploaded_files:
-    st.info("Upload one or more experiment JSON files to get started.")
-    st.stop()
+filters = Filters(
+    hardware=selected_hw,
+    models=tuple(selected_models),
+    engines=tuple(selected_engines_src),
+)
 
-
-# ── Parse experiments ───────���──────────────────────────────────────────────
-
-
-@st.cache_data
-def parse_experiments(files_data: list[tuple[str, bytes]]) -> list[dict]:
-    experiments = []
-    for name, data in files_data:
-        try:
-            exp = json.loads(data)
-            experiments.append(exp)
-        except json.JSONDecodeError:
-            st.warning(f"Failed to parse {name}")
-    return experiments
-
-
-files_data = [(f.name, f.read()) for f in uploaded_files]
-experiments = parse_experiments(files_data)
+experiments = list_experiments(filters)
 
 if not experiments:
-    st.error("No valid experiments found.")
+    st.warning("No experiments match the current filters.")
     st.stop()
 
-st.success(f"Loaded {len(experiments)} experiments")
+st.success(f"Loaded {len(experiments)} experiments from Postgres")
 
 
-# ── Build dataframe ─���──────────────────────────────────────────────────────
+# ---- Build dataframe ----
 
 
 def build_summary_df(experiments: list[dict]) -> pd.DataFrame:
@@ -106,9 +125,9 @@ def build_summary_df(experiments: list[dict]) -> pd.DataFrame:
 df = build_summary_df(experiments)
 
 
-# ── Filters ────────────────────────────────────────────────────────────────
+# ---- Display filters (in-page narrowing of the loaded set) ----
 
-st.sidebar.header("Filters")
+st.sidebar.header("Display")
 
 engines = st.sidebar.multiselect(
     "Engine", df["engine"].unique().tolist(), default=df["engine"].unique().tolist()
@@ -131,7 +150,7 @@ filtered = df[
 ]
 
 
-# ── Leaderboards ───────────────────────────────────────────────────────────
+# ---- Leaderboards ----
 
 st.header("Leaderboards")
 col1, col2, col3 = st.columns(3)
@@ -162,7 +181,7 @@ with col3:
     st.dataframe(top_bal, use_container_width=True, hide_index=True)
 
 
-# ── Pareto Chart ─────────��─────────────────────────────────────────────────
+# ---- Pareto chart ----
 
 st.header("Throughput vs Latency (Pareto Front)")
 
@@ -178,12 +197,11 @@ if not valid.empty:
         size="tp",
         hover_data=["experiment_id", "scheduling_policy", "chunked_prefill"],
         labels={
-            "ttft_p95": "TTFT p95 (ms) ← lower is better",
-            "peak_throughput": "Peak Throughput (tok/s) ↑",
+            "ttft_p95": "TTFT p95 (ms) - lower is better",
+            "peak_throughput": "Peak Throughput (tok/s)",
         },
     )
 
-    # Compute Pareto front directly from data (works even without analyzer scores)
     pareto_ids = []
     sorted_by_tp = valid.sort_values("peak_throughput", ascending=False)
     best_lat = float("inf")
@@ -210,7 +228,7 @@ else:
     st.warning("No valid data points for Pareto chart.")
 
 
-# ── Concurrency Curves ────────────────────────────────────────────────────
+# ---- Concurrency curves ----
 
 st.header("Throughput vs Concurrency")
 
@@ -254,7 +272,6 @@ if selected_exp:
                 st.plotly_chart(fig_tp, use_container_width=True)
 
             with col2:
-                # TTFT p95 from nested stats
                 ttft_data = []
                 for cr in conc_results:
                     ttft = cr.get("ttft_ms", {})
@@ -282,7 +299,7 @@ if selected_exp:
                 st.plotly_chart(fig_lat, use_container_width=True)
 
 
-# ── Long Context Analysis ─────────────────────────────────────────────────
+# ---- Long context analysis ----
 
 st.header("Long Context Performance")
 
@@ -328,7 +345,7 @@ else:
     st.info("No long context data available.")
 
 
-# ── GPU Utilization ────────────────────────────────────────────────────────
+# ---- GPU metrics ----
 
 st.header("GPU Metrics")
 
@@ -381,7 +398,7 @@ else:
     st.info("No GPU metrics available.")
 
 
-# ── Docker Commands ───────────────────────────────────────────────────────
+# ---- Docker commands ----
 
 st.header("Docker Commands")
 st.caption("Copy-paste ready commands to reproduce each experiment")
@@ -395,7 +412,7 @@ for exp in experiments:
     quant = config.get("quantization", "none")
     throughput = exp.get("benchmark", {}).get("peak_output_tokens_per_sec", 0)
 
-    label = f"{eid} ({engine} TP={tp} q={quant}) — {throughput:.0f} tok/s"
+    label = f"{eid} ({engine} TP={tp} q={quant}) - {throughput:.0f} tok/s"
 
     with st.expander(label):
         if docker_cmd:
@@ -404,7 +421,7 @@ for exp in experiments:
             st.info("Docker command not recorded (old experiment format)")
 
 
-# ── LLM Commentary ────────────────────────────────────────────────────────
+# ---- LLM commentary ----
 
 st.header("LLM Analysis")
 
@@ -416,10 +433,9 @@ for exp in experiments:
     classification = exp.get("optimization_classification", "none")
     rationale = exp.get("config", {}).get("rationale", "")
 
-    # Show if we have commentary OR rationale
     if commentary or rationale:
         has_commentary = True
-        with st.expander(f"{eid} ({engine}) — {classification}"):
+        with st.expander(f"{eid} ({engine}) - {classification}"):
             if commentary:
                 st.markdown("**LLM Analysis:**")
                 st.write(commentary)
@@ -435,10 +451,10 @@ for exp in experiments:
             )
 
 if not has_commentary:
-    st.info("No LLM analysis available. Ensure the agent code is updated so analyzer saves commentary to JSON.")
+    st.info("No LLM analysis available for the current selection.")
 
 
-# ── Full comparison table ─────────────────────────────────────────────────
+# ---- Full comparison table ----
 
 st.header("Full Comparison")
 st.dataframe(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from typing import Literal
+from urllib.parse import quote_plus
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -142,8 +143,47 @@ class ExperimentsConfig(BaseModel):
 
 
 class StorageConfig(BaseModel):
-    experiments_dir: str = "./experiments"
     logs_dir: str = "./logs"
+
+
+class DatabaseConfig(BaseModel):
+    """Postgres connection parameters.
+
+    Password may be set directly, via `password_env` (env var name), or via the
+    `DATABASE_PASSWORD` env override applied in `cli._load_config`.
+    """
+
+    host: str = "localhost"
+    port: int = 5432
+    database: str = "inference_agent"
+    user: str = "inference_agent"
+    password: str | None = None
+    password_env: str = "DB_PASSWORD"
+
+    pool_size: int = 5
+    pool_max_overflow: int = 10
+    pool_timeout_sec: int = 30
+    echo: bool = False
+
+    @model_validator(mode="after")
+    def _resolve_password(self) -> "DatabaseConfig":
+        if not self.password and self.password_env:
+            self.password = os.environ.get(self.password_env)
+        return self
+
+    @property
+    def url(self) -> str:
+        """Async URL for SQLAlchemy + asyncpg (used by the agent)."""
+        pwd = quote_plus(self.password or "")
+        usr = quote_plus(self.user)
+        return f"postgresql+asyncpg://{usr}:{pwd}@{self.host}:{self.port}/{self.database}"
+
+    @property
+    def sync_url(self) -> str:
+        """Sync URL for SQLAlchemy + psycopg (used by Streamlit)."""
+        pwd = quote_plus(self.password or "")
+        usr = quote_plus(self.user)
+        return f"postgresql+psycopg://{usr}:{pwd}@{self.host}:{self.port}/{self.database}"
 
 
 class AgentConfig(BaseModel):
@@ -156,6 +196,7 @@ class AgentConfig(BaseModel):
     benchmark: BenchmarkConfig = Field(default_factory=BenchmarkConfig)
     experiments: ExperimentsConfig = Field(default_factory=ExperimentsConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
+    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
 
     # Natural language instructions for the LLM planner
     # e.g. "Focus on fp8 quantization. Try chunked_prefill_size=4096 with SGLang."

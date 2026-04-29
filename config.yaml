@@ -73,10 +73,22 @@ experiments:
   plateau_window: 5
   engines: ["vllm", "sglang"]
 
-# Storage
+# Storage (logs only; experiment results go to Postgres — см. секцию database)
 storage:
-  experiments_dir: "./experiments"
   logs_dir: "./logs"
+
+# Postgres для хранения экспериментов и подгрузки топов между запусками.
+# Все поля можно переопределить env-переменными DATABASE_<UPPER> (например
+# DATABASE_HOST, DATABASE_PORT). Пароль читается из DB_PASSWORD по умолчанию;
+# поменяй password_env, если хочешь другую переменную.
+database:
+  host: "localhost"
+  port: 5432
+  database: "inference_agent"
+  user: "inference_agent"
+  password_env: "DB_PASSWORD"
+  pool_size: 5
+  echo: false
 
 # Инструкции для LLM планировщика на естественном языке.
 # Пиши сюда на какие параметры обратить внимание, что попробовать,

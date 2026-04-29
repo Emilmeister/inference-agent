@@ -4,6 +4,7 @@ from inference_agent.models_pkg.config import (
     AgentConfig,
     AgentLLMConfig,
     BenchmarkConfig,
+    DatabaseConfig,
     DockerConfig,
     ExperimentsConfig,
     StartupConfig,
@@ -56,6 +57,7 @@ __all__ = [
     "BenchmarkConfig",
     "ExperimentsConfig",
     "StorageConfig",
+    "DatabaseConfig",
     "AgentConfig",
     # LLM Schemas
     "PlannerOutput",

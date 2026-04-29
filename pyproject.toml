@@ -17,6 +17,8 @@ dependencies = [
     "rich>=13.0",
     "prometheus-client>=0.20",
     "huggingface-hub>=0.20",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
 ]
 
 [project.optional-dependencies]
@@ -24,10 +26,12 @@ dashboard = [
     "streamlit>=1.35",
     "plotly>=5.0",
     "pandas>=2.0",
+    "psycopg[binary]>=3.1",
 ]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "testcontainers[postgres]>=4.0",
 ]
 
 [project.scripts]
@@ -35,6 +39,9 @@ inference-agent = "inference_agent.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integration: integration tests requiring Docker (Postgres testcontainer)",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/inference_agent"]

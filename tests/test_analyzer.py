@@ -1,16 +1,29 @@
 """Tests for analyzer pure logic — Pareto front, scoring, plateau detection."""
 
+from __future__ import annotations
+
+import pytest
+
 from inference_agent.models import (
+    AgentConfig,
+    AnalyzerOutput,
+    BenchmarkResult,
     EngineType,
+    ExperimentConfig,
+    ExperimentResult,
     ExperimentScores,
     ExperimentStatus,
     ExperimentSummary,
+    GPUInfo,
+    HardwareProfile,
     ParetoPoint,
 )
+from inference_agent.nodes import analyzer as analyzer_module
 from inference_agent.nodes.analyzer import (
     _check_plateau,
     _compute_pareto_front,
     _compute_scores,
+    analyzer_node,
 )
 
 
@@ -156,3 +169,135 @@ class TestComputeScores:
         scores = _compute_scores(result, best_throughput=0, best_latency=0, pareto=[])
         assert scores.throughput_score == 0.0
         assert scores.latency_score == 0.0
+
+
+# ─── Analyzer node — split between session and loaded_top_history ──────────
+
+
+def _make_result(
+    exp_id: str,
+    throughput: float = 120.0,
+    ttft_p95: float = 40.0,
+    correctness_gate_passed: bool = True,
+    status: ExperimentStatus = ExperimentStatus.SUCCESS,
+) -> ExperimentResult:
+    return ExperimentResult(
+        experiment_id=exp_id,
+        engine=EngineType.VLLM,
+        model="test/model",
+        hardware=HardwareProfile(
+            gpus=[GPUInfo(index=0, name="A100", vram_total_mb=81920, vram_free_mb=80000)],
+            gpu_count=1,
+            nvlink_available=False,
+            model_name="test/model",
+        ),
+        config=ExperimentConfig(engine=EngineType.VLLM, max_model_len=4096),
+        status=status,
+        correctness_gate_passed=correctness_gate_passed,
+        benchmark=BenchmarkResult(
+            peak_output_tokens_per_sec=throughput,
+            low_concurrency_ttft_p95_ms=ttft_p95,
+        ),
+    )
+
+
+class _StubLLM:
+    """Replace `structured_output` so analyzer_node tests don't hit any LLM."""
+
+    def __init__(self) -> None:
+        self.output = AnalyzerOutput(
+            commentary="test analysis",
+            classification="none",
+            decision="continue",
+            next_goal="explore",
+            planner_hint="",
+        )
+
+    async def __call__(self, prompt, schema, llm_cfg):  # noqa: ARG002
+        return self.output
+
+
+@pytest.fixture
+def stub_llm(monkeypatch):
+    stub = _StubLLM()
+    monkeypatch.setattr(analyzer_module, "structured_output", stub)
+    return stub
+
+
+class TestAnalyzerNodeWithLoadedHistory:
+    @pytest.mark.asyncio
+    async def test_plateau_not_triggered_by_loaded_tops(self, stub_llm):
+        """Loaded tops alone must not trigger plateau on iteration 1."""
+        config = AgentConfig()
+        config.experiments.plateau_window = 5
+        # Loaded top is much stronger than the new experiment — would trigger
+        # plateau if it counted in the plateau window.
+        loaded = [_make_summary(f"prev_{i}", throughput=1000.0, ttft_p95=10.0) for i in range(5)]
+        result = _make_result("new_1", throughput=120.0, ttft_p95=40.0)
+
+        out = await analyzer_node({
+            "config": config,
+            "current_result": result,
+            "experiment_history": [],
+            "loaded_top_history": loaded,
+            "experiments_count": 0,
+        })
+
+        assert out["status"] == "running"
+        assert out["stop_reason"] is None
+
+    @pytest.mark.asyncio
+    async def test_best_throughput_tracks_session_only(self, stub_llm):
+        """state['best_throughput'] reflects session, not loaded tops."""
+        config = AgentConfig()
+        loaded = [_make_summary("prev_1", throughput=5000.0, ttft_p95=5.0)]
+        result = _make_result("new_1", throughput=120.0, ttft_p95=40.0)
+
+        out = await analyzer_node({
+            "config": config,
+            "current_result": result,
+            "experiment_history": [],
+            "loaded_top_history": loaded,
+            "experiments_count": 0,
+        })
+
+        assert out["best_throughput"] == 120.0
+        assert out["best_throughput_config_id"] == "new_1"
+
+    @pytest.mark.asyncio
+    async def test_pareto_combines_loaded_and_session(self, stub_llm):
+        """Pareto front merges loaded tops with current session."""
+        config = AgentConfig()
+        # Loaded top dominates throughput axis; current dominates latency axis.
+        loaded = [_make_summary("prev_tp", throughput=500.0, ttft_p95=200.0)]
+        result = _make_result("new_lat", throughput=100.0, ttft_p95=10.0)
+
+        out = await analyzer_node({
+            "config": config,
+            "current_result": result,
+            "experiment_history": [],
+            "loaded_top_history": loaded,
+            "experiments_count": 0,
+        })
+
+        ids = {p.config_id for p in out["pareto_front"]}
+        assert ids == {"prev_tp", "new_lat"}
+
+    @pytest.mark.asyncio
+    async def test_scores_normalized_against_union_best(self, stub_llm):
+        """Throughput score is normalized against the cross-run best."""
+        config = AgentConfig()
+        loaded = [_make_summary("prev_top", throughput=400.0, ttft_p95=20.0)]
+        result = _make_result("new_1", throughput=100.0, ttft_p95=80.0)
+
+        out = await analyzer_node({
+            "config": config,
+            "current_result": result,
+            "experiment_history": [],
+            "loaded_top_history": loaded,
+            "experiments_count": 0,
+        })
+
+        enriched = out["current_result"]
+        # 100 / 400 = 0.25 — would be 1.0 if we ignored loaded tops
+        assert enriched.scores.throughput_score == pytest.approx(0.25)

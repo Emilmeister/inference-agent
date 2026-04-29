@@ -9,8 +9,10 @@ import os
 import sys
 
 import yaml
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from inference_agent.agent import compile_agent
+from inference_agent.db import ExperimentRepository, init_schema
 from inference_agent.models import AgentConfig, OptimizationGoal
 from inference_agent.utils.docker import stop_all_bench_containers
 from inference_agent.utils.logging import setup_logging
@@ -31,6 +33,20 @@ _AGENT_LLM_ENV_FIELDS = (
 )
 
 
+_DATABASE_ENV_FIELDS = (
+    "host",
+    "port",
+    "database",
+    "user",
+    "password",
+    "password_env",
+    "pool_size",
+    "pool_max_overflow",
+    "pool_timeout_sec",
+    "echo",
+)
+
+
 def _apply_agent_llm_env_overrides(raw: dict) -> None:
     """Override agent_llm.<field> with env var AGENT_LLM_<FIELD> if set."""
     section = raw.setdefault("agent_llm", {})
@@ -40,8 +56,20 @@ def _apply_agent_llm_env_overrides(raw: dict) -> None:
             section[field] = os.environ[env_name]
 
 
+def _apply_database_env_overrides(raw: dict) -> None:
+    """Override database.<field> with env var DATABASE_<FIELD> if set."""
+    section = raw.setdefault("database", {})
+    for field in _DATABASE_ENV_FIELDS:
+        env_name = f"DATABASE_{field.upper()}"
+        if env_name in os.environ:
+            section[field] = os.environ[env_name]
+
+
 def _load_config(path: str) -> AgentConfig:
-    """Load and validate config from YAML file. Env vars override agent_llm fields."""
+    """Load and validate config from YAML file.
+
+    Env vars override agent_llm and database fields (AGENT_LLM_* / DATABASE_*).
+    """
     with open(path) as f:
         raw = yaml.safe_load(f)
 
@@ -53,50 +81,67 @@ def _load_config(path: str) -> AgentConfig:
             raw["agent_llm"]["api_key"] = os.environ.get(env_var, "")
 
     _apply_agent_llm_env_overrides(raw)
+    _apply_database_env_overrides(raw)
 
     return AgentConfig(**raw)
 
 
 async def _run(config: AgentConfig) -> None:
     """Run the agent."""
-    agent = compile_agent()
-
-    initial_state = {
-        "config": config,
-        "experiment_history": [],
-        "experiments_count": 0,
-        "best_throughput": 0.0,
-        "best_throughput_config_id": "",
-        "best_latency_ttft_p95": float("inf"),
-        "best_latency_config_id": "",
-        "best_balanced_config_id": "",
-        "best_balanced_throughput": 0.0,
-        "best_balanced_latency": float("inf"),
-        "pareto_front": [],
-        "next_optimization_goal": OptimizationGoal.EXPLORE,
-        "status": "running",
-        "stop_reason": None,
-        "current_config": None,
-        "current_result": None,
-        "skip_executor": False,
-    }
-
     logger = logging.getLogger("inference_agent")
-    logger.info("Starting inference benchmark agent")
-    logger.info("Model: %s", config.model_name)
-    logger.info("Max experiments: %d", config.experiments.max_experiments)
-    logger.info("Engines: %s", [e.value for e in config.experiments.engines])
 
+    engine = create_async_engine(
+        config.database.url,
+        pool_size=config.database.pool_size,
+        max_overflow=config.database.pool_max_overflow,
+        pool_timeout=config.database.pool_timeout_sec,
+        echo=config.database.echo,
+    )
     try:
-        final_state = await agent.ainvoke(initial_state)
-    except KeyboardInterrupt:
-        logger.info("Interrupted by user")
-        stop_all_bench_containers()
-        return
-    except Exception:
-        logger.exception("Agent failed")
-        stop_all_bench_containers()
-        raise
+        # First real round-trip to Postgres — fail fast here if DB unreachable.
+        await init_schema(engine)
+        sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+        repo = ExperimentRepository(sessionmaker)
+        agent = compile_agent(repo)
+
+        initial_state = {
+            "config": config,
+            "experiment_history": [],
+            "loaded_top_history": [],
+            "experiments_count": 0,
+            "best_throughput": 0.0,
+            "best_throughput_config_id": "",
+            "best_latency_ttft_p95": float("inf"),
+            "best_latency_config_id": "",
+            "best_balanced_config_id": "",
+            "best_balanced_throughput": 0.0,
+            "best_balanced_latency": float("inf"),
+            "pareto_front": [],
+            "next_optimization_goal": OptimizationGoal.EXPLORE,
+            "status": "running",
+            "stop_reason": None,
+            "current_config": None,
+            "current_result": None,
+            "skip_executor": False,
+        }
+
+        logger.info("Starting inference benchmark agent")
+        logger.info("Model: %s", config.model_name)
+        logger.info("Max experiments: %d", config.experiments.max_experiments)
+        logger.info("Engines: %s", [e.value for e in config.experiments.engines])
+
+        try:
+            final_state = await agent.ainvoke(initial_state)
+        except KeyboardInterrupt:
+            logger.info("Interrupted by user")
+            stop_all_bench_containers()
+            return
+        except Exception:
+            logger.exception("Agent failed")
+            stop_all_bench_containers()
+            raise
+    finally:
+        await engine.dispose()
 
     # Print summary
     print("\n" + "=" * 60)
@@ -127,7 +172,10 @@ async def _run(config: AgentConfig) -> None:
         for p in pareto:
             print(f"  {p.config_id}: {p.throughput:.1f} tok/s, TTFT p95={p.ttft_p95:.1f} ms")
 
-    print(f"\nResults saved to: {config.storage.experiments_dir}/")
+    print(
+        f"\nResults saved to Postgres at "
+        f"{config.database.host}:{config.database.port}/{config.database.database}"
+    )
 
 
 def main() -> None:

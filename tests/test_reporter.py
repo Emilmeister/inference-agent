@@ -1,18 +1,22 @@
-"""Tests for reporter — atomic writes and save semantics."""
+"""Tests for reporter — Postgres persistence via repository."""
 
-import json
-import os
-import tempfile
+from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
+import pytest
+
+from inference_agent.db.repository import ExperimentRepository
 from inference_agent.models import (
+    AgentConfig,
     EngineType,
     ExperimentConfig,
     ExperimentResult,
     ExperimentStatus,
-    HardwareProfile,
     GPUInfo,
+    HardwareProfile,
 )
-from inference_agent.nodes.reporter import save_experiment
+from inference_agent.nodes.reporter import make_reporter_node
 
 
 def _make_result(exp_id: str = "test123") -> ExperimentResult:
@@ -31,62 +35,34 @@ def _make_result(exp_id: str = "test123") -> ExperimentResult:
     )
 
 
-class TestSaveExperiment:
-    def test_saves_json_file(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            result = _make_result()
-            filepath = save_experiment(result, tmpdir)
+@pytest.mark.asyncio
+async def test_reporter_inserts_current_result():
+    repo = AsyncMock(spec=ExperimentRepository)
+    node = make_reporter_node(repo)
+    result = _make_result()
 
-            assert os.path.exists(filepath)
-            assert filepath.endswith("test123.json")
+    out = await node({"config": AgentConfig(), "current_result": result})
 
-            with open(filepath) as f:
-                data = json.load(f)
-            assert data["experiment_id"] == "test123"
-            assert data["engine"] == "vllm"
+    repo.insert_experiment.assert_awaited_once_with(result)
+    assert out == {}
 
-    def test_creates_directory(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            subdir = os.path.join(tmpdir, "nested", "experiments")
-            result = _make_result()
-            filepath = save_experiment(result, subdir)
-            assert os.path.exists(filepath)
 
-    def test_overwrites_existing(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            result1 = _make_result()
-            result1.docker_command = "first"
-            save_experiment(result1, tmpdir)
+@pytest.mark.asyncio
+async def test_reporter_skips_when_no_result():
+    repo = AsyncMock(spec=ExperimentRepository)
+    node = make_reporter_node(repo)
 
-            result2 = _make_result()
-            result2.docker_command = "second"
-            filepath = save_experiment(result2, tmpdir)
+    out = await node({"config": AgentConfig(), "current_result": None})
 
-            with open(filepath) as f:
-                data = json.load(f)
-            assert data["docker_command"] == "second"
+    repo.insert_experiment.assert_not_awaited()
+    assert out == {}
 
-    def test_no_temp_files_left(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            result = _make_result()
-            save_experiment(result, tmpdir)
 
-            files = os.listdir(tmpdir)
-            assert len(files) == 1
-            assert files[0] == "test123.json"
+@pytest.mark.asyncio
+async def test_reporter_propagates_repo_errors():
+    repo = AsyncMock(spec=ExperimentRepository)
+    repo.insert_experiment.side_effect = RuntimeError("DB down")
+    node = make_reporter_node(repo)
 
-    def test_errors_field_serialized(self):
-        from inference_agent.models import ExperimentError
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            result = _make_result()
-            result.errors = [
-                ExperimentError(stage="startup", message="OOM", details={"gpu": 0}),
-            ]
-            filepath = save_experiment(result, tmpdir)
-
-            with open(filepath) as f:
-                data = json.load(f)
-            assert len(data["errors"]) == 1
-            assert data["errors"][0]["stage"] == "startup"
-            assert data["errors"][0]["message"] == "OOM"
+    with pytest.raises(RuntimeError, match="DB down"):
+        await node({"config": AgentConfig(), "current_result": _make_result()})

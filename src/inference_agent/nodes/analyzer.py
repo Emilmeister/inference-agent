@@ -182,13 +182,20 @@ async def analyzer_node(state: AgentState) -> dict:
     """Analyze the latest experiment result and decide next steps."""
     config = state["config"]
     result = state["current_result"]
-    history = state.get("experiment_history", [])
+    session_history = state.get("experiment_history", [])
+    loaded_top_history = state.get("loaded_top_history", [])
     exp_count = state.get("experiments_count", 0) + 1
 
     # Create summary for this experiment
     summary = ExperimentSummary.from_result(result)
 
-    # Update leaderboards
+    # Session-only history (accumulated this run; used for plateau detection
+    # and best_* state updates). Topd from prior runs live separately and only
+    # contribute to leaderboards/Pareto/scoring.
+    session_with_current = session_history + [summary]
+    union_history = session_with_current + loaded_top_history
+
+    # Update session leaderboards (state-tracked best_* — current session only)
     best_throughput = state.get("best_throughput", 0.0)
     best_throughput_id = state.get("best_throughput_config_id", "")
     best_latency = state.get("best_latency_ttft_p95", float("inf"))
@@ -223,12 +230,23 @@ async def analyzer_node(state: AgentState) -> dict:
         best_balanced_lat = lat
         best_balanced_id = result.experiment_id
 
-    # Compute Pareto front with updated history
-    all_history = history + [summary]
-    pareto = _compute_pareto_front(all_history)
+    # Pareto front and scoring use the union (loaded tops + session). This way
+    # the planner sees the global picture and `is_pareto_optimal` reflects
+    # cross-run optimality. Plateau detection below uses session-only.
+    pareto = _compute_pareto_front(union_history)
 
-    # Compute scores
-    scores = _compute_scores(result, best_throughput, best_latency, pareto)
+    # For scoring use cross-run bests (so the current experiment is normalized
+    # against the strongest configs seen anywhere, not just this session).
+    eligible_union = [h for h in union_history if _is_eligible(h)]
+    union_best_tp = max(
+        (h.peak_throughput for h in eligible_union),
+        default=best_throughput,
+    )
+    union_best_lat = min(
+        (h.low_concurrency_ttft_p95 for h in eligible_union),
+        default=best_latency,
+    )
+    scores = _compute_scores(result, union_best_tp, union_best_lat, pareto)
 
     # Check hard stop conditions
     hard_stop = False
@@ -238,8 +256,10 @@ async def analyzer_node(state: AgentState) -> dict:
         hard_stop = True
         stop_reason = f"Budget exhausted ({exp_count}/{config.experiments.max_experiments})"
 
+    # Plateau uses ONLY the current session — loaded tops would make plateau
+    # trip on iteration 1 (newcomers struggle to beat historical bests).
     if not hard_stop and _check_plateau(
-        all_history,
+        session_with_current,
         best_throughput,
         best_latency,
         config.experiments.plateau_window,
@@ -250,8 +270,9 @@ async def analyzer_node(state: AgentState) -> dict:
 
     # Ask LLM for analysis using claude
 
-    # Prepare leaderboard data (only eligible experiments)
-    eligible = [h for h in all_history if _is_eligible(h)]
+    # Prepare leaderboard data (only eligible experiments) — uses the union
+    # so the LLM sees prior-run tops alongside current session.
+    eligible = [h for h in union_history if _is_eligible(h)]
     sorted_by_tp = sorted(eligible, key=lambda h: h.peak_throughput, reverse=True)[:5]
     sorted_by_lat = sorted(
         eligible,

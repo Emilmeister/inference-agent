@@ -36,9 +36,15 @@ class AgentState(TypedDict, total=False):
     current_config: Annotated[ExperimentConfig | None, _replace]
     current_result: Annotated[ExperimentResult | None, _replace]
 
-    # History
+    # History — current session only (used for plateau detection and best_* updates)
     experiment_history: Annotated[list[ExperimentSummary], _append_list]
     experiments_count: Annotated[int, _replace]
+
+    # Top experiments loaded from DB on startup (max 6 — top-2 in 3 categories,
+    # deduplicated). Read-only after history_loader. Combined with
+    # `experiment_history` for leaderboards and Pareto, but NOT used for
+    # plateau detection (otherwise plateau triggers immediately on prior tops).
+    loaded_top_history: Annotated[list[ExperimentSummary], _replace]
 
     # Leaderboards — throughput
     best_throughput: Annotated[float, _replace]

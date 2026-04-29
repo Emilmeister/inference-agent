@@ -6,11 +6,13 @@ import logging
 
 from langgraph.graph import END, StateGraph
 
+from inference_agent.db.repository import ExperimentRepository
 from inference_agent.nodes.analyzer import analyzer_node
 from inference_agent.nodes.discovery import discovery_node
 from inference_agent.nodes.executor import executor_node
+from inference_agent.nodes.history_loader import make_history_loader_node
 from inference_agent.nodes.planner import planner_node
-from inference_agent.nodes.reporter import reporter_node
+from inference_agent.nodes.reporter import make_reporter_node
 from inference_agent.nodes.validator import validator_node
 from inference_agent.state import AgentState
 
@@ -33,28 +35,31 @@ def _after_validator(state: AgentState) -> str:
     return "run"
 
 
-def build_graph() -> StateGraph:
-    """Build the LangGraph agent graph."""
+def build_graph(repo: ExperimentRepository) -> StateGraph:
+    """Build the LangGraph agent graph.
+
+    `history_loader` and `reporter` are repository-bound (closure DI); other
+    nodes are plain async functions.
+    """
     graph = StateGraph(AgentState)
 
-    # Add nodes
     graph.add_node("discovery", discovery_node)
+    graph.add_node("history_loader", make_history_loader_node(repo))
     graph.add_node("planner", planner_node)
     graph.add_node("validator", validator_node)
     graph.add_node("executor", executor_node)
-    graph.add_node("reporter", reporter_node)
+    graph.add_node("reporter", make_reporter_node(repo))
     graph.add_node("analyzer", analyzer_node)
 
-    # Set entry point
     graph.set_entry_point("discovery")
 
-    # Define edges
-    # Flow: discovery → planner → validator → executor → analyzer → reporter → loop
-    # If validation fails, skip executor and go directly to analyzer.
-    graph.add_edge("discovery", "planner")
+    # Flow: discovery → history_loader → planner → validator → executor →
+    # analyzer → reporter → loop. If validation fails, skip executor and go
+    # directly to analyzer.
+    graph.add_edge("discovery", "history_loader")
+    graph.add_edge("history_loader", "planner")
     graph.add_edge("planner", "validator")
 
-    # Conditional: validator → executor (pass) or → analyzer (fail)
     graph.add_conditional_edges(
         "validator",
         _after_validator,
@@ -67,7 +72,6 @@ def build_graph() -> StateGraph:
     graph.add_edge("executor", "analyzer")
     graph.add_edge("analyzer", "reporter")
 
-    # Conditional edge from reporter
     graph.add_conditional_edges(
         "reporter",
         _should_continue,
@@ -80,7 +84,7 @@ def build_graph() -> StateGraph:
     return graph
 
 
-def compile_agent():
+def compile_agent(repo: ExperimentRepository):
     """Compile and return the runnable agent."""
-    graph = build_graph()
+    graph = build_graph(repo)
     return graph.compile()
