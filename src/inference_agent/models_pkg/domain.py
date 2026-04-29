@@ -136,6 +136,13 @@ class PercentileStats(BaseModel):
     p99: float = 0.0
     min: float = 0.0
     max: float = 0.0
+    # Dispersion of the per-request distribution within the phase. `stdev` is
+    # the sample standard deviation; `cv` is the coefficient of variation
+    # (stdev/mean) — dimensionless, comparable across metrics with different
+    # scales. Use to flag noisy phases where ranking on the mean/p95 alone
+    # would be unstable.
+    stdev: float = 0.0
+    cv: float = 0.0
 
 
 class ConcurrencyResult(BaseModel):
@@ -182,6 +189,14 @@ class BenchmarkResult(BaseModel):
     # Latency at low concurrency (concurrency=1)
     low_concurrency_ttft_p95_ms: float = 0.0
     low_concurrency_tpot_p95_ms: float = 0.0
+
+    # Noise indicators (coefficient of variation = stdev/mean) for the phases
+    # that produced the headline metrics. High cv (>0.5) means the underlying
+    # per-request distribution was wide and the headline number is noisy —
+    # ranking decisions on that experiment should be discounted accordingly.
+    # See _aggregate_benchmark and _compute_scores in the analyzer.
+    peak_throughput_e2e_cv: float = 0.0      # cv of e2e_latency at the peak-throughput phase
+    low_concurrency_ttft_cv: float = 0.0     # median cv of TTFT across c=1 agent_short phases
 
     # Queue & scheduling (aggregate)
     queue_time_ms: PercentileStats = Field(default_factory=PercentileStats)
@@ -287,6 +302,10 @@ class ExperimentSummary(BaseModel):
     peak_throughput: float = 0.0
     low_concurrency_ttft_p95: float = 0.0
     low_concurrency_tpot_p95: float = 0.0
+    # Noise indicators for the phases that produced the headline metrics
+    # (see BenchmarkResult.peak_throughput_e2e_cv / low_concurrency_ttft_cv).
+    peak_throughput_e2e_cv: float = 0.0
+    low_concurrency_ttft_cv: float = 0.0
     smoke_tests_passed: int = 0
     smoke_tests_total: int = 5
     correctness_gate_passed: bool = False
@@ -353,6 +372,8 @@ class ExperimentSummary(BaseModel):
             peak_throughput=result.benchmark.peak_output_tokens_per_sec,
             low_concurrency_ttft_p95=result.benchmark.low_concurrency_ttft_p95_ms,
             low_concurrency_tpot_p95=result.benchmark.low_concurrency_tpot_p95_ms,
+            peak_throughput_e2e_cv=result.benchmark.peak_throughput_e2e_cv,
+            low_concurrency_ttft_cv=result.benchmark.low_concurrency_ttft_cv,
             smoke_tests_passed=smoke_passed,
             correctness_gate_passed=result.correctness_gate_passed,
             failure_classification=result.failure_classification,

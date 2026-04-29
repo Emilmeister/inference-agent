@@ -583,11 +583,21 @@ def _aggregate_benchmark(
         low_ttft_p95 = statistics.median(ttft_p95_values) if ttft_p95_values else 0.0
         tpot_p95_values = [r.tpot_ms.p95 for r in low_conc if r.tpot_ms.p95 > 0]
         low_tpot_p95 = statistics.median(tpot_p95_values) if tpot_p95_values else 0.0
+        ttft_cv_values = [r.ttft_ms.cv for r in low_conc if r.ttft_ms.cv > 0]
+        low_ttft_cv = statistics.median(ttft_cv_values) if ttft_cv_values else 0.0
     else:
         # Fallback: use any c=1 results
         any_low = [r for r in results if r.concurrency == 1]
         low_ttft_p95 = statistics.median([r.ttft_ms.p95 for r in any_low]) if any_low else 0.0
         low_tpot_p95 = statistics.median([r.tpot_ms.p95 for r in any_low]) if any_low else 0.0
+        cv_values = [r.ttft_ms.cv for r in any_low if r.ttft_ms.cv > 0]
+        low_ttft_cv = statistics.median(cv_values) if cv_values else 0.0
+
+    # Noise indicator for peak throughput: cv of e2e_latency at the phase that
+    # won peak. e2e is the right proxy because output_tokens_per_sec is itself
+    # a phase-level scalar without dispersion — its instability lives in the
+    # spread of per-request latencies.
+    peak_e2e_cv = peak_throughput_result.e2e_latency_ms.cv
 
     # GPU metrics
     gpu_util = [gpu_agg[i]["util_avg"] for i in sorted(gpu_agg)]
@@ -605,6 +615,8 @@ def _aggregate_benchmark(
         peak_total_tokens_per_sec=peak_throughput_result.total_tokens_per_sec,
         low_concurrency_ttft_p95_ms=low_ttft_p95,
         low_concurrency_tpot_p95_ms=low_tpot_p95,
+        peak_throughput_e2e_cv=peak_e2e_cv,
+        low_concurrency_ttft_cv=low_ttft_cv,
         kv_cache_usage_percent=kv_metrics.get("kv_cache_usage_percent", 0.0),
         prefix_cache_hit_rate=kv_metrics.get("prefix_cache_hit_rate", 0.0),
         gpu_utilization_percent=gpu_util,

@@ -36,8 +36,15 @@ def _compute_percentiles(values: list[float]) -> PercentileStats:
         return PercentileStats()
     s = sorted(values)
     n = len(s)
+    mean = sum(s) / n
+    if n >= 2:
+        var = sum((x - mean) ** 2 for x in s) / (n - 1)
+        stdev = math.sqrt(var)
+    else:
+        stdev = 0.0
+    cv = stdev / mean if mean > 0 else 0.0
     return PercentileStats(
-        mean=sum(s) / n,
+        mean=mean,
         median=_percentile(s, 0.50),
         p75=_percentile(s, 0.75),
         p90=_percentile(s, 0.90),
@@ -45,6 +52,8 @@ def _compute_percentiles(values: list[float]) -> PercentileStats:
         p99=_percentile(s, 0.99),
         min=s[0],
         max=s[-1],
+        stdev=stdev,
+        cv=cv,
     )
 
 
@@ -219,6 +228,15 @@ async def _send_request(
 
     # Rough input token estimate (~4 chars per token)
     result["input_tokens"] = len(prompt) // 4
+
+    # Some engines return HTTP 200 with an error JSON or an empty stream when
+    # the request is invalid (e.g. context length exceeded for a 100K prompt
+    # against a model that doesn't support it). Without this check the runner
+    # would count those as successful zero-token responses, producing bogus
+    # phases like "121 requests, throughput=2 tok/s, ttft_p95=0.0 ms,
+    # errors=0" — and the phase error_rate gate wouldn't trigger.
+    if result["output_tokens"] == 0:
+        result["error"] = "Empty response: no tokens streamed (HTTP 200)"
 
     return result
 

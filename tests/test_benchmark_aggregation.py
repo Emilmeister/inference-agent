@@ -9,17 +9,22 @@ def _make_conc_result(
     throughput: float = 100.0,
     ttft_p95: float = 50.0,
     tpot_p95: float = 10.0,
+    ttft_cv: float = 0.0,
+    e2e_cv: float = 0.0,
+    workload_id: str = "agent_short",
 ) -> ConcurrencyResult:
     return ConcurrencyResult(
         concurrency=concurrency,
         prompt_length=512,
         max_output_tokens=256,
         num_requests=100,
+        workload_id=workload_id,
         output_tokens_per_sec=throughput,
         requests_per_sec=throughput / 256,
         total_tokens_per_sec=throughput * 2,
-        ttft_ms=PercentileStats(mean=ttft_p95 * 0.8, p95=ttft_p95),
+        ttft_ms=PercentileStats(mean=ttft_p95 * 0.8, p95=ttft_p95, cv=ttft_cv),
         tpot_ms=PercentileStats(mean=tpot_p95 * 0.8, p95=tpot_p95),
+        e2e_latency_ms=PercentileStats(mean=100.0, p95=200.0, cv=e2e_cv),
     )
 
 
@@ -69,3 +74,31 @@ class TestAggregateBenchmark:
         result = _aggregate_benchmark(results, {}, kv)
         assert result.kv_cache_usage_percent == 75.0
         assert result.prefix_cache_hit_rate == 0.5
+
+    def test_peak_throughput_cv_from_winning_phase(self):
+        """peak_throughput_e2e_cv should come from the phase that won peak."""
+        results = [
+            _make_conc_result(concurrency=64, throughput=300, e2e_cv=0.1),
+            _make_conc_result(concurrency=128, throughput=500, e2e_cv=0.4),  # winner
+            _make_conc_result(concurrency=64, throughput=200, e2e_cv=0.2),
+        ]
+        result = _aggregate_benchmark(results, {}, {})
+        assert result.peak_output_tokens_per_sec == 500.0
+        assert result.peak_throughput_e2e_cv == 0.4
+
+    def test_low_concurrency_ttft_cv_median(self):
+        """low_concurrency_ttft_cv = median of TTFT cv across c=1 agent_short phases."""
+        results = [
+            _make_conc_result(concurrency=1, ttft_p95=30, ttft_cv=0.1),
+            _make_conc_result(concurrency=1, ttft_p95=50, ttft_cv=0.3),
+            _make_conc_result(concurrency=1, ttft_p95=40, ttft_cv=0.5),
+            _make_conc_result(concurrency=64, ttft_p95=200, ttft_cv=0.9),  # ignored
+        ]
+        result = _aggregate_benchmark(results, {}, {})
+        # median of [0.1, 0.3, 0.5] = 0.3
+        assert result.low_concurrency_ttft_cv == 0.3
+
+    def test_cv_zero_when_no_low_concurrency(self):
+        results = [_make_conc_result(concurrency=64, ttft_cv=0.5)]
+        result = _aggregate_benchmark(results, {}, {})
+        assert result.low_concurrency_ttft_cv == 0.0

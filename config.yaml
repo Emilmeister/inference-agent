@@ -58,13 +58,25 @@ startup:
 # Бенчмарк
 benchmark:
   warmup_requests: 10
-  concurrency_levels: [1, 4, 16, 64, 128, 256, 512]
-  prompt_lengths: [128, 512, 2048, 4096, 32768, 65536, 100000]
+  # Сжатая сетка: один низкий c для latency, два mid/high для throughput,
+  # один на границе насыщения. Промежуточные [4, 16, 128, 512] выкинуты —
+  # 4/16 редко добавляют сигнал поверх 1/64, 512 = stress (не учитывается
+  # в peak_throughput), 128 близко к 64/256.
+  concurrency_levels: [1, 16, 64, 256]
+  # Три длины: одна короткая, одна средняя, одна длинная (RAG-сценарии).
+  # Long-context фазы используют отдельный sweep concurrencies (см. runner.py).
+  prompt_lengths: [512, 4096, 32768]
   max_output_tokens: 256
   long_context_max_output_tokens: 8192
-  duration_per_level_sec: 60
+  # 30 сек на фазу вместо 60 — пополам общее время. Дисперсия per-request
+  # (cv) уже считается и попадает в score-derate, так что более короткие
+  # окна не дают шумным конфигам выигрывать на малой выборке.
+  duration_per_level_sec: 30
   timeout_sec: 600
-  latency_threshold_ms: 500
+  # SLO для balanced-цели: верхняя граница TTFT p95, при которой
+  # конфигурация считается допустимой для прода. Analyzer ищет максимум
+  # throughput среди фаз, укладывающихся в этот порог.
+  latency_threshold_ms: 2000
 
 # Эксперименты
 experiments:

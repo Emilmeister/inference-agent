@@ -67,3 +67,26 @@ class TestComputePercentiles:
         assert stats.median == 2.0
         # p95 = index 1.9 → 2 + 0.9 * (3 - 2) = 2.9
         assert abs(stats.p95 - 2.9) < 0.01
+
+    def test_stdev_zero_for_constant(self):
+        stats = _compute_percentiles([5.0, 5.0, 5.0, 5.0])
+        assert stats.stdev == 0.0
+        assert stats.cv == 0.0
+
+    def test_stdev_single_value(self):
+        # Sample stdev undefined for n=1; we report 0.0.
+        stats = _compute_percentiles([42.0])
+        assert stats.stdev == 0.0
+        assert stats.cv == 0.0
+
+    def test_stdev_known_values(self):
+        # Sample stdev of [2, 4, 4, 4, 5, 5, 7, 9] = 2.138...
+        stats = _compute_percentiles([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0])
+        assert abs(stats.stdev - 2.13809) < 1e-4
+        # mean = 5.0, cv = stdev / mean
+        assert abs(stats.cv - stats.stdev / 5.0) < 1e-9
+
+    def test_cv_zero_when_mean_zero(self):
+        # Defensive: if all values are 0, cv must not divide by zero.
+        stats = _compute_percentiles([0.0, 0.0, 0.0])
+        assert stats.cv == 0.0

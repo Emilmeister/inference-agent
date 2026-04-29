@@ -184,6 +184,8 @@ discovery → planner → executor → reporter → analyzer → planner → ...
 
 Long context фазы пропускаются если модель не поддерживает соответствующую длину контекста.
 
+> Подробнее о том, как именно идёт бенчмарк (correctness gate → phases → post-correctness), как фазы агрегируются в одну строку Postgres, что такое SLO (`benchmark.latency_threshold_ms`) и как считается дисперсия per-request метрик — смотри [docs/benchmarking.md](docs/benchmarking.md).
+
 ## Формат результатов
 
 Каждый эксперимент — отдельный JSON файл:

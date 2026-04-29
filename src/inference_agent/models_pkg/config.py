@@ -128,7 +128,7 @@ class BenchmarkConfig(BaseModel):
     long_context_max_output_tokens: int = 8192
     duration_per_level_sec: int = 60
     timeout_sec: int = 600
-    latency_threshold_ms: float = 500.0
+    latency_threshold_ms: float = 2000.0  # SLO: TTFT p95 budget for balanced goal
     phase_error_rate_threshold: float = 0.1  # phases with error_rate above this are invalid
     seed: int | None = None  # seed for reproducible prompt generation
 

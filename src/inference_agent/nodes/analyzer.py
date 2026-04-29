@@ -30,6 +30,17 @@ all 3 optimization goals (throughput, latency, balanced).
 3. Decide whether to continue or stop.
 4. If continuing, choose the next optimization goal and provide a hint for the planner.
 
+## Noise (cv = coefficient of variation, stdev/mean) — read this before ranking
+Each leaderboard row carries a `cv` next to its headline metric. cv reflects \
+the per-request dispersion in the underlying phase:
+- cv ≤ 0.2 — tight distribution, ranking on the headline number is reliable.
+- 0.2 < cv ≤ 0.5 — moderate spread, prefer this config only with clear margin.
+- cv > 0.5 — noisy phase; do NOT classify it as best on a small lead. Prefer a \
+slightly slower but stable competitor, or recommend re-running this config.
+The score column already applies a soft noise derate, so a config with high cv \
+won't dominate by raw throughput alone — but you still see the raw numbers and \
+should call out noise explicitly in the commentary when it's load-bearing.
+
 ## Latest Experiment
 {latest_json}
 
@@ -151,18 +162,44 @@ def _check_plateau(
     return not throughput_improved and not latency_improved
 
 
+# Soft noise penalty applied to throughput_score / latency_score. Capped so
+# even very wide distributions never zero out a config (Pareto front is the
+# hard mathematical filter, derate is just for *ranking*).
+#   factor = 1 - NOISE_DERATE_ALPHA * min(cv, NOISE_CV_CAP)
+# With alpha=0.3, cap=1.0 → cv=0.5 → 15% derate, cv=1.0 → 30% derate.
+NOISE_DERATE_ALPHA = 0.3
+NOISE_CV_CAP = 1.0
+
+
+def _noise_factor(cv: float) -> float:
+    """Multiplicative derate for a normalized score given a noise indicator."""
+    if cv <= 0:
+        return 1.0
+    return 1.0 - NOISE_DERATE_ALPHA * min(cv, NOISE_CV_CAP)
+
+
 def _compute_scores(
     result: ExperimentResult,
     best_throughput: float,
     best_latency: float,
     pareto: list[ParetoPoint],
 ) -> ExperimentScores:
-    """Compute normalized scores for the experiment."""
+    """Compute normalized scores for the experiment.
+
+    Throughput and latency scores are derated by a soft noise factor based on
+    the per-request dispersion (cv) at the phases that produced the headline
+    metrics. The Pareto-optimal flag is intentionally not derated — a config
+    that dominates on raw numbers stays on the front; the score is what
+    influences ranking and tie-breaking.
+    """
     tp = result.benchmark.peak_output_tokens_per_sec
     lat = result.benchmark.low_concurrency_ttft_p95_ms
 
     tp_score = tp / best_throughput if best_throughput > 0 else 0.0
     lat_score = best_latency / lat if lat > 0 else 0.0
+
+    tp_score *= _noise_factor(result.benchmark.peak_throughput_e2e_cv)
+    lat_score *= _noise_factor(result.benchmark.low_concurrency_ttft_cv)
 
     # Balanced score: geometric mean of throughput and latency scores
     balanced = (tp_score * lat_score) ** 0.5 if tp_score > 0 and lat_score > 0 else 0.0
@@ -291,8 +328,8 @@ async def analyzer_node(state: AgentState) -> dict:
         for h in items:
             lines.append(
                 f"  {h.experiment_id} ({h.engine.value}): "
-                f"throughput={h.peak_throughput:.1f}, "
-                f"ttft_p95={h.low_concurrency_ttft_p95:.1f}ms, "
+                f"throughput={h.peak_throughput:.1f} (cv={h.peak_throughput_e2e_cv:.2f}), "
+                f"ttft_p95={h.low_concurrency_ttft_p95:.1f}ms (cv={h.low_concurrency_ttft_cv:.2f}), "
                 f"config={json.dumps(h.config_digest)}"
             )
         return "\n".join(lines)
@@ -304,7 +341,9 @@ async def analyzer_node(state: AgentState) -> dict:
             "status": result.status.value,
             "config": result.config.model_dump(exclude={"rationale"}),
             "peak_throughput": tp,
+            "peak_throughput_e2e_cv": result.benchmark.peak_throughput_e2e_cv,
             "ttft_p95": lat,
+            "low_concurrency_ttft_cv": result.benchmark.low_concurrency_ttft_cv,
             "smoke_tests": result.smoke_tests.model_dump(),
             "rationale": result.config.rationale,
         }, indent=2, default=str),
