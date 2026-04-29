@@ -45,6 +45,14 @@ class ExperimentRow(Base):
     peak_throughput: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     low_concurrency_ttft_p95: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 
+    # Effective max context the engine was launched with: either the launch
+    # flag (`config.max_model_len`) when the planner pinned it, or the
+    # model's intrinsic max from HF config (`hardware.model_max_context`)
+    # when no override was set. Surfaced as a flat column so the dashboard
+    # and history queries can filter/sort by context size without unpacking
+    # JSONB.
+    max_model_len: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
     # Full ExperimentResult.model_dump(mode="json")
     data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
 

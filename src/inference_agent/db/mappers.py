@@ -39,6 +39,15 @@ def result_to_row(result: ExperimentResult) -> ExperimentRow:
     _assert_homogeneous(result.hardware)
     primary = result.hardware.gpus[0]
 
+    # Effective max context: explicit launch flag wins, else model intrinsic.
+    # When neither is set (shouldn't happen in practice), fall back to 0 — the
+    # column is non-null and history queries treating 0 as "unknown" is fine.
+    max_model_len = (
+        result.config.max_model_len
+        or result.hardware.model_max_context
+        or 0
+    )
+
     return ExperimentRow(
         experiment_id=result.experiment_id,
         engine=result.engine.value,
@@ -55,6 +64,7 @@ def result_to_row(result: ExperimentResult) -> ExperimentRow:
         correctness_gate_passed=result.correctness_gate_passed,
         peak_throughput=result.benchmark.peak_output_tokens_per_sec,
         low_concurrency_ttft_p95=result.benchmark.low_concurrency_ttft_p95_ms,
+        max_model_len=max_model_len,
         data=result.model_dump(mode="json"),
     )
 

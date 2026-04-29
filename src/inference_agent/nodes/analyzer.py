@@ -132,34 +132,43 @@ def _check_plateau(
     window: int,
     threshold: float,
 ) -> bool:
-    """Check if the last `window` SUCCESSFUL experiments showed no improvement."""
-    # Only count successful experiments (failed ones don't tell us about perf)
-    successful = [
+    """Check if the last `window` experiments improved on the prior best.
+
+    `best_throughput` / `best_latency` MUST be the bests from BEFORE the latest
+    experiment was folded in — otherwise the just-set new best can never be
+    beaten by itself, and a record-breaking run trips plateau (the bug we
+    were hitting). The caller is responsible for passing the pre-update bests.
+
+    "Improvement" is strict and threshold-bounded:
+      - throughput improves iff peak >= best * (1 + threshold)
+      - latency improves iff ttft <= best * (1 - threshold)
+    """
+    # Treat any run with non-zero metrics as countable (partials still inform us).
+    countable = [
         h for h in history
         if h.peak_throughput > 0 or h.low_concurrency_ttft_p95 > 0
     ]
-    if len(successful) < window:
+    if len(countable) < window:
         return False
 
-    recent = successful[-window:]
+    recent = countable[-window:]
 
-    # Check throughput improvement
     throughput_improved = any(
-        h.peak_throughput > best_throughput * (1 - threshold)
+        h.peak_throughput > 0
+        and h.peak_throughput >= max(best_throughput, 0.0) * (1 + threshold)
         and h.peak_throughput > best_throughput
         for h in recent
     )
 
-    # Check latency improvement
+    # `best_latency` defaults to +inf when no prior best exists; in that case
+    # the multiplication below yields +inf and any positive ttft "improves",
+    # which is the correct behavior on first eligible run.
     latency_improved = any(
-        h.low_concurrency_ttft_p95 < best_latency * (1 + threshold)
-        and h.low_concurrency_ttft_p95 < best_latency
-        and h.low_concurrency_ttft_p95 > 0
+        0 < h.low_concurrency_ttft_p95 <= best_latency * (1 - threshold)
         for h in recent
     )
 
-    # Plateau if neither improved
-    return not throughput_improved and not latency_improved
+    return not (throughput_improved or latency_improved)
 
 
 # Soft noise penalty applied to throughput_score / latency_score. Capped so
@@ -232,7 +241,10 @@ async def analyzer_node(state: AgentState) -> dict:
     session_with_current = session_history + [summary]
     union_history = session_with_current + loaded_top_history
 
-    # Update session leaderboards (state-tracked best_* — current session only)
+    # Snapshot session leaderboards BEFORE this experiment is folded in. The
+    # plateau check below must compare the window against the *prior* best,
+    # otherwise a record-breaking run sets best_*=its_own_value and then
+    # trivially fails to beat itself, falsely tripping plateau.
     best_throughput = state.get("best_throughput", 0.0)
     best_throughput_id = state.get("best_throughput_config_id", "")
     best_latency = state.get("best_latency_ttft_p95", float("inf"))
@@ -243,29 +255,6 @@ async def analyzer_node(state: AgentState) -> dict:
 
     tp = result.benchmark.peak_output_tokens_per_sec
     lat = result.benchmark.low_concurrency_ttft_p95_ms
-
-    # Only update leaderboards if this experiment is eligible
-    # (correctness gate passed, success status, valid metrics)
-    is_eligible_result = (
-        result.status == ExperimentStatus.SUCCESS
-        and result.correctness_gate_passed
-        and tp > 0 and lat > 0
-    )
-
-    if is_eligible_result and tp > best_throughput:
-        best_throughput = tp
-        best_throughput_id = result.experiment_id
-
-    if is_eligible_result and 0 < lat < best_latency:
-        best_latency = lat
-        best_latency_id = result.experiment_id
-
-    # Update balanced: best throughput among eligible configs with acceptable latency
-    latency_threshold = config.benchmark.latency_threshold_ms
-    if is_eligible_result and lat < latency_threshold and tp > best_balanced_tp:
-        best_balanced_tp = tp
-        best_balanced_lat = lat
-        best_balanced_id = result.experiment_id
 
     # Pareto front and scoring use the union (loaded tops + session). This way
     # the planner sees the global picture and `is_pareto_optimal` reflects
@@ -295,6 +284,7 @@ async def analyzer_node(state: AgentState) -> dict:
 
     # Plateau uses ONLY the current session — loaded tops would make plateau
     # trip on iteration 1 (newcomers struggle to beat historical bests).
+    # Pass the PRE-update bests; see _check_plateau docstring for rationale.
     if not hard_stop and _check_plateau(
         session_with_current,
         best_throughput,
@@ -304,6 +294,27 @@ async def analyzer_node(state: AgentState) -> dict:
     ):
         hard_stop = True
         stop_reason = f"Plateau: no improvement in last {config.experiments.plateau_window} experiments"
+
+    # Now fold the current experiment into the session leaderboards.
+    latency_threshold = config.benchmark.latency_threshold_ms
+    is_eligible_result = (
+        result.status == ExperimentStatus.SUCCESS
+        and result.correctness_gate_passed
+        and tp > 0 and lat > 0
+    )
+
+    if is_eligible_result and tp > best_throughput:
+        best_throughput = tp
+        best_throughput_id = result.experiment_id
+
+    if is_eligible_result and 0 < lat < best_latency:
+        best_latency = lat
+        best_latency_id = result.experiment_id
+
+    if is_eligible_result and lat < latency_threshold and tp > best_balanced_tp:
+        best_balanced_tp = tp
+        best_balanced_lat = lat
+        best_balanced_id = result.experiment_id
 
     # Ask LLM for analysis using claude
 

@@ -124,6 +124,32 @@ streamlit run streamlit_app/app.py
 inference-agent --cleanup  # остановить все benchmark контейнеры
 ```
 
+### Миграции схемы (Alembic)
+
+Схема БД управляется Alembic. Агент **автоматически** прогоняет `upgrade head`
+при старте — отдельной команды запускать не нужно для свежих БД.
+
+**Существующая БД (era до alembic):** если у тебя уже есть таблица `experiments`,
+заполненная до перехода на Alembic, выполни одноразовый stamp перед первым
+апгрейдом, чтобы Alembic не пытался создать таблицу заново:
+
+```bash
+export DB_PASSWORD=secret
+alembic stamp 0001        # отметить, что initial-схема уже на месте
+alembic upgrade head      # применить всё новое поверх (например, max_model_len)
+```
+
+Дальше всё автоматом — следующий запуск агента либо `alembic upgrade head`
+довезёт остальное.
+
+**Новая миграция (для разработчика):**
+
+```bash
+alembic revision --autogenerate -m "add foo column"
+# вычитай сгенерированный файл в src/inference_agent/db/migrations/versions/
+alembic upgrade head      # применить локально для теста
+```
+
 ## Архитектура
 
 ```

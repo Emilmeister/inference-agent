@@ -27,6 +27,8 @@ def _make_result(
     nvlink: bool = False,
     docker_command: str = "docker run vllm/vllm-openai",
     docker_args: list[str] | None = None,
+    config_max_model_len: int | None = None,
+    model_max_context: int = 32768,
 ) -> ExperimentResult:
     if gpus is None:
         gpus = [GPUInfo(index=0, name="NVIDIA H100", vram_total_mb=81920, vram_free_mb=80000)]
@@ -40,8 +42,13 @@ def _make_result(
             gpu_count=gpu_count,
             nvlink_available=nvlink,
             model_name="Qwen/Qwen2.5-7B-Instruct",
+            model_max_context=model_max_context,
         ),
-        config=ExperimentConfig(engine=EngineType.VLLM, tensor_parallel_size=2),
+        config=ExperimentConfig(
+            engine=EngineType.VLLM,
+            tensor_parallel_size=2,
+            max_model_len=config_max_model_len,
+        ),
         status=ExperimentStatus.SUCCESS,
         correctness_gate_passed=True,
         benchmark=BenchmarkResult(
@@ -118,3 +125,24 @@ def test_row_to_summary_roundtrip():
     assert summary.peak_throughput == pytest.approx(512.5)
     assert summary.low_concurrency_ttft_p95 == pytest.approx(120.0)
     assert summary.correctness_gate_passed is True
+
+
+def test_max_model_len_uses_explicit_launch_flag():
+    # When the planner pinned --max-model-len, that wins regardless of model max.
+    result = _make_result(config_max_model_len=8192, model_max_context=32768)
+    row = result_to_row(result)
+    assert row.max_model_len == 8192
+
+
+def test_max_model_len_falls_back_to_model_intrinsic():
+    # No --max-model-len in the launch config → use the HF-config max.
+    result = _make_result(config_max_model_len=None, model_max_context=131072)
+    row = result_to_row(result)
+    assert row.max_model_len == 131072
+
+
+def test_max_model_len_zero_when_neither_known():
+    # Defensive fallback: should never happen in practice, but column is non-null.
+    result = _make_result(config_max_model_len=None, model_max_context=0)
+    row = result_to_row(result)
+    assert row.max_model_len == 0

@@ -411,15 +411,29 @@ for exp in experiments:
     config = exp.get("config", {})
     tp = config.get("tensor_parallel_size", "?")
     quant = config.get("quantization", "none")
+    extra_env = config.get("extra_env") or {}
     throughput = exp.get("benchmark", {}).get("peak_output_tokens_per_sec", 0)
 
     label = f"{eid} ({engine} TP={tp} q={quant}) - {throughput:.0f} tok/s"
 
     with st.expander(label):
         if docker_cmd:
+            st.markdown("**Docker command:**")
             st.code(docker_cmd, language="bash")
         else:
             st.info("Docker command not recorded (old experiment format)")
+
+        # Env variables the planner generated for this run. Shown as
+        # copy-paste-able `export` lines so the user can reproduce the
+        # exact runtime environment alongside the docker command.
+        if extra_env:
+            st.markdown("**Extra env (planner-generated):**")
+            env_block = "\n".join(
+                f"export {k}={v}" for k, v in extra_env.items()
+            )
+            st.code(env_block, language="bash")
+        else:
+            st.caption("No extra env variables for this run.")
 
 
 # ---- LLM commentary ----
