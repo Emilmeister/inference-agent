@@ -1,5 +1,5 @@
 # Модель для бенчмарка
-model_name: "google/gemma-4-31B-it"
+model_name: "ai-sage/GigaChat3-10B-A1.8B-bf16"
 model_revision: null
 
 # LLM агента (для принятия решений — любой OpenAI-совместимый endpoint)
@@ -17,7 +17,7 @@ agent_llm:
 # Docker
 docker:
   vllm_image: "vllm/vllm-openai:latest-cu130"
-  sglang_image: "lmsysorg/sglang:dev-cu13-gemma4"
+  sglang_image: "lmsysorg/sglang:latest"
   network: "host"
   shm_size: "16g"
   model_cache_dir: "/root/.cache/huggingface"
@@ -27,16 +27,10 @@ docker:
   vllm_extra_args:
     - "--enable-auto-tool-choice"
     - "--tool-call-parser"
-    - "gemma4"
-    - "--reasoning-parser"
-    - "gemma4"
-    - "--chat-template"
-    - "examples/tool_chat_template_gemma4.jinja"
+    - "gigachat3"
   sglang_extra_args:
-    - "--reasoning-parser"
-    - "gemma4"
     - "--tool-call-parser"
-    - "gemma4"
+    - "gigachat3"
 
 # Поведение при старте движка (healthcheck, pull образа).
 # Бюджет ожидания ограничен двумя часами:
@@ -106,5 +100,35 @@ database:
 # Пиши сюда на какие параметры обратить внимание, что попробовать,
 # что пропустить и т.д.
 planner_instructions: |
-  Оптимизируй на свое усмотрение
+  Отталкивайся от такого бейзлайна:
+  
+  envs:
+  
+  ```
+  CUDA_DISABLE_CONTROL: "true"
+  OMP_NUM_THREADS: "32"
+  NCCL_CUMEM_ENABLE: "true"
+  VLLM_FLASH_ATTN_VERSION: "2"
+  ```
+  
+  command:
+  ```
+  vllm serve \
+  --host 0.0.0.0 \
+  --port 8080 \
+  --dtype bfloat16 \
+  --max-model-len 262144 \
+  --gpu-memory-utilization 0.88 \
+  --tensor-parallel-size 1 \
+  --max-num-batched-tokens 16384 \
+  --quantization fp8 \
+  --optimization-level 3 \
+  --enable-expert-parallel \
+  --enable-prefix-caching \
+  --enable-chunked-prefill \
+  --enable-prompt-tokens-details \
+  --enable-force-include-usage \
+  --enable-auto-tool-choice --tool-call-parser gigachat3 \
+  --speculative-config '{"method": "mtp", "num_speculative_tokens": 1, "disable_padded_drafter_batch": false}'
+  ```
 
