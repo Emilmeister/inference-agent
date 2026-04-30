@@ -29,7 +29,7 @@ docker:
     - "--tool-call-parser"
     - "gigachat3"
     - "--hf-overrides"
-    - "'{\"routed_scaling_factor\": 1.0}'"
+    - '{\"routed_scaling_factor\": 1.0}'
   sglang_extra_args:
     - "--tool-call-parser"
     - "gigachat3"
