@@ -16,7 +16,7 @@ agent_llm:
 
 # Docker
 docker:
-  vllm_image: "vllm/vllm-openai:latest"
+  vllm_image: "vllm/vllm-openai:v0.15.0"
   sglang_image: "lmsysorg/sglang:latest"
   network: "host"
   shm_size: "16g"
