@@ -191,6 +191,106 @@ def _prefetch_model(
             "Prefetch failed for %s (engine will download inside container): %s",
             model_name, e,
         )
+        return
+
+    _normalize_cached_config(path)
+
+
+# Fields that some model configs publish as int (e.g. `1`) but downstream
+# strict dataclass validators in newer huggingface_hub builds insist on float.
+# DeepSeekV3-derived MoE configs (GigaChat3, etc.) regularly hit this on
+# `routed_scaling_factor`. Coercing in-place in the local HF cache snapshot
+# keeps the upstream model untouched and unblocks every engine that loads
+# from this cache.
+_FLOAT_COERCE_FIELDS = (
+    "routed_scaling_factor",
+    "partial_rotary_factor",
+    "rope_theta",
+    "router_aux_loss_coef",
+    "rms_norm_eps",
+    "initializer_range",
+    "attention_dropout",
+)
+
+
+def _coerce_floats_in_place(node: object) -> int:
+    """Walk a parsed JSON tree and coerce known float-typed fields from int.
+
+    Returns the number of values rewritten. Recurses into dicts and lists so
+    nested configs (text_config, vision_config, rope_scaling, …) are covered.
+    """
+    fixed = 0
+    if isinstance(node, dict):
+        for key, value in list(node.items()):
+            if (
+                key in _FLOAT_COERCE_FIELDS
+                and isinstance(value, int)
+                and not isinstance(value, bool)
+            ):
+                node[key] = float(value)
+                fixed += 1
+            else:
+                fixed += _coerce_floats_in_place(value)
+        # rope_scaling.factor is the only nested field where the *key* alone
+        # ('factor') is too generic to coerce blindly across the whole tree —
+        # handle it explicitly when we see a rope_scaling/rope_parameters dict.
+        for parent_key in ("rope_scaling", "rope_parameters"):
+            sub = node.get(parent_key)
+            if isinstance(sub, dict):
+                f = sub.get("factor")
+                if isinstance(f, int) and not isinstance(f, bool):
+                    sub["factor"] = float(f)
+                    fixed += 1
+    elif isinstance(node, list):
+        for item in node:
+            fixed += _coerce_floats_in_place(item)
+    return fixed
+
+
+def _normalize_cached_config(snapshot_path: str) -> None:
+    """Patch the cached `config.json` to coerce ints into floats where engines expect float.
+
+    huggingface_hub StrictDataclass validation in fresh vLLM/SGLang images
+    rejects `routed_scaling_factor: 1` (int) and similar literals that some
+    model authors publish as integers. The fix is purely local — we rewrite
+    the file in this user's HF cache snapshot, the upstream HF model is
+    untouched.
+    """
+    import os
+
+    config_path = os.path.join(snapshot_path, "config.json")
+    if not os.path.exists(config_path):
+        return
+
+    try:
+        with open(config_path) as f:
+            cfg = json.load(f)
+    except Exception as e:
+        logger.warning("Could not read cached config.json at %s: %s", config_path, e)
+        return
+
+    fixed = _coerce_floats_in_place(cfg)
+    if fixed == 0:
+        return
+
+    # `config.json` in HF cache is a symlink into blobs/<sha>; rewriting via
+    # the symlink updates the blob and is exactly what we want (every snapshot
+    # pointing at this blob picks up the fix). os.path.realpath resolves the
+    # link so json.dump writes to the actual blob, not creating a new file.
+    real_path = os.path.realpath(config_path)
+    try:
+        with open(real_path, "w") as f:
+            json.dump(cfg, f, indent=2)
+        logger.info(
+            "Normalized cached config.json (%d int→float coercions) at %s",
+            fixed, real_path,
+        )
+    except Exception as e:
+        logger.warning(
+            "Could not write normalized config.json to %s: %s. "
+            "Engine may crash with strict-dataclass validation errors.",
+            real_path, e,
+        )
 
 
 def _detect_available_engines() -> list[EngineType]:
