@@ -80,16 +80,35 @@ kv_cache_dtype=auto, scheduling_policy=fcfs.
 5. If goal is "optimize_balanced": find configs where TTFT p95 < {latency_threshold} ms \
 AND throughput is maximized.
 6. If goal is "explore": try something new — quantization, speculative decoding, different max_model_len.
-7. Never repeat an exact configuration that was already tested.
-8. max_model_len: choose ONE of {{16384, 32768, 65536, 131072, 262144}}, capped at {model_max_context}. \
+7. SPECULATIVE DECODING is a first-class lever — actively probe it once a stable baseline exists, \
+do NOT treat it as a last resort. Sweep across algorithms (vLLM: ngram, eagle, eagle3, medusa, mlp_speculator; \
+SGLang: NEXTN, EAGLE, EAGLE3) AND across `speculative_num_steps` (try at least 3, 5, 8) AND across \
+draft model choices when applicable. A single failed or slow speculative run is NOT enough to abandon the \
+whole family — vary the algorithm and num_steps before concluding speculative decoding is unhelpful for \
+this model/hardware. For latency-oriented goals it is especially important to exhaust speculative variants. \
+The auto-disable safeguard only kicks in after 3 consecutive engine failures, so you have headroom to explore.
+7a. NATIVE MTP HEADS: hardware.mtp_num_layers reports how many built-in Multi-Token Prediction heads \
+the model ships with (Qwen3.5-MoE: typically 1, DeepSeek-V3: typically 1-3). When mtp_num_layers > 0:
+   - The model self-speculates — for SGLang use `speculative_algorithm="NEXTN"` (or "EAGLE3") \
+     WITHOUT `speculative_draft_model`; for vLLM try `speculative_algorithm="mtp"` or "eagle3" \
+     similarly without an external draft. This is the cheapest, fastest speculative experiment to run \
+     and should be among your FIRST speculative attempts.
+   - Cap `speculative_num_steps` at mtp_num_layers — predicting more tokens than there are heads \
+     wastes a slot and the validator will reject it.
+   - When mtp_num_layers == 0: NEXTN is unavailable; speculative decoding requires an external \
+     `speculative_draft_model` (a real, smaller HuggingFace model from the same family).
+8. Never repeat an exact configuration that was already tested.
+9. max_model_len: choose ONE of {{16384, 32768, 65536, 131072, 262144}}, capped at {model_max_context}. \
 The OBJECTIVE is to maximize performance at the LARGEST context that fits VRAM. \
 Estimate available KV budget = total_vram - model_weight_bytes - ~10% headroom, then pick the \
 largest power-of-2 that plausibly fits. Halve ONLY on a confirmed OOM — do NOT anchor at 32768 \
 by default; that is a floor, not a starting point.
-9. tensor_parallel_size must divide evenly into {gpu_count} GPUs.
-10. CRITICAL: If a feature (NEXTN, quantization, etc.) consistently gives WORSE results than baseline, \
-STOP using it and move on to other optimizations.
-11. If a previous experiment FAILED, read the error, fix the root cause, do NOT repeat the same config.
+10. tensor_parallel_size must divide evenly into {gpu_count} GPUs.
+11. CRITICAL: If a feature (quantization, attention backend, etc.) consistently gives WORSE results than \
+baseline ACROSS multiple variants, STOP using it. For speculative decoding specifically: only abandon \
+after trying at least 2 different algorithms AND 2 different `speculative_num_steps` values — a single \
+slow run is not a verdict on the whole family.
+12. If a previous experiment FAILED, read the error, fix the root cause, do NOT repeat the same config.
 """
 
 _VLLM_SECTION = """
@@ -101,8 +120,19 @@ attached below; here are key principles:
 - Higher gpu_memory_utilization (0.95) allows more KV cache but risks OOM.
 - fp8 quantization usually gives ~1.5-2x throughput with minimal quality loss.
 - scheduling_policy: ONLY "fcfs" (default) or "priority". Do NOT use "lpm".
-- speculative_draft_model needs a real HuggingFace model ID; do NOT set \
-  speculative_algorithm without one.
+- Speculative decoding is a HIGH-PRIORITY exploration lever — once you have a clean \
+  baseline, actively try `speculative_algorithm` ∈ {{ngram, eagle, eagle3, medusa, \
+  mlp_speculator, mtp}} and sweep `speculative_num_steps` ∈ {{3, 5, 8}}. \
+  Draft-model rules:
+    * `ngram` — no draft model needed (uses prompt n-grams). Cheapest experiment, \
+      especially good for repetitive / structured prompts (agent traces, JSON).
+    * `mtp`, `eagle3` — when hardware.mtp_num_layers > 0 they self-speculate using \
+      the model's own MTP heads, no `speculative_draft_model` required. When \
+      mtp_num_layers == 0 they DO require a real HuggingFace `speculative_draft_model`.
+    * `eagle`, `medusa`, `mlp_speculator` — always require a real HuggingFace \
+      `speculative_draft_model`.
+  Vary the algorithm and num_steps before concluding speculative decoding is a dead end \
+  for this model.
 
 Leave SGLang-specific fields at defaults: mem_fraction_static=null, \
 max_running_requests=null, max_prefill_tokens=null, chunked_prefill_size=null, \
@@ -117,11 +147,14 @@ attached below; here are key principles:
 - num_continuous_decode_steps > 1 reduces scheduling overhead.
 - fp8 quantization usually gives ~1.5-2x throughput with minimal quality loss.
 - scheduling_policy: "fcfs" (default) or "lpm". lpm benefits from prefix caching.
-- Speculative decoding (NEXTN/EAGLE) is OPTIONAL: try WITHOUT it first to get a \
-  baseline, then compare WITH. If slower, abandon it. Engine no longer auto-fixes \
-  NEXTN-related env vars or mamba-scheduler-strategy — if a config requires them \
-  (e.g., SGLANG_ENABLE_SPEC_V2=1, --mamba-scheduler-strategy), set them via \
-  extra_env / extra_engine_args yourself.
+- Speculative decoding (NEXTN / EAGLE / EAGLE3) is a HIGH-PRIORITY exploration lever — \
+  after a clean baseline, ACTIVELY sweep `speculative_algorithm` ∈ {{NEXTN, EAGLE, EAGLE3}} \
+  AND `speculative_num_steps` ∈ {{3, 5, 8}}. EAGLE/EAGLE3 require a real HuggingFace \
+  `speculative_draft_model`; NEXTN can run without one. A single slow speculative run is \
+  NOT a verdict — vary algorithm AND num_steps before abandoning the family. Engine no \
+  longer auto-fixes NEXTN-related env vars or mamba-scheduler-strategy — if a config \
+  requires them (e.g., SGLANG_ENABLE_SPEC_V2=1, --mamba-scheduler-strategy), set them \
+  via extra_env / extra_engine_args yourself.
 
 Leave vLLM-specific fields at defaults: gpu_memory_utilization=0.9, \
 max_num_seqs=null, max_num_batched_tokens=null, enforce_eager=false.

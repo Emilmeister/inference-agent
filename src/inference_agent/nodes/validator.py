@@ -87,19 +87,58 @@ def validate_experiment(
             errors.append("max_num_batched_tokens is vLLM-only, not applicable to SGLang")
 
     # ── Speculative decoding checks ───────────────────────────────────
+    # We only block configurations that are physically impossible at the
+    # engine level (e.g. NEXTN without native MTP heads). Algorithms that the
+    # engine supports without a draft model — ngram for vLLM, or self-
+    # speculation methods (mtp / eagle3) on models with native MTP heads —
+    # are allowed through so the planner can actually probe them.
     if experiment.speculative_algorithm:
         algo = experiment.speculative_algorithm.upper()
+        has_native_mtp = hardware.mtp_num_layers > 0
+        # Algorithms that don't need a draft model on the right hardware.
+        # ngram works on any model (no draft, no MTP). mtp/eagle3 can run
+        # without a draft when the model itself ships MTP heads.
+        SELF_SPEC_ALGOS = {"MTP", "EAGLE3"}
+        is_ngram = algo == "NGRAM"
+        is_self_speculation = algo in SELF_SPEC_ALGOS and has_native_mtp
+
         if experiment.engine == EngineType.VLLM:
-            if not experiment.speculative_draft_model:
+            if (
+                not experiment.speculative_draft_model
+                and not is_ngram
+                and not is_self_speculation
+            ):
                 errors.append(
-                    "vLLM speculative decoding requires speculative_draft_model"
+                    f"vLLM speculative_algorithm={algo} requires speculative_draft_model "
+                    "(only ngram, or mtp/eagle3 on a model with native MTP heads, "
+                    "can run without one)"
                 )
         elif experiment.engine == EngineType.SGLANG:
-            if algo == "NEXTN" and not hardware.has_mtp:
+            if algo == "NEXTN" and not has_native_mtp:
                 errors.append(
-                    "NEXTN speculative decoding requires a model with MTP layers "
-                    "(has_mtp=false for this model)"
+                    "NEXTN speculative decoding requires a model with native MTP heads "
+                    "(mtp_num_layers=0 for this model)"
                 )
+
+        # num_steps cap only applies to self-speculation. With an external
+        # draft model the draft can predict an arbitrary number of tokens —
+        # the engine itself caps it, not us. NEXTN is always self-speculation
+        # in SGLang, so it gets the cap regardless of draft model field.
+        is_self_spec_run = (
+            algo == "NEXTN"
+            or (algo in SELF_SPEC_ALGOS and not experiment.speculative_draft_model)
+        )
+        if (
+            experiment.speculative_num_steps is not None
+            and is_self_spec_run
+            and has_native_mtp
+            and experiment.speculative_num_steps > hardware.mtp_num_layers
+        ):
+            errors.append(
+                f"speculative_num_steps={experiment.speculative_num_steps} exceeds "
+                f"this model's native MTP head count ({hardware.mtp_num_layers}); "
+                f"self-speculation cannot predict more tokens than available heads"
+            )
 
     # ── Memory utilization bounds ─────────────────────────────────────
     if experiment.gpu_memory_utilization <= 0 or experiment.gpu_memory_utilization > 1.0:

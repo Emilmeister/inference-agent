@@ -11,7 +11,7 @@ def _make_hardware(**overrides) -> HardwareProfile:
         "nvlink_available": False,
         "model_name": "test/model",
         "model_max_context": 32768,
-        "has_mtp": False,
+        "mtp_num_layers": 0,
         "available_engines": [EngineType.VLLM, EngineType.SGLANG],
     }
     defaults.update(overrides)
@@ -102,14 +102,46 @@ class TestValidateExperiment:
     def test_vllm_speculative_needs_draft_model(self):
         hw = _make_hardware()
         exp = _make_experiment(
-            speculative_algorithm="some_algo",
+            speculative_algorithm="eagle",
+            speculative_draft_model=None,
+        )
+        errors = validate_experiment(exp, hw)
+        assert any("speculative_draft_model" in e for e in errors)
+
+    def test_vllm_ngram_does_not_need_draft_model(self):
+        hw = _make_hardware()
+        exp = _make_experiment(
+            speculative_algorithm="ngram",
+            speculative_draft_model=None,
+        )
+        errors = validate_experiment(exp, hw)
+        assert not any("speculative_draft_model" in e for e in errors)
+
+    def test_vllm_self_speculation_with_native_mtp(self):
+        # mtp/eagle3 can self-speculate on a model with native MTP heads,
+        # so no draft model is required.
+        hw = _make_hardware(mtp_num_layers=1)
+        for algo in ("mtp", "eagle3"):
+            exp = _make_experiment(
+                speculative_algorithm=algo,
+                speculative_draft_model=None,
+            )
+            errors = validate_experiment(exp, hw)
+            assert not any("speculative_draft_model" in e for e in errors), (
+                f"{algo} on MTP model should not require a draft model: {errors}"
+            )
+
+    def test_vllm_self_speculation_without_mtp_still_needs_draft(self):
+        hw = _make_hardware(mtp_num_layers=0)
+        exp = _make_experiment(
+            speculative_algorithm="eagle3",
             speculative_draft_model=None,
         )
         errors = validate_experiment(exp, hw)
         assert any("speculative_draft_model" in e for e in errors)
 
     def test_nextn_without_mtp(self):
-        hw = _make_hardware(has_mtp=False)
+        hw = _make_hardware(mtp_num_layers=0)
         exp = _make_experiment(
             EngineType.SGLANG,
             speculative_algorithm="NEXTN",
@@ -118,13 +150,46 @@ class TestValidateExperiment:
         assert any("MTP" in e for e in errors)
 
     def test_nextn_with_mtp(self):
-        hw = _make_hardware(has_mtp=True)
+        hw = _make_hardware(mtp_num_layers=1)
         exp = _make_experiment(
             EngineType.SGLANG,
             speculative_algorithm="NEXTN",
         )
         errors = validate_experiment(exp, hw)
         assert not any("MTP" in e for e in errors)
+
+    def test_speculative_num_steps_exceeds_mtp_heads(self):
+        hw = _make_hardware(mtp_num_layers=1)
+        exp = _make_experiment(
+            EngineType.SGLANG,
+            speculative_algorithm="NEXTN",
+            speculative_num_steps=4,
+        )
+        errors = validate_experiment(exp, hw)
+        assert any("native MTP head count" in e for e in errors)
+
+    def test_speculative_num_steps_within_mtp_heads(self):
+        hw = _make_hardware(mtp_num_layers=3)
+        exp = _make_experiment(
+            EngineType.SGLANG,
+            speculative_algorithm="NEXTN",
+            speculative_num_steps=2,
+        )
+        errors = validate_experiment(exp, hw)
+        assert not any("native MTP head count" in e for e in errors)
+
+    def test_speculative_num_steps_no_cap_with_external_draft(self):
+        # With an external draft model the cap based on native MTP heads
+        # does not apply — the draft can predict an arbitrary number of
+        # tokens, and the engine itself decides the upper bound.
+        hw = _make_hardware(mtp_num_layers=1)
+        exp = _make_experiment(
+            speculative_algorithm="eagle",
+            speculative_draft_model="some/draft-model",
+            speculative_num_steps=8,
+        )
+        errors = validate_experiment(exp, hw)
+        assert not any("native MTP head count" in e for e in errors)
 
     def test_gpu_memory_utilization_bounds(self):
         hw = _make_hardware()

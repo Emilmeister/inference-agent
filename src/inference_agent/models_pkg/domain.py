@@ -58,7 +58,7 @@ class HardwareProfile(BaseModel):
     model_architecture: str | None = None
     model_max_context: int = 4096
     is_vlm: bool = False           # vision-language model (needs --language-model-only for vllm)
-    has_mtp: bool = False           # has Multi-Token Prediction layers (SGLang NEXTN)
+    mtp_num_layers: int = 0         # number of native Multi-Token Prediction heads built into the model
     available_engines: list[EngineType] = []
 
 

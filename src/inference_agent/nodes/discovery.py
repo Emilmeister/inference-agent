@@ -327,12 +327,22 @@ async def discovery_node(state: AgentState) -> dict:
 
     # Detect if model is multimodal (VLM)
     is_vlm = "vision_config" in model_config or "ForConditionalGeneration" in str(architectures)
-    # Detect MTP support
-    has_mtp = text_config.get("mtp_num_hidden_layers", 0) > 0
+    # Detect native Multi-Token Prediction heads.
+    # Qwen3.5-MoE et al. use `mtp_num_hidden_layers`; DeepSeek-V3 family uses
+    # `num_nextn_predict_layers`. Either spelling appears in `text_config` for
+    # multimodal wrappers or at the top level for text-only models. A non-zero
+    # count means the model can self-speculate (NEXTN/EAGLE3 without an external
+    # draft model) and gives us an upper bound on `speculative_num_steps`.
+    mtp_num_layers = max(
+        int(text_config.get("mtp_num_hidden_layers", 0) or 0),
+        int(text_config.get("num_nextn_predict_layers", 0) or 0),
+        int(model_config.get("mtp_num_hidden_layers", 0) or 0),
+        int(model_config.get("num_nextn_predict_layers", 0) or 0),
+    )
 
     logger.info(
-        "Model info: max_context=%d, is_vlm=%s, has_mtp=%s, hidden=%d, layers=%d",
-        max_context, is_vlm, has_mtp, hidden_size, num_layers,
+        "Model info: max_context=%d, is_vlm=%s, mtp_num_layers=%d, hidden=%d, layers=%d",
+        max_context, is_vlm, mtp_num_layers, hidden_size, num_layers,
     )
 
     # Filter engines to only those requested in config
@@ -357,7 +367,7 @@ async def discovery_node(state: AgentState) -> dict:
         model_architecture=model_architecture,
         model_max_context=max_context,
         is_vlm=is_vlm,
-        has_mtp=has_mtp,
+        mtp_num_layers=mtp_num_layers,
         available_engines=available,
     )
 
