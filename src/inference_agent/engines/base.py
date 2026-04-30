@@ -85,4 +85,21 @@ class BaseEngine(abc.ABC):
         # LLM-generated env vars
         for key, val in experiment.extra_env.items():
             args.extend(["-e", f"{key}={val}"])
+        # Force HF offline mode when we've already prefetched the model.
+        # Two reasons:
+        #   1. Some engines call huggingface_hub APIs (e.g. model_info) on
+        #      startup and parse responses through StrictDataclass — when the
+        #      upstream config has int literals where a float is expected
+        #      (DeepSeekV3-style `routed_scaling_factor: 1`), this crashes the
+        #      server before it can read our patched local config.json.
+        #   2. HF re-validates cached blobs against expected SHA — our
+        #      in-place int→float coercion in discovery breaks the hash, so
+        #      online mode would re-download and overwrite the patch.
+        # Putting these AFTER extra_env so the LLM cannot accidentally re-enable
+        # online mode via planner-generated env vars.
+        if self.config.startup.prefetch_model:
+            args.extend([
+                "-e", "HF_HUB_OFFLINE=1",
+                "-e", "TRANSFORMERS_OFFLINE=1",
+            ])
         return args

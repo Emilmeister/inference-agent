@@ -243,7 +243,7 @@ class SmokeTestResult(BaseModel):
 
 class ExperimentError(BaseModel):
     """Structured error from a specific stage of experiment execution."""
-    stage: str  # startup | healthcheck | benchmark_phase | metrics | smoke | cleanup
+    stage: str  # prefetch | startup | healthcheck | benchmark_phase | metrics | smoke | cleanup
     message: str
     details: dict[str, Any] = Field(default_factory=dict)
 

@@ -138,19 +138,24 @@ def _bytes_to_params(total_bytes: int, dtype_str: str | None) -> int:
     return int(total_bytes / bytes_per_param)
 
 
-def _prefetch_model(
+def prefetch_and_normalize_model(
     model_name: str,
     cache_dir: str,
     revision: str | None,
     token: str | None,
     allow_patterns: list[str],
-) -> None:
-    """Download model weights into the host HF cache so containers find them locally.
+    raise_on_failure: bool = False,
+) -> str | None:
+    """Download model weights into the host HF cache and normalize the config.
 
     snapshot_download is idempotent — if the model is already present at the
-    target revision, this returns quickly. Failures are logged but non-fatal:
-    the engine will fall back to its own download inside the container (just
-    slower).
+    target revision, this returns quickly. The discovery node calls this
+    best-effort (`raise_on_failure=False`) so a transient HF outage does not
+    abort startup; the executor calls it for speculative draft models with
+    `raise_on_failure=True` so a bad draft model ID surfaces immediately as
+    a structured prefetch error instead of a 20-minute container hang.
+
+    Returns the snapshot path on success, None on best-effort failure.
     """
     import os
 
@@ -166,12 +171,14 @@ def _prefetch_model(
                 f"Set docker.host_cache_dir to a path you own (e.g. ~/.cache/huggingface)."
             )
     except Exception as e:
+        if raise_on_failure:
+            raise
         logger.warning(
             "Prefetch skipped for %s — host cache not usable: %s. "
             "Engine will download inside the container instead.",
             model_name, e,
         )
-        return
+        return None
 
     logger.info(
         "Prefetching %s into cache_dir=%s (this may take a while on first run)...",
@@ -187,13 +194,16 @@ def _prefetch_model(
         )
         logger.info("Prefetch complete: %s", path)
     except Exception as e:
+        if raise_on_failure:
+            raise
         logger.warning(
             "Prefetch failed for %s (engine will download inside container): %s",
             model_name, e,
         )
-        return
+        return None
 
     _normalize_cached_config(path)
+    return path
 
 
 # Fields that some model configs publish as int (e.g. `1`) but downstream
@@ -347,7 +357,7 @@ async def discovery_node(state: AgentState) -> dict:
     if config.startup.prefetch_model:
         await loop.run_in_executor(
             None,
-            _prefetch_model,
+            prefetch_and_normalize_model,
             config.model_name,
             config.docker.host_cache_dir,
             config.model_revision,

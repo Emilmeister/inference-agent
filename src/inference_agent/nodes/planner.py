@@ -96,7 +96,11 @@ the model ships with (Qwen3.5-MoE: typically 1, DeepSeek-V3: typically 1-3). Whe
    - Cap `speculative_num_steps` at mtp_num_layers — predicting more tokens than there are heads \
      wastes a slot and the validator will reject it.
    - When mtp_num_layers == 0: NEXTN is unavailable; speculative decoding requires an external \
-     `speculative_draft_model` (a real, smaller HuggingFace model from the same family).
+     `speculative_draft_model` (a real, smaller HuggingFace model from the same family). The agent \
+     prefetches the draft model into the host HF cache before launching the container — if the repo \
+     ID is wrong / non-existent, the experiment fails fast with `prefetch_failed` (not a 20-minute \
+     container hang). Pick draft models you are confident exist (same tokenizer/vocab family as the \
+     main model); a `prefetch_failed` in history means that exact draft ID is unusable, do not retry it.
 8. Never repeat an exact configuration that was already tested.
 9. max_model_len: choose ONE of {{16384, 32768, 65536, 131072, 262144}}, capped at {model_max_context}. \
 The OBJECTIVE is to maximize performance at the LARGEST context that fits VRAM. \

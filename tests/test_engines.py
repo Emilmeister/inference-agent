@@ -96,6 +96,43 @@ class TestVLLMEngine:
 
         assert "HF_TOKEN=hf_test123" in " ".join(args)
 
+    def test_offline_env_when_prefetch_enabled(self):
+        # prefetch_model defaults to True, so HF offline mode should be on.
+        config = _make_config()
+        assert config.startup.prefetch_model is True
+        engine = VLLMEngine(config)
+        experiment = _make_experiment(EngineType.VLLM)
+        args = engine.build_docker_args(experiment)
+        flat = " ".join(args)
+        assert "HF_HUB_OFFLINE=1" in flat
+        assert "TRANSFORMERS_OFFLINE=1" in flat
+
+    def test_no_offline_env_when_prefetch_disabled(self):
+        from inference_agent.models_pkg.config import StartupConfig
+
+        config = _make_config(startup=StartupConfig(prefetch_model=False))
+        engine = VLLMEngine(config)
+        experiment = _make_experiment(EngineType.VLLM)
+        args = engine.build_docker_args(experiment)
+        flat = " ".join(args)
+        assert "HF_HUB_OFFLINE" not in flat
+        assert "TRANSFORMERS_OFFLINE" not in flat
+
+    def test_offline_env_overrides_llm_extra_env(self):
+        # LLM tries to disable offline mode via extra_env — our env must win,
+        # i.e. appear AFTER the LLM's. Last `-e` wins in `docker run`.
+        config = _make_config()
+        engine = VLLMEngine(config)
+        experiment = _make_experiment(
+            EngineType.VLLM,
+            extra_env={"HF_HUB_OFFLINE": "0"},
+        )
+        args = engine.build_docker_args(experiment)
+        # find indices of both occurrences
+        indices = [i for i, a in enumerate(args) if a.startswith("HF_HUB_OFFLINE=")]
+        assert len(indices) == 2
+        assert args[indices[-1]] == "HF_HUB_OFFLINE=1"
+
     def test_attention_backend(self):
         config = _make_config()
         engine = VLLMEngine(config)

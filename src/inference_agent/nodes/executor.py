@@ -13,6 +13,7 @@ from inference_agent.benchmark.smoke_tests import run_smoke_tests
 from inference_agent.engines.base import BaseEngine
 from inference_agent.engines.sglang import SGLangEngine
 from inference_agent.engines.vllm import VLLMEngine
+from inference_agent.nodes.discovery import prefetch_and_normalize_model
 from inference_agent.models import (
     BenchmarkResult,
     ConcurrencyResult,
@@ -332,6 +333,60 @@ async def executor_node(state: AgentState) -> dict:
 
     # Determine benchmark seed
     seed = config.benchmark.seed
+
+    # ── Step 0: Prefetch external speculative draft model ─────────────
+    # Engines run with HF_HUB_OFFLINE=1 (so the patched config.json is used
+    # instead of being overwritten by HF re-validation), so any draft model
+    # the planner picked must be in the host cache before container start.
+    # snapshot_download is idempotent — if the draft is already cached this
+    # is a no-op. A failed download (bad repo ID, auth, network) surfaces
+    # here as a clean `prefetch_failed` failure instead of a 20-minute
+    # container hang inside docker.
+    draft_model = experiment.speculative_draft_model
+    if draft_model and config.startup.prefetch_model:
+        logger.info("Prefetching speculative_draft_model: %s", draft_model)
+        loop = asyncio.get_event_loop()
+        try:
+            await loop.run_in_executor(
+                None,
+                prefetch_and_normalize_model,
+                draft_model,
+                config.docker.host_cache_dir,
+                None,  # no separate revision pin for draft model
+                config.hf_token,
+                config.startup.prefetch_allow_patterns,
+                True,  # raise_on_failure
+            )
+        except Exception as e:
+            error_msg = f"Failed to prefetch speculative_draft_model={draft_model}: {e}"
+            logger.error(error_msg)
+            clear_experiment_context()
+            return {
+                "current_result": ExperimentResult(
+                    experiment_id=experiment.experiment_id,
+                    engine=experiment.engine,
+                    model=config.model_name,
+                    hardware=hardware,
+                    config=experiment,
+                    status=ExperimentStatus.FAILED,
+                    error=error_msg,
+                    errors=[ExperimentError(
+                        stage="prefetch",
+                        message=error_msg,
+                        details={
+                            "classification": "prefetch_failed",
+                            "draft_model": draft_model,
+                        },
+                    )],
+                    docker_command=docker_command,
+                    docker_args=docker_args,
+                    docker_image_digest=image_digest,
+                    benchmark_seed=seed,
+                    duration_seconds=time.time() - start_time,
+                    time_to_healthy_sec=0.0,
+                    failure_classification="prefetch_failed",
+                )
+            }
 
     # ── Step 1: Start engine ──────────────────────────────────────────
     container_id, startup_errors, time_to_healthy = await _start_engine(
