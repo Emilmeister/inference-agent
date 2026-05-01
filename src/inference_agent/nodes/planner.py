@@ -182,9 +182,18 @@ Set ONLY the parameters for your chosen engine. Leave the other engine's fields 
 """
 
 _PROMPT_FOOTER = """
-## extra_engine_args
-Use ONLY for engine CLI flags that have no dedicated field in this schema. \
-Do NOT duplicate flags the engine manages automatically.
+## extra_engine_args vs extra_env — DO NOT CONFUSE THEM
+- `extra_engine_args: list[str]` — engine CLI flags that have no dedicated \
+  field in this schema. Each list element is one CLI token, e.g. \
+  `["--mamba-scheduler-strategy", "extra_buffer"]`. Do NOT duplicate flags the \
+  engine manages automatically. Do NOT put `-e KEY=VALUE` tokens here — those \
+  are docker flags, not engine flags, and the engine will reject them with \
+  `unrecognized arguments`.
+- `extra_env: dict[str, str]` — environment variables for the container. ALWAYS \
+  use this field for env vars (e.g. `VLLM_FLASH_ATTN_VERSION`, \
+  `OMP_NUM_THREADS`, `NCCL_CUMEM_ENABLE`, `CUDA_DISABLE_CONTROL`, \
+  `SGLANG_ENABLE_SPEC_V2`). Format: `{{"VAR": "value"}}`. NEVER pass env vars \
+  via `extra_engine_args` — that breaks argparse and crashes startup.
 {user_instructions}
 Generate the next experiment configuration.
 """
@@ -302,6 +311,32 @@ def _should_disable_speculative(
     return all(h.status.value == "failed" for h in recent)
 
 
+def _get_quarantined_engines(
+    history: list[ExperimentSummary],
+    threshold: int = 3,
+) -> set[EngineType]:
+    """Park engines that keep failing without ever producing a success.
+
+    Counts consecutive failures per engine since its last success in this
+    session; once an engine hits `threshold`, it is excluded from the
+    planner's choices for the rest of the session. Symptom shape doesn't
+    matter — repeated startup_crash, then argparse_error, then OOM usually
+    points at a fundamental engine-image / model incompatibility, and burning
+    more budget on it is wasteful. Restart with a different image to lift
+    the quarantine.
+
+    A success on the engine resets the counter (so a flaky-but-eventually-
+    working engine is not punished forever).
+    """
+    consecutive_failures: dict[EngineType, int] = {}
+    for h in history:
+        if h.status.value == "success":
+            consecutive_failures[h.engine] = 0
+        else:
+            consecutive_failures[h.engine] = consecutive_failures.get(h.engine, 0) + 1
+    return {e for e, c in consecutive_failures.items() if c >= threshold}
+
+
 def _summary_to_prompt_entry(h: ExperimentSummary) -> dict:
     """Compact dict view of a summary for the LLM prompt."""
     entry: dict = {
@@ -357,14 +392,33 @@ async def planner_node(state: AgentState) -> dict:
     # with valid metrics, so we don't re-filter here.
     loaded_top_for_llm = [_summary_to_prompt_entry(h) for h in loaded_top_history]
 
+    # Engine quarantine: if an engine has racked up >=3 consecutive failures
+    # since its last success in this session, exclude it from the planner's
+    # choices. Falls back to all available engines only if quarantine would
+    # leave nothing to pick (so the agent can keep trying rather than crash).
+    quarantined = _get_quarantined_engines(history)
+    effective_engines = [e for e in hardware.available_engines if e not in quarantined]
+    if quarantined:
+        logger.warning(
+            "Engine quarantine active: %s (>=3 consecutive failures, no successes). "
+            "Restart with a different image tag to lift.",
+            ", ".join(sorted(e.value for e in quarantined)),
+        )
+    if not effective_engines:
+        logger.warning(
+            "All engines quarantined — falling back to original list. "
+            "Stop the agent and fix engine images before continuing."
+        )
+        effective_engines = list(hardware.available_engines)
+
     # Determine if we need to force a specific engine (alternation rule)
-    forced_engine = _get_forced_engine(history, hardware.available_engines)
+    forced_engine = _get_forced_engine(history, effective_engines)
     if forced_engine:
         logger.info("Forcing engine=%s (alternation rule)", forced_engine.value)
 
     # Check if speculative decoding should be disabled for each engine
     spec_disabled: dict[EngineType, bool] = {}
-    for eng in hardware.available_engines:
+    for eng in effective_engines:
         spec_disabled[eng] = _should_disable_speculative(history, eng)
         if spec_disabled[eng]:
             logger.info(
@@ -385,8 +439,8 @@ async def planner_node(state: AgentState) -> dict:
         engine_docs_to_inject = [EngineType.SGLANG]
     else:
         engine_section = _BOTH_ENGINES_SECTION
-        engine_instruction = f"Choose from: {', '.join(e.value for e in hardware.available_engines)}"
-        engine_docs_to_inject = list(hardware.available_engines)
+        engine_instruction = f"Choose from: {', '.join(e.value for e in effective_engines)}"
+        engine_docs_to_inject = list(effective_engines)
 
     docs_blocks: list[str] = []
     for eng in engine_docs_to_inject:
@@ -447,7 +501,7 @@ async def planner_node(state: AgentState) -> dict:
         logger.error("LLM structured output failed, using fallback: %s", error_summary)
         safe_ctx = _estimate_safe_context(hardware)
         result = PlannerOutput(
-            engine=hardware.available_engines[0].value if hardware.available_engines else "vllm",
+            engine=effective_engines[0].value if effective_engines else "vllm",
             tensor_parallel_size=hardware.gpu_count,
             max_model_len=safe_ctx,
             rationale=f"Fallback: LLM failed — {error_summary}",

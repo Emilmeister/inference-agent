@@ -12,6 +12,7 @@ from inference_agent.nodes.planner import (
     _build_experiment_config,
     _estimate_safe_context,
     _get_forced_engine,
+    _get_quarantined_engines,
     _load_curated_docs,
     _should_disable_speculative,
 )
@@ -235,6 +236,63 @@ class TestShouldDisableSpeculative:
         ]
         # Last 3 are [FAILED, FAILED, SUCCESS] — not all failed
         assert _should_disable_speculative(history, EngineType.VLLM, threshold=3) is False
+
+
+# ── _get_quarantined_engines ──────────────────────────────────────────────
+
+
+class TestGetQuarantinedEngines:
+    def test_empty_history(self):
+        assert _get_quarantined_engines([]) == set()
+
+    def test_below_threshold(self):
+        history = [
+            _make_summary("a", EngineType.VLLM, ExperimentStatus.FAILED),
+            _make_summary("b", EngineType.VLLM, ExperimentStatus.FAILED),
+        ]
+        assert _get_quarantined_engines(history, threshold=3) == set()
+
+    def test_at_threshold_quarantines(self):
+        history = [
+            _make_summary("a", EngineType.VLLM, ExperimentStatus.FAILED),
+            _make_summary("b", EngineType.VLLM, ExperimentStatus.FAILED),
+            _make_summary("c", EngineType.VLLM, ExperimentStatus.FAILED),
+        ]
+        assert _get_quarantined_engines(history, threshold=3) == {EngineType.VLLM}
+
+    def test_success_resets_counter(self):
+        # 2 fails, then success, then 2 more fails — only 2 consecutive,
+        # below threshold. Quarantine is about consecutive failures since
+        # last success, not lifetime totals.
+        history = [
+            _make_summary("a", EngineType.VLLM, ExperimentStatus.FAILED),
+            _make_summary("b", EngineType.VLLM, ExperimentStatus.FAILED),
+            _make_summary("c", EngineType.VLLM, ExperimentStatus.SUCCESS),
+            _make_summary("d", EngineType.VLLM, ExperimentStatus.FAILED),
+            _make_summary("e", EngineType.VLLM, ExperimentStatus.FAILED),
+        ]
+        assert _get_quarantined_engines(history, threshold=3) == set()
+
+    def test_quarantine_is_per_engine(self):
+        history = [
+            _make_summary("a", EngineType.VLLM, ExperimentStatus.FAILED),
+            _make_summary("b", EngineType.SGLANG, ExperimentStatus.SUCCESS),
+            _make_summary("c", EngineType.VLLM, ExperimentStatus.FAILED),
+            _make_summary("d", EngineType.SGLANG, ExperimentStatus.SUCCESS),
+            _make_summary("e", EngineType.VLLM, ExperimentStatus.FAILED),
+        ]
+        # vllm has 3 consecutive fails, sglang has successes — only vllm parked
+        assert _get_quarantined_engines(history, threshold=3) == {EngineType.VLLM}
+
+    def test_mixed_failure_classifications_still_count(self):
+        # Symptom shape doesn't matter — startup_crash + argparse_error +
+        # healthcheck_idle all count toward the same consecutive-failure tally.
+        history = [
+            _make_summary("a", EngineType.VLLM, ExperimentStatus.FAILED),
+            _make_summary("b", EngineType.VLLM, ExperimentStatus.FAILED_CORRECTNESS),
+            _make_summary("c", EngineType.VLLM, ExperimentStatus.PARTIAL),
+        ]
+        assert _get_quarantined_engines(history, threshold=3) == {EngineType.VLLM}
 
 
 # ── _load_curated_docs ────────────────────────────────────────────────────
