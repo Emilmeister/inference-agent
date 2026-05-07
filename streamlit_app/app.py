@@ -17,10 +17,12 @@ from db import (
     Filters,
     HardwareKey,
     delete_experiments,
+    get_experiment_payload,
     list_distinct_engines,
     list_distinct_hardware,
     list_distinct_models,
-    list_experiments,
+    list_experiment_phases,
+    list_experiment_summaries,
 )
 
 
@@ -44,25 +46,6 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def _as_int(value: Any, default: int = 0) -> int:
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _as_bool(value: Any) -> bool:
-    return bool(value)
-
-
-def _none_label(value: Any, default: str = "none") -> str:
-    if value is None or value == "":
-        return default
-    return str(value)
-
-
 def _format_metric(value: float, suffix: str = "", precision: int = 0) -> str:
     if value <= 0:
         return "n/a"
@@ -81,18 +64,11 @@ def _pareto_ids(frame: pd.DataFrame) -> list[str]:
     return ids
 
 
-def _selected_experiments(experiments: list[dict], ids: set[str]) -> list[dict]:
-    return [exp for exp in experiments if exp.get("experiment_id", "") in ids]
-
-
-def _experiment_label(exp: dict) -> str:
-    config = exp.get("config", {})
-    bench = exp.get("benchmark", {})
+def _summary_label(row: pd.Series) -> str:
     return (
-        f"{exp.get('experiment_id', '')} ({exp.get('engine', '')} "
-        f"TP={config.get('tensor_parallel_size', '?')} "
-        f"q={_none_label(config.get('quantization'))}) - "
-        f"{_as_float(bench.get('peak_output_tokens_per_sec')):.0f} tok/s"
+        f"{row['experiment_id']} ({row['engine']} "
+        f"TP={row['tp']} q={row['quantization']}) - "
+        f"{row['peak_throughput']:.0f} tok/s"
     )
 
 
@@ -134,154 +110,13 @@ filters = Filters(
     engines=tuple(selected_engines_src),
 )
 
-experiments = list_experiments(filters)
+df = list_experiment_summaries(filters)
 
-if not experiments:
+if df.empty:
     st.warning("No experiments match the current filters.")
     st.stop()
 
-st.success(f"Loaded {len(experiments)} experiments from Postgres")
-
-
-# ---- Build dataframes ----
-
-
-def build_summary_df(experiments: list[dict]) -> pd.DataFrame:
-    rows = []
-    for exp in experiments:
-        config = exp.get("config", {})
-        bench = exp.get("benchmark", {})
-        smoke = exp.get("smoke_tests", {})
-        post_smoke = exp.get("post_benchmark_correctness") or {}
-        scores = exp.get("scores", {})
-        hardware = exp.get("hardware", {})
-        gpus = hardware.get("gpus", []) or [{}]
-
-        tp = _as_int(config.get("tensor_parallel_size"), 1)
-        pp = _as_int(config.get("pipeline_parallel_size"), 1)
-        dp = _as_int(config.get("data_parallel_size"), 1)
-        gpu_count = _as_int(hardware.get("gpu_count"), len(gpus))
-        peak_throughput = _as_float(bench.get("peak_output_tokens_per_sec"))
-        total_power = sum(_as_float(v) for v in bench.get("gpu_power_draw_watts", []))
-        memory_used = [_as_float(v) for v in bench.get("gpu_memory_used_mb", [])]
-        memory_total = _as_float(gpus[0].get("vram_total_mb"))
-        timestamp = pd.to_datetime(exp.get("timestamp"), errors="coerce", utc=True)
-
-        rows.append({
-            "experiment_id": exp.get("experiment_id", ""),
-            "timestamp": timestamp,
-            "engine": exp.get("engine", ""),
-            "engine_version": exp.get("engine_version", ""),
-            "model": exp.get("model", ""),
-            "status": exp.get("status", ""),
-            "failure_classification": exp.get("failure_classification") or "none",
-            "correctness_gate_passed": _as_bool(exp.get("correctness_gate_passed")),
-            "post_basic_chat": _as_bool(post_smoke.get("basic_chat")),
-            "tp": tp,
-            "pp": pp,
-            "dp": dp,
-            "parallelism": tp * pp * dp,
-            "gpu_count": gpu_count,
-            "max_model_len": config.get("max_model_len") or hardware.get("model_max_context"),
-            "gpu_memory_utilization": _as_float(config.get("gpu_memory_utilization")),
-            "mem_fraction_static": _as_float(config.get("mem_fraction_static")),
-            "max_num_seqs": config.get("max_num_seqs"),
-            "max_running_requests": config.get("max_running_requests"),
-            "max_num_batched_tokens": config.get("max_num_batched_tokens"),
-            "max_prefill_tokens": config.get("max_prefill_tokens"),
-            "quantization": _none_label(config.get("quantization")),
-            "dtype": _none_label(config.get("dtype"), "auto"),
-            "kv_cache_dtype": _none_label(config.get("kv_cache_dtype"), "auto"),
-            "chunked_prefill": _as_bool(config.get("enable_chunked_prefill")),
-            "prefix_caching": _as_bool(config.get("enable_prefix_caching")),
-            "enforce_eager": _as_bool(config.get("enforce_eager")),
-            "scheduling_policy": _none_label(config.get("scheduling_policy"), "fcfs"),
-            "attention_backend": _none_label(config.get("attention_backend")),
-            "speculative_algorithm": _none_label(config.get("speculative_algorithm")),
-            "peak_throughput": peak_throughput,
-            "peak_total_throughput": _as_float(bench.get("peak_total_tokens_per_sec")),
-            "peak_requests_per_sec": _as_float(bench.get("peak_requests_per_sec")),
-            "ttft_p95": _as_float(bench.get("low_concurrency_ttft_p95_ms")),
-            "tpot_p95": _as_float(bench.get("low_concurrency_tpot_p95_ms")),
-            "peak_throughput_e2e_cv": _as_float(bench.get("peak_throughput_e2e_cv")),
-            "low_concurrency_ttft_cv": _as_float(bench.get("low_concurrency_ttft_cv")),
-            "kv_cache_usage": _as_float(bench.get("kv_cache_usage_percent")),
-            "prefix_hit_rate": _as_float(bench.get("prefix_cache_hit_rate")),
-            "gpu_util_avg": (
-                sum(_as_float(v) for v in bench.get("gpu_utilization_percent", []))
-                / max(len(bench.get("gpu_utilization_percent", [])), 1)
-            ),
-            "gpu_memory_peak_mb": max(memory_used) if memory_used else 0.0,
-            "gpu_memory_total_mb": memory_total,
-            "gpu_memory_headroom_mb": max(memory_total - max(memory_used), 0.0)
-            if memory_total and memory_used else 0.0,
-            "gpu_power_total_w": total_power,
-            "throughput_per_gpu": peak_throughput / max(gpu_count, 1),
-            "throughput_per_watt": peak_throughput / total_power if total_power > 0 else 0.0,
-            "smoke_basic": _as_bool(smoke.get("basic_chat")),
-            "smoke_tool": _as_bool(smoke.get("tool_calling")),
-            "smoke_tool_required": _as_bool(smoke.get("tool_required")),
-            "smoke_json": _as_bool(smoke.get("json_mode")),
-            "smoke_schema": _as_bool(smoke.get("json_schema")),
-            "throughput_score": _as_float(scores.get("throughput_score")),
-            "latency_score": _as_float(scores.get("latency_score")),
-            "balanced_score": _as_float(scores.get("balanced_score")),
-            "is_pareto": _as_bool(scores.get("is_pareto_optimal")),
-            "classification": exp.get("optimization_classification", "none"),
-            "commentary": exp.get("llm_commentary", ""),
-            "rationale": config.get("rationale", ""),
-            "docker_command": exp.get("docker_command", ""),
-            "docker_image_digest": exp.get("docker_image_digest", ""),
-            "benchmark_seed": exp.get("benchmark_seed"),
-            "duration_s": _as_float(exp.get("duration_seconds")),
-            "time_to_healthy_sec": _as_float(exp.get("time_to_healthy_sec")),
-        })
-
-    return pd.DataFrame(rows)
-
-
-def build_phase_df(experiments: list[dict]) -> pd.DataFrame:
-    rows = []
-    for exp in experiments:
-        config = exp.get("config", {})
-        for phase in exp.get("benchmark", {}).get("concurrency_results", []):
-            ttft = phase.get("ttft_ms", {})
-            tpot = phase.get("tpot_ms", {})
-            e2e = phase.get("e2e_latency_ms", {})
-            rows.append({
-                "experiment_id": exp.get("experiment_id", ""),
-                "engine": exp.get("engine", ""),
-                "status": exp.get("status", ""),
-                "correctness_gate_passed": _as_bool(exp.get("correctness_gate_passed")),
-                "quantization": _none_label(config.get("quantization")),
-                "tp": _as_int(config.get("tensor_parallel_size"), 1),
-                "workload_id": _none_label(phase.get("workload_id"), "unknown"),
-                "phase_id": phase.get("phase_id", ""),
-                "concurrency": _as_int(phase.get("concurrency")),
-                "prompt_length": _as_int(phase.get("prompt_length")),
-                "max_output_tokens": _as_int(phase.get("max_output_tokens")),
-                "num_requests": _as_int(phase.get("num_requests")),
-                "requests_per_sec": _as_float(phase.get("requests_per_sec")),
-                "output_tokens_per_sec": _as_float(phase.get("output_tokens_per_sec")),
-                "total_tokens_per_sec": _as_float(phase.get("total_tokens_per_sec")),
-                "ttft_p50": _as_float(ttft.get("median")),
-                "ttft_p95": _as_float(ttft.get("p95")),
-                "ttft_p99": _as_float(ttft.get("p99")),
-                "ttft_cv": _as_float(ttft.get("cv")),
-                "tpot_p95": _as_float(tpot.get("p95")),
-                "e2e_p95": _as_float(e2e.get("p95")),
-                "e2e_cv": _as_float(e2e.get("cv")),
-                "errors": _as_int(phase.get("errors")),
-                "error_rate": _as_float(phase.get("error_rate")),
-            })
-    return pd.DataFrame(rows)
-
-
-df = build_summary_df(experiments)
-
-if df.empty:
-    st.warning("No usable experiment payloads found.")
-    st.stop()
+st.success(f"Loaded {len(df)} experiments from Postgres")
 
 
 # ---- Display filters (in-page narrowing of the loaded set) ----
@@ -338,9 +173,8 @@ if eligible_only:
     filtered = filtered[eligible_mask].copy()
     eligible_mask = pd.Series(True, index=filtered.index)
 
-filtered_ids = set(filtered["experiment_id"].astype(str))
-filtered_experiments = _selected_experiments(experiments, filtered_ids)
-phase_df = build_phase_df(filtered_experiments)
+filtered_ids = tuple(sorted(filtered["experiment_id"].astype(str)))
+phase_df = list_experiment_phases(filtered_ids)
 eligible = filtered[
     (filtered["status"] == "success")
     & filtered["correctness_gate_passed"]
@@ -922,23 +756,14 @@ with tabs[6]:
     st.header("Reproducibility")
     st.caption("Copy-paste ready runtime details for reproducing experiments.")
 
+    label_map = {row["experiment_id"]: _summary_label(row) for _, row in filtered.iterrows()}
     selected_exp = st.selectbox(
         "Select experiment",
-        [e.get("experiment_id", "") for e in filtered_experiments],
-        format_func=lambda x: next(
-            (
-                _experiment_label(e)
-                for e in filtered_experiments
-                if e.get("experiment_id") == x
-            ),
-            x,
-        ),
+        list(label_map.keys()),
+        format_func=lambda x: label_map.get(x, x),
     )
 
-    exp_data = next(
-        (e for e in filtered_experiments if e.get("experiment_id") == selected_exp),
-        None,
-    )
+    exp_data = get_experiment_payload(selected_exp) if selected_exp else None
     if exp_data:
         config = exp_data.get("config", {})
         docker_cmd = exp_data.get("docker_command", "")
@@ -1053,12 +878,11 @@ with tabs[8]:
     )
 
     with st.expander("Delete experiments", expanded=False):
-        id_to_label = {}
-        for exp in filtered_experiments:
-            eid = exp.get("experiment_id", "")
-            if not eid:
-                continue
-            id_to_label[eid] = _experiment_label(exp)
+        id_to_label = {
+            row["experiment_id"]: _summary_label(row)
+            for _, row in filtered.iterrows()
+            if row["experiment_id"]
+        }
 
         selected_ids = st.multiselect(
             "Experiments to delete",
