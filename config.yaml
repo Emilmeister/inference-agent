@@ -2,6 +2,12 @@
 model_name: "ai-sage/GigaChat3-10B-A1.8B-bf16"
 model_revision: null
 
+# Квантизация фиксируется на уровне всего прогона: один и тот же режим
+# применяется ко ВСЕМ экспериментам, планировщик её не варьирует.
+# Допустимые значения зависят от движка (vLLM/SGLang): fp8, awq, gptq, ...
+# null — без квантизации.
+quantization: fp8
+
 # LLM агента (для принятия решений — любой OpenAI-совместимый endpoint)
 # api_key читается из переменной окружения OPENAI_API_KEY (или укажи свою через api_key_env).
 # Можно также явно положить ключ в api_key (не рекомендуется коммитить).
@@ -124,7 +130,6 @@ planner_instructions: |
   --gpu-memory-utilization 0.88 \
   --tensor-parallel-size 1 \
   --max-num-batched-tokens 16384 \
-  --quantization fp8 \
   --optimization-level 3 \
   --enable-expert-parallel \
   --enable-prefix-caching \

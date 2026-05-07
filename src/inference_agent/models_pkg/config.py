@@ -190,6 +190,11 @@ class AgentConfig(BaseModel):
     model_name: str = "Qwen/Qwen2.5-72B-Instruct"
     model_revision: str | None = None
     hf_token: str | None = None  # HuggingFace token for private models
+
+    # Quantization is fixed across all experiments — the planner does not vary
+    # it. Set to e.g. "fp8" / "awq" / "gptq", or null to disable.
+    quantization: str | None = None
+
     agent_llm: AgentLLMConfig = Field(default_factory=AgentLLMConfig)
     docker: DockerConfig = Field(default_factory=DockerConfig)
     startup: StartupConfig = Field(default_factory=StartupConfig)
@@ -199,5 +204,5 @@ class AgentConfig(BaseModel):
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
 
     # Natural language instructions for the LLM planner
-    # e.g. "Focus on fp8 quantization. Try chunked_prefill_size=4096 with SGLang."
+    # e.g. "Try chunked_prefill_size=4096 with SGLang."
     planner_instructions: str = ""

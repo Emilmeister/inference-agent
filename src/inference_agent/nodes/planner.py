@@ -8,6 +8,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from inference_agent.models import (
+    AgentConfig,
     EngineType,
     ExperimentConfig,
     ExperimentSummary,
@@ -72,14 +73,19 @@ previous sessions. Treat them as a strong starting point: prefer iterating ON th
 {exp_count} / {max_experiments}
 
 ## Rules
-1. For BASELINES: use default params — no quantization, no speculative decoding, \
+0. QUANTIZATION IS FIXED for this run at: {fixed_quantization}. It is applied \
+to every experiment by the agent — DO NOT try to vary it, do not pass any \
+`--quantization` flag via extra_engine_args, and do not reason about which \
+quantization method to use. Treat it as part of the hardware/model setup.
+1. For BASELINES: use default params — no speculative decoding, \
 kv_cache_dtype=auto, scheduling_policy=fcfs.
 2. After baselines, analyze trends and improve based on the optimization goal.
-3. If goal is "optimize_throughput": focus on batching, DP, quantization, high concurrency.
+3. If goal is "optimize_throughput": focus on batching, DP, high concurrency.
 4. If goal is "optimize_latency": focus on TP, enforce_eager, lower batch sizes.
 5. If goal is "optimize_balanced": find configs where TTFT p95 < {latency_threshold} ms \
 AND throughput is maximized.
-6. If goal is "explore": try something new — quantization, speculative decoding, different max_model_len.
+6. If goal is "explore": try something new — speculative decoding, different max_model_len, \
+attention backends.
 7. SPECULATIVE DECODING is a first-class lever — actively probe it once a stable baseline exists, \
 do NOT treat it as a last resort. Sweep across algorithms (vLLM: ngram, eagle, eagle3, medusa, mlp_speculator; \
 SGLang: NEXTN, EAGLE, EAGLE3) AND across `speculative_num_steps` (try at least 3, 5, 8) AND across \
@@ -108,7 +114,7 @@ Estimate available KV budget = total_vram - model_weight_bytes - ~10% headroom, 
 largest power-of-2 that plausibly fits. Halve ONLY on a confirmed OOM — do NOT anchor at 32768 \
 by default; that is a floor, not a starting point.
 10. tensor_parallel_size must divide evenly into {gpu_count} GPUs.
-11. CRITICAL: If a feature (quantization, attention backend, etc.) consistently gives WORSE results than \
+11. CRITICAL: If a feature (attention backend, scheduling policy, etc.) consistently gives WORSE results than \
 baseline ACROSS multiple variants, STOP using it. For speculative decoding specifically: only abandon \
 after trying at least 2 different algorithms AND 2 different `speculative_num_steps` values — a single \
 slow run is not a verdict on the whole family.
@@ -122,7 +128,6 @@ attached below; here are key principles:
 - Chunked prefill + prefix caching work well together for throughput.
 - enforce_eager=true can reduce latency for small batches but hurts throughput.
 - Higher gpu_memory_utilization (0.95) allows more KV cache but risks OOM.
-- fp8 quantization usually gives ~1.5-2x throughput with minimal quality loss.
 - scheduling_policy: ONLY "fcfs" (default) or "priority". Do NOT use "lpm".
 - Speculative decoding is a HIGH-PRIORITY exploration lever — once you have a clean \
   baseline, actively try `speculative_algorithm` ∈ {{ngram, eagle, eagle3, medusa, \
@@ -149,7 +154,6 @@ You are configuring an **SGLang** experiment. The full curated CLI flag referenc
 attached below; here are key principles:
 - Radix cache (prefix caching) ON by default — lpm scheduling benefits from it.
 - num_continuous_decode_steps > 1 reduces scheduling overhead.
-- fp8 quantization usually gives ~1.5-2x throughput with minimal quality loss.
 - scheduling_policy: "fcfs" (default) or "lpm". lpm benefits from prefix caching.
 - Speculative decoding (NEXTN / EAGLE / EAGLE3) is a HIGH-PRIORITY exploration lever — \
   after a clean baseline, ACTIVELY sweep `speculative_algorithm` ∈ {{NEXTN, EAGLE, EAGLE3}} \
@@ -478,6 +482,7 @@ async def planner_node(state: AgentState) -> dict:
         latency_threshold=config.benchmark.latency_threshold_ms,
         model_max_context=hardware.model_max_context,
         gpu_count=hardware.gpu_count,
+        fixed_quantization=config.quantization or "disabled (no quantization)",
     ) + engine_section
 
     if failure_patterns:
@@ -573,10 +578,33 @@ def _str_with_default(s: str | None, default: str) -> str:
     return cleaned if cleaned is not None else default
 
 
+def _strip_flag(args: list[str], flag: str) -> list[str]:
+    """Remove `flag` and its immediate value from a CLI tokens list.
+
+    Handles both `--foo value` and `--foo=value` forms. Used to enforce that
+    knobs the agent fixes at run level (e.g. --quantization) cannot leak
+    through extra_engine_args.
+    """
+    out: list[str] = []
+    skip_next = False
+    prefix_eq = f"{flag}="
+    for tok in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if tok == flag:
+            skip_next = True
+            continue
+        if tok.startswith(prefix_eq):
+            continue
+        out.append(tok)
+    return out
+
+
 def _build_experiment_config(
     output: PlannerOutput,
     hardware: HardwareProfile,
-    config: object,
+    config: AgentConfig,
 ) -> ExperimentConfig:
     """Convert validated PlannerOutput to ExperimentConfig with safety checks.
 
@@ -621,10 +649,13 @@ def _build_experiment_config(
     speculative_num_steps = _zero_to_none(output.speculative_num_steps)
     dp_size = _zero_to_none(output.dp_size)
 
+    # Quantization is fixed at run level — same value for every experiment.
+    # The LLM no longer chooses it, so we read straight from AgentConfig.
+    quantization = _str_to_none(config.quantization)
+
     # Normalize 'null'/'none'/'' sentinel strings to None for optional string fields.
-    # Without this, engine builders emit invalid CLI like `--quantization null`
+    # Without this, engine builders emit invalid CLI like `--attention-backend null`
     # which vLLM/SGLang argparse rejects with `invalid choice: 'null'`.
-    quantization = _str_to_none(output.quantization)
     attention_backend = _str_to_none(output.attention_backend)
     speculative_algorithm = _str_to_none(output.speculative_algorithm)
     speculative_draft_model = _str_to_none(output.speculative_draft_model)
@@ -654,6 +685,12 @@ def _build_experiment_config(
             if k.startswith("SGLANG"):
                 extra_env.pop(k)
 
+    # Defense-in-depth: quantization is fixed by AgentConfig, so an LLM-supplied
+    # `--quantization X` in extra_engine_args would silently override the run
+    # setting (and dedup_flags can't tell which value to keep). Strip both the
+    # flag and its value before they reach the engine builder.
+    extra_engine_args = _strip_flag(output.extra_engine_args, "--quantization")
+
     return ExperimentConfig(
         engine=engine,
         tensor_parallel_size=tp,
@@ -680,7 +717,7 @@ def _build_experiment_config(
         speculative_num_steps=speculative_num_steps,
         num_continuous_decode_steps=num_continuous_decode_steps,
         dp_size=dp_size,
-        extra_engine_args=output.extra_engine_args,
+        extra_engine_args=extra_engine_args,
         extra_env=extra_env,
         rationale=output.rationale,
     )

@@ -316,10 +316,10 @@ class TestBuildExperimentConfigSanitization:
         defaults.update(overrides)
         return PlannerOutput(**defaults)
 
-    def test_string_null_quantization_becomes_none(self):
+    def test_quantization_defaults_to_none_from_config(self):
         from inference_agent.models import AgentConfig
-        cfg = AgentConfig()
-        out = self._output(quantization="null")
+        cfg = AgentConfig()  # quantization defaults to None
+        out = self._output()
         exp = _build_experiment_config(out, self._hw(), cfg)
         assert exp.quantization is None
 
@@ -341,13 +341,38 @@ class TestBuildExperimentConfigSanitization:
         assert exp.speculative_algorithm is None
         assert exp.speculative_draft_model is None
 
-    def test_real_quantization_value_preserved(self):
+    def test_quantization_taken_from_agent_config(self):
+        """Quantization is fixed at run level via AgentConfig.quantization
+        and propagates unchanged to every ExperimentConfig — the LLM no
+        longer controls it."""
         from inference_agent.models import AgentConfig
-        cfg = AgentConfig()
-        out = self._output(quantization="fp8", attention_backend="FLASH_ATTN")
+        cfg = AgentConfig(quantization="fp8")
+        out = self._output(attention_backend="FLASH_ATTN")
         exp = _build_experiment_config(out, self._hw(), cfg)
         assert exp.quantization == "fp8"
         assert exp.attention_backend == "FLASH_ATTN"
+
+    def test_quantization_strips_extra_engine_args_override(self):
+        """LLM cannot smuggle a different --quantization through
+        extra_engine_args — it gets stripped before reaching the engine
+        builder so AgentConfig stays the single source of truth."""
+        from inference_agent.models import AgentConfig
+        cfg = AgentConfig(quantization="fp8")
+        out = self._output(
+            extra_engine_args=[
+                "--quantization", "awq",        # space form
+                "--quantization=gptq",           # equals form
+                "--mamba-scheduler-strategy", "extra_buffer",
+            ],
+        )
+        exp = _build_experiment_config(out, self._hw(), cfg)
+        assert exp.quantization == "fp8"
+        assert "--quantization" not in exp.extra_engine_args
+        assert not any(a.startswith("--quantization=") for a in exp.extra_engine_args)
+        assert "awq" not in exp.extra_engine_args
+        assert exp.extra_engine_args == [
+            "--mamba-scheduler-strategy", "extra_buffer",
+        ]
 
     def test_zero_sentinel_for_optional_numerics(self):
         from inference_agent.models import AgentConfig

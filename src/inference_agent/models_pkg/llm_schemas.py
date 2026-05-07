@@ -20,7 +20,6 @@ class PlannerOutput(BaseModel):
     max_num_batched_tokens: int | None = Field(default=None, description="Max batched tokens (vLLM)")
     max_prefill_tokens: int | None = Field(default=None, description="Max prefill tokens (SGLang)")
     scheduling_policy: str = Field(default="fcfs", description="Scheduling policy")
-    quantization: str | None = Field(default=None, description="Quantization method: fp8, awq, gptq, or null")
     dtype: str = Field(default="auto", description="Data type: auto, float16, bfloat16")
     kv_cache_dtype: str = Field(default="auto", description="KV cache dtype")
     enable_chunked_prefill: bool = Field(default=False, description="Enable chunked prefill")
