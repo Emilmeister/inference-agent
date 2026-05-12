@@ -183,7 +183,11 @@ SELECT
     COALESCE((data->'scores'->>'throughput_score')::float, 0) AS throughput_score,
     COALESCE((data->'scores'->>'latency_score')::float, 0) AS latency_score,
     COALESCE((data->'scores'->>'balanced_score')::float, 0) AS balanced_score,
-    COALESCE((data->'scores'->>'is_pareto_optimal')::bool, false) AS is_pareto
+    COALESCE((data->'scores'->>'is_pareto_optimal')::bool, false) AS is_pareto,
+    COALESCE((data->'benchmark'->>'max_viable_agentic_concurrency')::int, 0) AS max_viable_agentic_concurrency,
+    COALESCE((data->'benchmark'->>'agentic_concurrency_ceiling_hit')::bool, false) AS agentic_ceiling_hit,
+    COALESCE((data->'benchmark'->>'agentic_saturation_concurrency')::int, 0) AS agentic_saturation_concurrency,
+    COALESCE((data->'benchmark'->>'agentic_peak_output_tokens_per_sec')::float, 0) AS agentic_peak_throughput
 FROM experiments
 """
 
@@ -313,6 +317,56 @@ def list_experiment_phases(experiment_ids: tuple[str, ...]) -> pd.DataFrame:
     return pd.DataFrame([dict(r) for r in rows])
 
 
+# ---- Per-turn projection (agentic_turn_metrics) -----------------------------
+_AGENTIC_TURNS_SQL = """
+SELECT
+    e.experiment_id,
+    e.engine,
+    COALESCE(NULLIF(e.data->'config'->>'quantization', ''), 'none') AS quantization,
+    COALESCE(p.value->>'phase_id', '') AS phase_id,
+    COALESCE((p.value->>'concurrency')::int, 0) AS concurrency,
+    COALESCE((t.value->>'session_idx')::int, 0) AS session_idx,
+    COALESCE((t.value->>'turn_idx')::int, 0) AS turn_idx,
+    COALESCE((t.value->>'ttft_ms')::float, 0) AS ttft_ms,
+    COALESCE((t.value->>'tpot_ms')::float, 0) AS tpot_ms,
+    COALESCE((t.value->>'e2e_latency_ms')::float, 0) AS e2e_latency_ms,
+    COALESCE((t.value->>'output_tokens')::int, 0) AS output_tokens,
+    COALESCE((t.value->>'input_tokens')::int, 0) AS input_tokens,
+    NULLIF(t.value->>'error', '') AS error
+FROM experiments e
+CROSS JOIN LATERAL jsonb_array_elements(
+    COALESCE(e.data->'benchmark'->'concurrency_results', '[]'::jsonb)
+) AS p(value)
+CROSS JOIN LATERAL jsonb_array_elements(
+    COALESCE(p.value->'agentic_turn_metrics', '[]'::jsonb)
+) AS t(value)
+WHERE e.experiment_id = ANY(:ids)
+  AND p.value->>'workload_id' = 'agentic_long_context'
+ORDER BY e.experiment_id,
+         (p.value->>'concurrency')::int,
+         (t.value->>'session_idx')::int,
+         (t.value->>'turn_idx')::int
+"""
+
+
+@st.cache_data(ttl=30)
+def list_agentic_turn_metrics(experiment_ids: tuple[str, ...]) -> pd.DataFrame:
+    """Return one row per agentic-session turn for the given experiments.
+
+    Каждая строка — один ход одной сессии в одной agentic фазе. Используется
+    для главного графика "TTFT vs turn_idx" (показывает работает ли prefix-cache).
+    """
+    if not experiment_ids:
+        return pd.DataFrame()
+    Session = _get_sessionmaker()
+    with Session() as session:
+        rows = session.execute(
+            text(_AGENTIC_TURNS_SQL),
+            {"ids": list(experiment_ids)},
+        ).mappings().all()
+    return pd.DataFrame([dict(r) for r in rows])
+
+
 @st.cache_data(ttl=300)
 def get_experiment_payload(experiment_id: str) -> dict | None:
     """Lazy-load the full `ExperimentResult` JSONB for one experiment.
@@ -348,6 +402,7 @@ def delete_experiments(experiment_ids: list[str]) -> int:
 
     list_experiment_summaries.clear()
     list_experiment_phases.clear()
+    list_agentic_turn_metrics.clear()
     get_experiment_payload.clear()
     list_distinct_hardware.clear()
     list_distinct_models.clear()

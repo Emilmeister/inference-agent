@@ -11,6 +11,7 @@ from inference_agent.models_pkg.config import (
     StorageConfig,
 )
 from inference_agent.models_pkg.domain import (
+    AgenticTurnMetric,
     BenchmarkResult,
     ConcurrencyResult,
     EngineType,
@@ -42,6 +43,7 @@ __all__ = [
     "GPUMetricsSnapshot",
     "ExperimentConfig",
     "PercentileStats",
+    "AgenticTurnMetric",
     "ConcurrencyResult",
     "BenchmarkResult",
     "SmokeTestResult",

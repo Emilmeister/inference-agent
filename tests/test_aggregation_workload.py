@@ -76,6 +76,17 @@ class TestWorkloadAwarePeakThroughput:
         result = _aggregate_benchmark(results, {}, {})
         assert result.peak_output_tokens_per_sec == 400.0
 
+    def test_excludes_agentic_long_context_from_peak(self):
+        """Agentic phases should NOT contribute to peak_throughput (own metric)."""
+        results = [
+            _make_conc_result(concurrency=64, throughput=400, workload_id="throughput"),
+            _make_conc_result(
+                concurrency=8, throughput=900, workload_id="agentic_long_context",
+            ),
+        ]
+        result = _aggregate_benchmark(results, {}, {})
+        assert result.peak_output_tokens_per_sec == 400.0
+
 
 class TestWorkloadAwareLatency:
     def test_median_not_min(self):
@@ -93,6 +104,17 @@ class TestWorkloadAwareLatency:
         results = [
             _make_conc_result(concurrency=1, ttft_p95=50, workload_id="agent_short"),
             _make_conc_result(concurrency=1, ttft_p95=500, workload_id="long_context"),
+        ]
+        result = _aggregate_benchmark(results, {}, {})
+        assert result.low_concurrency_ttft_p95_ms == 50.0
+
+    def test_excludes_agentic_long_context_from_latency(self):
+        """Agentic c=1 phase doesn't affect low_concurrency_ttft_p95 either."""
+        # Note: agentic_concurrency_levels start at 4 in production, but the
+        # aggregator must not depend on that.
+        results = [
+            _make_conc_result(concurrency=1, ttft_p95=50, workload_id="agent_short"),
+            _make_conc_result(concurrency=1, ttft_p95=8000, workload_id="agentic_long_context"),
         ]
         result = _aggregate_benchmark(results, {}, {})
         assert result.low_concurrency_ttft_p95_ms == 50.0

@@ -134,6 +134,28 @@ class BenchmarkConfig(BaseModel):
     phase_error_rate_threshold: float = 0.1  # phases with error_rate above this are invalid
     seed: int | None = None  # seed for reproducible prompt generation
 
+    # ── Agentic long-context workload ──────────────────────────────────────
+    # Имитация code-агента: фиксированный префикс + многоходовая беседа, где
+    # после каждого ответа модели в историю докидывается синтетический
+    # tool-result. Контекст растёт от хода к ходу. Главная производная
+    # метрика — max_viable_agentic_concurrency (см. BenchmarkResult).
+    enable_agentic_long_context: bool = False
+    agentic_prefix_tokens: int = 64_000
+    agentic_max_output_tokens: int = 16_384  # потолок per turn (модель может сгенерить меньше)
+    agentic_tool_result_min_tokens: int = 1024
+    agentic_tool_result_max_tokens: int = 5120
+    agentic_turns_per_session: int = 4
+    agentic_concurrency_levels: list[int] = Field(
+        default_factory=lambda: [4, 8, 16]
+    )
+    agentic_session_timeout_sec: int = 1800   # 30 min per session
+    agentic_per_turn_timeout_sec: int = 600   # один HTTP request максимум 10 мин
+
+    # SLO для производной метрики "max viable parallel agents"
+    agentic_ttft_p95_slo_ms: float = 10_000.0  # turn-level (turn-1 prefill 64k объективно медленный)
+    agentic_e2e_p95_slo_ms: float = 0.0        # 0 → авто = 0.8 * session_timeout * 1000
+    agentic_concurrency_ceiling_search: bool = False  # если все уровни прошли — добавить 2x фазу
+
 
 class ExperimentsConfig(BaseModel):
     max_experiments: int = 30

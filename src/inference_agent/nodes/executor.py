@@ -8,7 +8,11 @@ import statistics
 import time
 
 from inference_agent.benchmark.gpu_monitor import GPUMonitor
-from inference_agent.benchmark.runner import get_benchmark_phases, run_benchmark_phase
+from inference_agent.benchmark.runner import (
+    get_benchmark_phases,
+    run_agentic_long_context_phase,
+    run_benchmark_phase,
+)
 from inference_agent.benchmark.smoke_tests import run_smoke_tests
 from inference_agent.engines.base import BaseEngine
 from inference_agent.engines.sglang import SGLangEngine
@@ -182,26 +186,51 @@ async def _run_all_phases(
 
     for phase_id, workload_id, concurrency, prompt_len, max_out in phases:
         is_warmup = workload_id == "warmup"
+        is_agentic = workload_id == "agentic_long_context"
         duration = 10 if is_warmup else config.benchmark.duration_per_level_sec
 
-        logger.info(
-            "  Phase: %s [%s] (c=%d, prompt=%d, max_out=%d, dur=%ds)",
-            phase_id, workload_id, concurrency, prompt_len, max_out, duration,
-        )
+        if is_agentic:
+            logger.info(
+                "  Phase: %s [%s] (c=%d, prefix=%d, max_out=%d, turns=%d)",
+                phase_id, workload_id, concurrency, prompt_len, max_out,
+                config.benchmark.agentic_turns_per_session,
+            )
+        else:
+            logger.info(
+                "  Phase: %s [%s] (c=%d, prompt=%d, max_out=%d, dur=%ds)",
+                phase_id, workload_id, concurrency, prompt_len, max_out, duration,
+            )
 
         try:
-            result = await run_benchmark_phase(
-                api_base_url=engine.api_base_url(),
-                model_name=config.model_name,
-                concurrency=concurrency,
-                prompt_length=prompt_len,
-                max_output_tokens=max_out,
-                duration_sec=duration,
-                warmup=is_warmup,
-                seed=seed,
-                workload_id=workload_id,
-                phase_id=phase_id,
-            )
+            if is_agentic:
+                result = await run_agentic_long_context_phase(
+                    api_base_url=engine.api_base_url(),
+                    model_name=config.model_name,
+                    concurrency=concurrency,
+                    prefix_tokens=prompt_len,
+                    max_output_tokens=max_out,
+                    turns=config.benchmark.agentic_turns_per_session,
+                    tool_result_min=config.benchmark.agentic_tool_result_min_tokens,
+                    tool_result_max=config.benchmark.agentic_tool_result_max_tokens,
+                    session_timeout_sec=config.benchmark.agentic_session_timeout_sec,
+                    per_turn_timeout_sec=config.benchmark.agentic_per_turn_timeout_sec,
+                    seed=seed,
+                    workload_id=workload_id,
+                    phase_id=phase_id,
+                )
+            else:
+                result = await run_benchmark_phase(
+                    api_base_url=engine.api_base_url(),
+                    model_name=config.model_name,
+                    concurrency=concurrency,
+                    prompt_length=prompt_len,
+                    max_output_tokens=max_out,
+                    duration_sec=duration,
+                    warmup=is_warmup,
+                    seed=seed,
+                    workload_id=workload_id,
+                    phase_id=phase_id,
+                )
             if not is_warmup:
                 # Error-rate gate: discard phases with too many errors
                 if result.error_rate > error_rate_threshold:
@@ -542,7 +571,9 @@ async def executor_node(state: AgentState) -> dict:
     await stop_container(container_name)
 
     # ── Step 7: Aggregate results ─────────────────────────────────────
-    benchmark = _aggregate_benchmark(concurrency_results, gpu_agg, kv_metrics)
+    benchmark = _aggregate_benchmark(
+        concurrency_results, gpu_agg, kv_metrics, config.benchmark,
+    )
 
     duration = time.time() - start_time
     all_errors = startup_errors + phase_errors
@@ -608,12 +639,15 @@ def _aggregate_benchmark(
     results: list[ConcurrencyResult],
     gpu_agg: dict[int, dict],
     kv_metrics: dict,
+    benchmark_config=None,
 ) -> BenchmarkResult:
     """Aggregate per-phase results into a single BenchmarkResult.
 
     Workload-aware aggregation:
-    - peak_throughput: max from agent_short + throughput workloads (not stress/long_context)
+    - peak_throughput: max from agent_short + throughput workloads (not stress/long_context/agentic_long_context)
     - low_concurrency_ttft_p95: median of p95 TTFTs from c=1 agent_short phases
+    - max_viable_agentic_concurrency: highest agentic concurrency that passes
+      error_rate gate + TTFT p95 SLO + E2E p95 SLO (см. BenchmarkConfig agentic_*).
     """
     if not results:
         return BenchmarkResult()
@@ -660,6 +694,9 @@ def _aggregate_benchmark(
     gpu_power = [gpu_agg[i]["power_avg"] for i in sorted(gpu_agg)]
     gpu_temp = [gpu_agg[i]["temp_max"] for i in sorted(gpu_agg)]
 
+    # ── Agentic derived metrics (max viable parallel agents, saturation) ──
+    agentic_metrics = _compute_agentic_metrics(results, benchmark_config)
+
     return BenchmarkResult(
         ttft_ms=peak_throughput_result.ttft_ms,
         tpot_ms=peak_throughput_result.tpot_ms,
@@ -679,4 +716,61 @@ def _aggregate_benchmark(
         gpu_power_draw_watts=gpu_power,
         gpu_temperature_celsius=gpu_temp,
         concurrency_results=results,
+        max_viable_agentic_concurrency=agentic_metrics["max_viable"],
+        agentic_concurrency_ceiling_hit=agentic_metrics["ceiling_hit"],
+        agentic_saturation_concurrency=agentic_metrics["saturation"],
+        agentic_peak_output_tokens_per_sec=agentic_metrics["peak_throughput"],
     )
+
+
+def _compute_agentic_metrics(
+    results: list[ConcurrencyResult],
+    benchmark_config,
+) -> dict:
+    """Derive max_viable_agentic_concurrency и сопутствующие метрики.
+
+    Возвращает dict: max_viable, ceiling_hit, saturation, peak_throughput.
+    Если agentic-фаз не было или benchmark_config=None → все нули/False.
+
+    Гейты для "viable":
+      1) error_rate ≤ phase_error_rate_threshold
+      2) ttft_ms.p95 ≤ agentic_ttft_p95_slo_ms
+      3) e2e_latency_ms.p95 ≤ agentic_e2e_p95_slo_ms (0 → авто-вычисление)
+    """
+    agentic_results = [r for r in results if r.workload_id == "agentic_long_context"]
+    if not agentic_results or benchmark_config is None:
+        return {
+            "max_viable": 0,
+            "ceiling_hit": False,
+            "saturation": 0,
+            "peak_throughput": 0.0,
+        }
+
+    error_rate_threshold = benchmark_config.phase_error_rate_threshold
+    ttft_slo = benchmark_config.agentic_ttft_p95_slo_ms
+    e2e_slo = benchmark_config.agentic_e2e_p95_slo_ms
+    if e2e_slo <= 0:
+        # Auto: 80% of session timeout (sec → ms)
+        e2e_slo = benchmark_config.agentic_session_timeout_sec * 1000.0 * 0.8
+
+    viable_concurrencies = [
+        r.concurrency for r in agentic_results
+        if r.error_rate <= error_rate_threshold
+        and 0 < r.ttft_ms.p95 <= ttft_slo
+        and 0 < r.e2e_latency_ms.p95 <= e2e_slo
+    ]
+    max_viable = max(viable_concurrencies) if viable_concurrencies else 0
+
+    sweep_max = max(r.concurrency for r in agentic_results)
+    ceiling_hit = max_viable > 0 and max_viable == sweep_max
+
+    peak_result = max(agentic_results, key=lambda r: r.output_tokens_per_sec)
+    saturation = peak_result.concurrency
+    peak_throughput = peak_result.output_tokens_per_sec
+
+    return {
+        "max_viable": max_viable,
+        "ceiling_hit": ceiling_hit,
+        "saturation": saturation,
+        "peak_throughput": peak_throughput,
+    }

@@ -11,7 +11,12 @@ import time
 
 import aiohttp
 
-from inference_agent.models import BenchmarkConfig, ConcurrencyResult, PercentileStats
+from inference_agent.models import (
+    AgenticTurnMetric,
+    BenchmarkConfig,
+    ConcurrencyResult,
+    PercentileStats,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -104,25 +109,20 @@ def _generate_prompt(length_tokens: int, rng: random.Random) -> str:
     return f"{prefix}{text}"
 
 
-async def _send_request(
+async def _stream_chat_completion(
     session: aiohttp.ClientSession,
     url: str,
-    prompt_length: int,
-    max_tokens: int,
-    model: str,
-    rng: random.Random,
+    payload: dict,
+    timeout_sec: int,
 ) -> dict:
-    """Send a single chat completion request and measure timing."""
-    prompt = _generate_prompt(prompt_length, rng)
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens,
-        "temperature": round(rng.random(), 2),
-        "stream": True,
-        "stream_options": {"include_usage": True},
-    }
+    """Stream a chat-completion request and collect timing + accumulated content.
 
+    Single source of truth for SSE parsing — used by both single-shot
+    `_send_request` и multi-turn `_send_agent_turn`. Returns:
+      ttft_ms, tpot_ms, itl_ms_list, e2e_latency_ms, output_tokens,
+      input_tokens (из usage.prompt_tokens или 0), error, token_count_source,
+      content (накопленный assistant-text для multi-turn)
+    """
     result = {
         "ttft_ms": 0.0,
         "tpot_ms": 0.0,
@@ -132,6 +132,7 @@ async def _send_request(
         "input_tokens": 0,
         "error": None,
         "token_count_source": "sse_delta",  # or "usage_api"
+        "content": "",
     }
 
     start_time = time.perf_counter()
@@ -139,12 +140,14 @@ async def _send_request(
     last_token_time = None
     token_count = 0
     usage_completion_tokens = 0
+    usage_prompt_tokens = 0
+    content_parts: list[str] = []
 
     try:
         async with session.post(
             url,
             json=payload,
-            timeout=aiohttp.ClientTimeout(total=300),
+            timeout=aiohttp.ClientTimeout(total=timeout_sec),
         ) as resp:
             if resp.status != 200:
                 body = await resp.text()
@@ -175,10 +178,20 @@ async def _send_request(
                             ct = usage.get("completion_tokens")
                             if ct and ct > 0:
                                 usage_completion_tokens = ct
+                            pt = usage.get("prompt_tokens")
+                            if pt and pt > 0:
+                                usage_prompt_tokens = pt
 
                         choices = data.get("choices", [])
                         if choices:
                             delta = choices[0].get("delta", {})
+                            # Accumulate visible text content for multi-turn.
+                            # Only standard `content` field — reasoning/tool
+                            # calls не предназначены для скармливания обратно
+                            # в messages как assistant-content.
+                            content_field = delta.get("content")
+                            if isinstance(content_field, str) and content_field:
+                                content_parts.append(content_field)
                             # Check all text fields in delta for token content
                             # (different engines use different field names:
                             #  content, reasoning_content, reasoning, etc.)
@@ -226,8 +239,10 @@ async def _send_request(
         decode_time = (last_token_time - first_token_time) * 1000
         result["tpot_ms"] = decode_time / (token_count - 1)
 
-    # Rough input token estimate (~4 chars per token)
-    result["input_tokens"] = len(prompt) // 4
+    if usage_prompt_tokens > 0:
+        result["input_tokens"] = usage_prompt_tokens
+
+    result["content"] = "".join(content_parts)
 
     # Some engines return HTTP 200 with an error JSON or an empty stream when
     # the request is invalid (e.g. context length exceeded for a 100K prompt
@@ -237,6 +252,34 @@ async def _send_request(
     # errors=0" — and the phase error_rate gate wouldn't trigger.
     if result["output_tokens"] == 0:
         result["error"] = "Empty response: no tokens streamed (HTTP 200)"
+
+    return result
+
+
+async def _send_request(
+    session: aiohttp.ClientSession,
+    url: str,
+    prompt_length: int,
+    max_tokens: int,
+    model: str,
+    rng: random.Random,
+) -> dict:
+    """Send a single chat completion request and measure timing."""
+    prompt = _generate_prompt(prompt_length, rng)
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": round(rng.random(), 2),
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+
+    result = await _stream_chat_completion(session, url, payload, timeout_sec=300)
+
+    # Fall back to rough input estimate if the engine didn't return prompt_tokens.
+    if result["input_tokens"] == 0:
+        result["input_tokens"] = len(prompt) // 4
 
     return result
 
@@ -342,6 +385,250 @@ async def run_benchmark_phase(
     return result
 
 
+# ── Agentic long-context (multi-turn code-agent simulation) ──────────────
+
+
+async def _send_agent_turn(
+    session: aiohttp.ClientSession,
+    url: str,
+    model: str,
+    messages: list[dict],
+    max_output_tokens: int,
+    rng: random.Random,
+    timeout_sec: int,
+) -> dict:
+    """Send one turn of a multi-turn agentic conversation.
+
+    Same return shape as _stream_chat_completion (timing + content), но шлёт
+    готовый messages-список (не synthetic single prompt). Used by
+    `_run_agent_session`.
+    """
+    payload = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_output_tokens,
+        "temperature": round(rng.random(), 2),
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    return await _stream_chat_completion(session, url, payload, timeout_sec=timeout_sec)
+
+
+async def _run_agent_session(
+    session_idx: int,
+    http_session: aiohttp.ClientSession,
+    url: str,
+    model: str,
+    prefix_tokens: int,
+    turns: int,
+    max_output_tokens: int,
+    tool_result_min: int,
+    tool_result_max: int,
+    rng: random.Random,
+    per_turn_timeout_sec: int,
+) -> list[dict]:
+    """Run one full agentic session of N turns, return per-turn metric dicts.
+
+    Сессия:
+      1. Префикс ~prefix_tokens (как в обычном _generate_prompt).
+      2. На каждом ходе:
+         - Отправляем messages → получаем assistant content + метрики
+         - Дописываем assistant message в history
+         - Дописываем synthetic tool-result (rng.randint(min,max) токенов) как user
+      3. Если ход вернул error — break (нет смысла продолжать сломанную сессию).
+
+    Returns list[dict] per turn:
+      session_idx, turn_idx, ttft_ms, tpot_ms, e2e_latency_ms, output_tokens,
+      input_tokens, error.
+    `input_tokens` берём из usage.prompt_tokens; если нет — оцениваем как
+    len(joined messages) // 4 (та же rough формула что и в _send_request).
+    """
+    prefix = _generate_prompt(prefix_tokens, rng)
+    messages: list[dict] = [{"role": "user", "content": prefix}]
+    per_turn: list[dict] = []
+
+    for turn_idx in range(turns):
+        result = await _send_agent_turn(
+            http_session, url, model, messages, max_output_tokens,
+            rng, per_turn_timeout_sec,
+        )
+
+        # Fallback rough input estimate if engine не вернул usage.prompt_tokens.
+        if result["input_tokens"] == 0:
+            joined = sum(len(m.get("content", "")) for m in messages)
+            result["input_tokens"] = joined // 4
+
+        per_turn.append({
+            "session_idx": session_idx,
+            "turn_idx": turn_idx,
+            "ttft_ms": result["ttft_ms"],
+            "tpot_ms": result["tpot_ms"],
+            "itl_ms_list": result["itl_ms_list"],
+            "e2e_latency_ms": result["e2e_latency_ms"],
+            "output_tokens": result["output_tokens"],
+            "input_tokens": result["input_tokens"],
+            "error": result["error"],
+        })
+
+        if result["error"]:
+            break
+
+        # Append assistant response and a simulated tool-call result for the next turn.
+        assistant_content = result["content"]
+        if not assistant_content:
+            # No visible content but no error — defensively stop the session
+            # (we have nothing to feed into the next turn's history).
+            break
+        messages.append({"role": "assistant", "content": assistant_content})
+
+        tool_len = rng.randint(tool_result_min, tool_result_max)
+        tool_text = _generate_prompt(tool_len, rng)
+        messages.append({
+            "role": "user",
+            "content": f"[tool_result]\n{tool_text}",
+        })
+
+    return per_turn
+
+
+async def run_agentic_long_context_phase(
+    api_base_url: str,
+    model_name: str,
+    concurrency: int,
+    prefix_tokens: int,
+    max_output_tokens: int,
+    turns: int,
+    tool_result_min: int,
+    tool_result_max: int,
+    session_timeout_sec: int,
+    per_turn_timeout_sec: int,
+    seed: int | None = None,
+    workload_id: str = "agentic_long_context",
+    phase_id: str = "",
+) -> ConcurrencyResult:
+    """Run one agentic long-context phase: N parallel sessions × `turns` turns each.
+
+    Sample size = concurrency × turns (e.g. 16 × 4 = 64 turn-requests).
+    Phase ends когда все сессии завершились или истёк session_timeout_sec
+    per worker. Per-turn metrics складываются в `agentic_turn_metrics` поле
+    результата — это ключевой данные для дашборд-аналитики (TTFT vs turn_idx).
+    """
+    url = f"{api_base_url}/chat/completions"
+    master_rng = random.Random(seed)
+
+    connector = aiohttp.TCPConnector(limit=concurrency + 10)
+    start_time = time.perf_counter()
+
+    async with aiohttp.ClientSession(connector=connector) as http_session:
+
+        async def _worker(idx: int) -> list[dict]:
+            # Per-session RNG, derived from master so the whole phase is reproducible.
+            session_rng = random.Random(master_rng.randint(0, 2**31 - 1))
+            try:
+                return await asyncio.wait_for(
+                    _run_agent_session(
+                        idx, http_session, url, model_name,
+                        prefix_tokens, turns, max_output_tokens,
+                        tool_result_min, tool_result_max,
+                        session_rng, per_turn_timeout_sec,
+                    ),
+                    timeout=session_timeout_sec,
+                )
+            except asyncio.TimeoutError:
+                return [{
+                    "session_idx": idx,
+                    "turn_idx": 0,
+                    "ttft_ms": 0.0,
+                    "tpot_ms": 0.0,
+                    "itl_ms_list": [],
+                    "e2e_latency_ms": session_timeout_sec * 1000.0,
+                    "output_tokens": 0,
+                    "input_tokens": 0,
+                    "error": f"Session timeout after {session_timeout_sec}s",
+                }]
+
+        per_session_results = await asyncio.gather(
+            *[_worker(i) for i in range(concurrency)]
+        )
+
+    wall_time = time.perf_counter() - start_time
+
+    # Flatten per-turn results from all sessions.
+    flat: list[dict] = []
+    for session_results in per_session_results:
+        flat.extend(session_results)
+
+    ttft_list: list[float] = []
+    tpot_list: list[float] = []
+    itl_list: list[float] = []
+    e2e_list: list[float] = []
+    total_output_tokens = 0
+    total_input_tokens = 0
+    errors = 0
+    error_details: list[str] = []
+    turn_metrics: list[AgenticTurnMetric] = []
+
+    for r in flat:
+        turn_metrics.append(AgenticTurnMetric(
+            session_idx=r["session_idx"],
+            turn_idx=r["turn_idx"],
+            ttft_ms=r["ttft_ms"],
+            tpot_ms=r["tpot_ms"],
+            e2e_latency_ms=r["e2e_latency_ms"],
+            output_tokens=r["output_tokens"],
+            input_tokens=r["input_tokens"],
+            error=r["error"],
+        ))
+        if r["error"]:
+            errors += 1
+            error_details.append(r["error"])
+            continue
+        if r["ttft_ms"] > 0:
+            ttft_list.append(r["ttft_ms"])
+        if r["tpot_ms"] > 0:
+            tpot_list.append(r["tpot_ms"])
+        itl_list.extend(r["itl_ms_list"])
+        if r["e2e_latency_ms"] > 0:
+            e2e_list.append(r["e2e_latency_ms"])
+        total_output_tokens += r["output_tokens"]
+        total_input_tokens += r["input_tokens"]
+
+    total_requests = len(flat)
+    successful = total_requests - errors
+
+    result = ConcurrencyResult(
+        concurrency=concurrency,
+        prompt_length=prefix_tokens,
+        max_output_tokens=max_output_tokens,
+        num_requests=total_requests,
+        workload_id=workload_id,
+        phase_id=phase_id,
+        ttft_ms=_compute_percentiles(ttft_list),
+        tpot_ms=_compute_percentiles(tpot_list),
+        itl_ms=_compute_percentiles(itl_list),
+        e2e_latency_ms=_compute_percentiles(e2e_list),
+        requests_per_sec=successful / wall_time if wall_time > 0 else 0,
+        input_tokens_per_sec=total_input_tokens / wall_time if wall_time > 0 else 0,
+        output_tokens_per_sec=total_output_tokens / wall_time if wall_time > 0 else 0,
+        total_tokens_per_sec=(total_input_tokens + total_output_tokens) / wall_time
+        if wall_time > 0
+        else 0,
+        errors=errors,
+        error_rate=errors / total_requests if total_requests > 0 else 0.0,
+        error_details=error_details[:10],
+        agentic_turn_metrics=turn_metrics,
+    )
+
+    logger.info(
+        "Agentic phase complete: c=%d, sessions=%d, turns/session=%d, "
+        "total_turns=%d, throughput=%.1f tok/s, ttft_p95=%.1f ms, errors=%d",
+        concurrency, concurrency, turns, total_requests,
+        result.output_tokens_per_sec, result.ttft_ms.p95, errors,
+    )
+
+    return result
+
+
 # ── Benchmark phase matrix ────────────────────────────────────────────────
 
 # Workload classification thresholds
@@ -412,6 +699,36 @@ def get_benchmark_phases(
                 )
                 continue
             phases.append((f"c{conc}_p{plen}", "long_context", conc, plen, max_out))
+
+    # Agentic long-context phases — multi-turn code-agent simulation. Контекст
+    # растёт от хода к ходу, поэтому проверяем что max_model_len держит
+    # prefix + turns × (max_output + tool_result_max).
+    if cfg.enable_agentic_long_context:
+        agentic_required = (
+            cfg.agentic_prefix_tokens
+            + cfg.agentic_turns_per_session
+            * (cfg.agentic_max_output_tokens + cfg.agentic_tool_result_max_tokens)
+        )
+        if agentic_required > effective_max:
+            logger.info(
+                "Skipping agentic_long_context: required %d (prefix %d + %d turns × "
+                "(out %d + tool %d)) exceeds effective context %d",
+                agentic_required,
+                cfg.agentic_prefix_tokens,
+                cfg.agentic_turns_per_session,
+                cfg.agentic_max_output_tokens,
+                cfg.agentic_tool_result_max_tokens,
+                effective_max,
+            )
+        else:
+            for conc in cfg.agentic_concurrency_levels:
+                phases.append((
+                    f"agentic_c{conc}_p{cfg.agentic_prefix_tokens}",
+                    "agentic_long_context",
+                    conc,
+                    cfg.agentic_prefix_tokens,
+                    cfg.agentic_max_output_tokens,
+                ))
 
     # Sort by concurrency for stable, predictable ordering (warmup stays first)
     head, tail = phases[:1], phases[1:]

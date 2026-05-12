@@ -18,6 +18,7 @@ from db import (
     HardwareKey,
     delete_experiments,
     get_experiment_payload,
+    list_agentic_turn_metrics,
     list_distinct_engines,
     list_distinct_hardware,
     list_distinct_models,
@@ -199,6 +200,7 @@ tabs = st.tabs([
     "GPU Efficiency",
     "Reproduce",
     "Tables",
+    "Agentic",
     "Manage",
 ])
 
@@ -871,6 +873,160 @@ with tabs[7]:
 
 
 with tabs[8]:
+    st.header("Agentic Long-Context Analytics")
+    st.caption(
+        "Multi-turn code-agent simulation: фиксированный префикс ~64k + N ходов, "
+        "после каждого ответа модели в историю докидывается synthetic tool-result "
+        "1–5k токенов. Главная производная метрика — **max parallel agents** "
+        "(сколько code-агентов одновременно выдержит конфиг)."
+    )
+
+    agentic_phases_df = phase_df[phase_df["workload_id"] == "agentic_long_context"].copy() if not phase_df.empty else pd.DataFrame()
+    agentic_summary = filtered[filtered["max_viable_agentic_concurrency"] > 0].copy() if "max_viable_agentic_concurrency" in filtered.columns else pd.DataFrame()
+
+    if agentic_phases_df.empty:
+        st.info(
+            "No agentic_long_context phases found. Enable in `config.yaml` under "
+            "`benchmark.enable_agentic_long_context: true` and re-run the agent."
+        )
+    else:
+        # Pull per-turn rows once for the active selection.
+        agentic_ids = tuple(sorted(agentic_phases_df["experiment_id"].astype(str).unique()))
+        turns_df = list_agentic_turn_metrics(agentic_ids)
+
+        # ── KPI row ──
+        col1, col2, col3, col4 = st.columns(4)
+
+        if not agentic_summary.empty:
+            best_row = agentic_summary.sort_values(
+                "max_viable_agentic_concurrency", ascending=False,
+            ).iloc[0]
+            best_max = int(best_row["max_viable_agentic_concurrency"])
+            best_ceiling_hit = bool(best_row.get("agentic_ceiling_hit", False))
+            col1.metric(
+                "Max parallel agents (best config)",
+                f"{best_max:d}{'+' if best_ceiling_hit else ''}",
+                help=(
+                    "Highest concurrency where TTFT p95 ≤ SLO and error_rate ≤ threshold. "
+                    "'+' means we hit the sweep ceiling — the real number may be higher "
+                    "(enable agentic_concurrency_ceiling_search)."
+                ),
+            )
+        else:
+            col1.metric("Max parallel agents (best config)", "n/a")
+
+        peak_tp = agentic_phases_df["output_tokens_per_sec"].max() if not agentic_phases_df.empty else 0.0
+        col2.metric("Peak agentic throughput", _format_metric(peak_tp, " tok/s", precision=1))
+
+        if not turns_df.empty:
+            turn0 = turns_df[(turns_df["turn_idx"] == 0) & (turns_df["error"].isna()) & (turns_df["ttft_ms"] > 0)]
+            turn1plus = turns_df[(turns_df["turn_idx"] >= 1) & (turns_df["error"].isna()) & (turns_df["ttft_ms"] > 0)]
+            col3.metric(
+                "Median TTFT, turn 1 (cold prefill)",
+                _format_metric(turn0["ttft_ms"].median(), " ms", precision=0) if not turn0.empty else "n/a",
+            )
+            col4.metric(
+                "Median TTFT, turn 2+ (warm cache)",
+                _format_metric(turn1plus["ttft_ms"].median(), " ms", precision=0) if not turn1plus.empty else "n/a",
+            )
+        else:
+            col3.metric("Median TTFT, turn 1", "n/a")
+            col4.metric("Median TTFT, turn 2+", "n/a")
+
+        # ── Leaderboard: max parallel agents per engine/config ──
+        st.subheader("Max parallel agents per experiment")
+        if not agentic_summary.empty:
+            leaderboard = agentic_summary[[
+                "experiment_id", "engine", "quantization", "tp",
+                "prefix_caching", "chunked_prefill",
+                "max_viable_agentic_concurrency",
+                "agentic_ceiling_hit",
+                "agentic_saturation_concurrency",
+                "agentic_peak_throughput",
+                "prefix_hit_rate",
+            ]].sort_values(
+                ["max_viable_agentic_concurrency", "agentic_peak_throughput"],
+                ascending=[False, False],
+            ).rename(columns={
+                "max_viable_agentic_concurrency": "max_agents",
+                "agentic_ceiling_hit": "ceiling_hit",
+                "agentic_saturation_concurrency": "saturation_c",
+                "agentic_peak_throughput": "peak_tok/s",
+                "prefix_hit_rate": "prefix_cache_hit",
+            })
+            st.dataframe(leaderboard, use_container_width=True, hide_index=True)
+        else:
+            st.info("No experiments passed the agentic SLO gates yet.")
+
+        # ── Throughput by concurrency (per engine) ──
+        st.subheader("Agentic throughput by concurrency")
+        fig_tp = px.bar(
+            agentic_phases_df,
+            x="concurrency",
+            y="output_tokens_per_sec",
+            color="engine",
+            barmode="group",
+            hover_data=["experiment_id", "ttft_p95", "errors"],
+            labels={"output_tokens_per_sec": "Output tokens/sec (aggregate)"},
+        )
+        st.plotly_chart(fig_tp, use_container_width=True)
+
+        # ── TTFT vs turn_idx (the killer chart) ──
+        if not turns_df.empty:
+            st.subheader("TTFT vs turn index — does prefix-cache work?")
+            st.caption(
+                "Turn 0 = cold prefill of the ~64k prefix. Turn 1+ should be a "
+                "cache-hit and TTFT should drop dramatically. A flat line means "
+                "prefix-caching is disabled or not effective for this config."
+            )
+            ok_turns = turns_df[(turns_df["error"].isna()) & (turns_df["ttft_ms"] > 0)].copy()
+            if not ok_turns.empty:
+                fig_ttft = px.box(
+                    ok_turns,
+                    x="turn_idx",
+                    y="ttft_ms",
+                    color="engine",
+                    points="all",
+                    labels={"turn_idx": "Turn index (0 = cold)", "ttft_ms": "TTFT, ms"},
+                )
+                st.plotly_chart(fig_ttft, use_container_width=True)
+
+                # Scatter: input_tokens (per turn) vs ttft_ms
+                st.subheader("Per-turn input length vs TTFT")
+                st.caption(
+                    "Linear (rising) trend ⇒ engine is doing full prefill every turn "
+                    "(prefix-cache miss). Flat trend ⇒ cache works."
+                )
+                fig_scatter = px.scatter(
+                    ok_turns,
+                    x="input_tokens",
+                    y="ttft_ms",
+                    color="engine",
+                    symbol="turn_idx",
+                    hover_data=["experiment_id", "concurrency", "session_idx", "turn_idx"],
+                    labels={"input_tokens": "Per-turn input tokens", "ttft_ms": "TTFT, ms"},
+                )
+                st.plotly_chart(fig_scatter, use_container_width=True)
+            else:
+                st.info("No successful turns to plot.")
+
+        # ── Per-phase table ──
+        st.subheader("Per-agentic-phase breakdown")
+        st.dataframe(
+            agentic_phases_df[[
+                "experiment_id", "engine", "phase_id", "concurrency",
+                "num_requests", "output_tokens_per_sec",
+                "ttft_p50", "ttft_p95", "tpot_p95", "e2e_p95",
+                "errors", "error_rate",
+            ]].sort_values(
+                ["experiment_id", "concurrency"],
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+with tabs[9]:
     st.header("Manage Experiments")
     st.caption(
         "Permanently delete experiments from the database. This cannot be undone; "

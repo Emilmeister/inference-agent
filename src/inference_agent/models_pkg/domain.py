@@ -145,6 +145,23 @@ class PercentileStats(BaseModel):
     cv: float = 0.0
 
 
+class AgenticTurnMetric(BaseModel):
+    """Per-turn metric for one ход одной agentic-сессии.
+
+    Заполняется только в run_agentic_long_context_phase. Дашборд использует это
+    поле, чтобы построить TTFT vs turn_idx box-plot (главный график agentic
+    аналитики: turn 0 — cold prefill, turn 1+ — должен быть кэш-хит).
+    """
+    session_idx: int
+    turn_idx: int
+    ttft_ms: float = 0.0
+    tpot_ms: float = 0.0
+    e2e_latency_ms: float = 0.0
+    output_tokens: int = 0
+    input_tokens: int = 0  # реальный input этого хода (растёт от хода к ходу)
+    error: str | None = None
+
+
 class ConcurrencyResult(BaseModel):
     concurrency: int
     prompt_length: int
@@ -152,7 +169,7 @@ class ConcurrencyResult(BaseModel):
     num_requests: int = 0
 
     # Phase identification
-    workload_id: str = ""    # agent_short | throughput | stress | long_context
+    workload_id: str = ""    # agent_short | throughput | stress | long_context | agentic_long_context
     phase_id: str = ""       # unique id: e.g. "c1_p512"
 
     ttft_ms: PercentileStats = Field(default_factory=PercentileStats)
@@ -172,6 +189,9 @@ class ConcurrencyResult(BaseModel):
     errors: int = 0
     error_rate: float = 0.0  # errors / num_requests
     error_details: list[str] = Field(default_factory=list)
+
+    # Per-turn metrics — пустой для не-agentic фаз.
+    agentic_turn_metrics: list[AgenticTurnMetric] = Field(default_factory=list)
 
 
 class BenchmarkResult(BaseModel):
@@ -215,6 +235,22 @@ class BenchmarkResult(BaseModel):
 
     # Per-concurrency breakdown
     concurrency_results: list[ConcurrencyResult] = Field(default_factory=list)
+
+    # Agentic long-context derived metrics. 0/False, если agentic-фаз не было
+    # или ни одна не прошла гейты. См. _aggregate_benchmark в executor.
+    #   max_viable_agentic_concurrency — наибольший concurrency, прошедший
+    #     error_rate gate + TTFT p95 SLO + E2E p95 SLO. Главное число для
+    #     прод-сайзинга: сколько code-агентов параллельно выдержит конфиг.
+    #   ceiling_hit — True если max passed == max sweep level: реальный потолок
+    #     может быть выше, sweep его не нашёл (включи agentic_concurrency_ceiling_search).
+    #   saturation_concurrency — concurrency той agentic-фазы, где
+    #     output_tokens_per_sec максимален (точка насыщения throughput).
+    #   peak_output_tokens_per_sec — сам пик throughput внутри agentic-фаз
+    #     (отдельно от общего peak, т.к. agentic исключён из peak_output_tokens_per_sec).
+    max_viable_agentic_concurrency: int = 0
+    agentic_concurrency_ceiling_hit: bool = False
+    agentic_saturation_concurrency: int = 0
+    agentic_peak_output_tokens_per_sec: float = 0.0
 
 
 # ── Smoke Tests ────────────────────────────────────────────────────────────
