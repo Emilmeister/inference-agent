@@ -15,6 +15,7 @@ from inference_agent.models import (
     HardwareProfile,
 )
 from inference_agent.state import AgentState
+from inference_agent.utils.container import pull_image
 
 logger = logging.getLogger(__name__)
 
@@ -455,6 +456,36 @@ async def discovery_node(state: AgentState) -> dict:
         max_context, is_vlm, mtp_num_layers, hidden_size, num_layers,
     )
 
+    # Auto-pull images for requested engines that aren't present locally.
+    # `_detect_available_engines` only checks for ANY tag of the engine's
+    # image prefix; the exact tag in `config.container.*_image` may still
+    # be missing and trigger a slow implicit pull at experiment-start time.
+    # Doing the pull here keeps timeouts explicit and surfaces network /
+    # registry problems before we waste discovery + planning work.
+    image_for_engine = {
+        EngineType.VLLM: config.container.vllm_image,
+        EngineType.SGLANG: config.container.sglang_image,
+    }
+    missing = [e for e in config.experiments.engines if e not in engines]
+    for engine in missing:
+        image = image_for_engine.get(engine)
+        if not image:
+            continue
+        pull_timeout = config.startup.image_pull_timeout_sec
+        logger.info(
+            "Engine %s image not present locally — pulling %s (timeout %ds)...",
+            engine.value, image, pull_timeout,
+        )
+        try:
+            await pull_image(image, timeout=pull_timeout)
+            engines.append(engine)
+            logger.info("Pulled %s for engine %s", image, engine.value)
+        except RuntimeError as e:
+            logger.warning(
+                "Failed to pull %s for engine %s: %s",
+                image, engine.value, e,
+            )
+
     # Filter engines to only those requested in config
     available = [e for e in engines if e in config.experiments.engines]
 
@@ -462,10 +493,10 @@ async def discovery_node(state: AgentState) -> dict:
         requested = [e.value for e in config.experiments.engines]
         found = [e.value for e in engines]
         raise RuntimeError(
-            f"No usable engine images found. "
+            f"No usable engine images available even after auto-pull. "
             f"Requested engines: {requested}. "
             f"Images found locally: {found or 'none'}. "
-            f"Pull the required container images first."
+            f"Check container.{{engine}}_image in config and registry connectivity."
         )
 
     hardware = HardwareProfile(
