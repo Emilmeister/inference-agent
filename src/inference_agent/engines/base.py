@@ -1,4 +1,4 @@
-"""Abstract base class for inference engine Docker management."""
+"""Abstract base class for inference engine container management (nerdctl)."""
 
 from __future__ import annotations
 
@@ -35,14 +35,14 @@ def dedup_flags(args: list[str]) -> list[str]:
 
 
 class BaseEngine(abc.ABC):
-    """Interface for managing an inference engine in Docker."""
+    """Interface for managing an inference engine via nerdctl."""
 
     def __init__(self, config: AgentConfig) -> None:
         self.config = config
 
     @abc.abstractmethod
-    def build_docker_args(self, experiment: ExperimentConfig) -> list[str]:
-        """Build the full `docker run` argument list for this experiment."""
+    def build_container_args(self, experiment: ExperimentConfig) -> list[str]:
+        """Build the full `nerdctl run` argument list for this experiment."""
 
     @abc.abstractmethod
     def container_name(self, experiment: ExperimentConfig) -> str:
@@ -50,7 +50,7 @@ class BaseEngine(abc.ABC):
 
     @abc.abstractmethod
     def image(self) -> str:
-        """Return the Docker image to use."""
+        """Return the container image to use."""
 
     @abc.abstractmethod
     def health_url(self) -> str:
@@ -67,16 +67,16 @@ class BaseEngine(abc.ABC):
     def default_port(self) -> int:
         return 8000
 
-    def build_common_docker_args(self, experiment: ExperimentConfig) -> list[str]:
-        """Build Docker arguments common to all engines."""
-        dc = self.config.docker
+    def build_common_container_args(self, experiment: ExperimentConfig) -> list[str]:
+        """Build container arguments common to all engines."""
+        cc = self.config.container
         args = [
-            "docker", "run",
+            "nerdctl", "run",
             "--name", self.container_name(experiment),
             "--gpus", "all",
-            "--shm-size", dc.shm_size,
-            "--network", dc.network,
-            "-v", f"{dc.host_cache_dir}:{dc.model_cache_dir}",
+            "--shm-size", cc.shm_size,
+            "--network", cc.network,
+            "-v", f"{cc.host_cache_dir}:{cc.model_cache_dir}",
             "-d",  # detached
             # NOTE: no --rm so we can read logs from crashed containers
         ]

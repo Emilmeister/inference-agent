@@ -1,4 +1,4 @@
-"""Configuration models — agent, Docker, benchmark, storage settings."""
+"""Configuration models — agent, container runtime, benchmark, storage settings."""
 
 from __future__ import annotations
 
@@ -44,7 +44,9 @@ class AgentLLMConfig(BaseModel):
         return self
 
 
-class DockerConfig(BaseModel):
+class ContainerConfig(BaseModel):
+    """nerdctl/containerd runtime settings for engine containers."""
+
     vllm_image: str = "vllm/vllm-openai:latest"
     sglang_image: str = "lmsysorg/sglang:latest"
     network: str = "host"
@@ -56,7 +58,7 @@ class DockerConfig(BaseModel):
     #     root. Override if you have a shared cache on a separate volume.
     #   model_cache_dir: where the cache is mounted INSIDE the container. The
     #     stock vLLM / SGLang images run as root and look at /root/.cache.
-    # The Docker mount becomes `-v host_cache_dir:model_cache_dir`.
+    # The bind mount becomes `-v host_cache_dir:model_cache_dir`.
     host_cache_dir: str = Field(
         default_factory=lambda: os.path.expanduser("~/.cache/huggingface")
     )
@@ -67,7 +69,7 @@ class DockerConfig(BaseModel):
     sglang_extra_args: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _expand_cache_paths(self) -> "DockerConfig":
+    def _expand_cache_paths(self) -> "ContainerConfig":
         # Allow users to write `~/cache` literally in YAML and have it expand.
         self.host_cache_dir = os.path.expanduser(self.host_cache_dir)
         return self
@@ -88,17 +90,17 @@ class StartupConfig(BaseModel):
     idle_timeout_sec: int = 300         # 5 min without log progress = stall
     log_scan_interval_sec: float = 10.0  # how often to fetch + scan container logs
 
-    # Timeout for `docker pull` of the engine image when not present locally.
+    # Timeout for `nerdctl pull` of the engine image when not present locally.
     # Multi-GB engine images on slow links can take 10+ min — bump this if
     # registry is slow or image is large.
     image_pull_timeout_sec: int = 900   # 15 min
 
-    # Timeout for `docker run -d` itself (returns container ID, does NOT wait
+    # Timeout for `nerdctl run -d` itself (returns container ID, does NOT wait
     # for healthcheck — that has its own budget above). With NVIDIA runtime,
     # multi-GPU setups, or partially-pulled images, container creation can take
     # well over a minute. Bump this if you see startup_timeout errors despite
     # the image being locally present.
-    docker_run_timeout_sec: int = 180   # 3 min
+    container_run_timeout_sec: int = 180   # 3 min
 
     # Pre-download model weights into the host HF cache before launching any
     # container. Eliminates the "first launch takes 15+ min downloading 60GB"
@@ -196,7 +198,7 @@ class AgentConfig(BaseModel):
     quantization: str | None = None
 
     agent_llm: AgentLLMConfig = Field(default_factory=AgentLLMConfig)
-    docker: DockerConfig = Field(default_factory=DockerConfig)
+    container: ContainerConfig = Field(default_factory=ContainerConfig)
     startup: StartupConfig = Field(default_factory=StartupConfig)
     benchmark: BenchmarkConfig = Field(default_factory=BenchmarkConfig)
     experiments: ExperimentsConfig = Field(default_factory=ExperimentsConfig)

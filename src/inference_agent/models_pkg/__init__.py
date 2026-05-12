@@ -5,7 +5,7 @@ from inference_agent.models_pkg.config import (
     AgentLLMConfig,
     BenchmarkConfig,
     DatabaseConfig,
-    DockerConfig,
+    ContainerConfig,
     ExperimentsConfig,
     StartupConfig,
     StorageConfig,
@@ -52,7 +52,7 @@ __all__ = [
     "ParetoPoint",
     # Config
     "AgentLLMConfig",
-    "DockerConfig",
+    "ContainerConfig",
     "StartupConfig",
     "BenchmarkConfig",
     "ExperimentsConfig",

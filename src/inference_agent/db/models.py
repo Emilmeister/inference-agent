@@ -34,10 +34,10 @@ class ExperimentRow(Base):
     gpu_vram_mb: Mapped[int] = mapped_column(Integer, nullable=False)
     nvlink_available: Mapped[bool] = mapped_column(Boolean, nullable=False)
 
-    # Runtime / docker (next to data, for direct SQL queries)
-    docker_image_digest: Mapped[str] = mapped_column(String(255), nullable=False, default="")
-    docker_command: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    docker_args: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    # Runtime / container (next to data, for direct SQL queries)
+    container_image_digest: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    container_command: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    container_args: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
 
     # Indexable metrics (for WHERE / ORDER BY in history_loader)
     status: Mapped[str] = mapped_column(String(32), nullable=False)

@@ -20,15 +20,15 @@ agent_llm:
   # "json_object" — fallback: схема инлайнится в промпт, провайдер только гарантирует JSON
   structured_output_mode: "json_schema"
 
-# Docker
-docker:
+# Container runtime (nerdctl + containerd)
+container:
   vllm_image: "vllm/vllm-openai:v0.15.0"
   sglang_image: "lmsysorg/sglang:latest"
   network: "host"
   shm_size: "16g"
   model_cache_dir: "/root/.cache/huggingface"
 
-  # Фиксированные аргументы, которые всегда добавляются к docker run
+  # Фиксированные аргументы, которые всегда добавляются к nerdctl run
   # (не перебираются LLM, передаются как есть)
   vllm_extra_args:
     - "--enable-auto-tool-choice"
@@ -54,9 +54,9 @@ startup:
   hard_timeout_sec: 1800       # 30 мин — увеличь если модель большая (60GB+ → 3600+)
   idle_timeout_sec: 300        # 5 мин без прогресса в логах = stall
   log_scan_interval_sec: 10.0
-  image_pull_timeout_sec: 900  # 15 мин на docker pull образа движка
-  docker_run_timeout_sec: 180  # 3 мин на сам `docker run -d` (без healthcheck);
-                               # бамп если видишь startup_timeout при локально присутствующем образе
+  image_pull_timeout_sec: 900  # 15 мин на nerdctl pull образа движка
+  container_run_timeout_sec: 180  # 3 мин на сам `nerdctl run -d` (без healthcheck);
+                                  # бамп если видишь startup_timeout при локально присутствующем образе
 
 # Бенчмарк
 benchmark:

@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from inference_agent.agent import compile_agent
 from inference_agent.db import ExperimentRepository, init_schema
 from inference_agent.models import AgentConfig, OptimizationGoal
-from inference_agent.utils.docker import stop_all_bench_containers
+from inference_agent.utils.container import stop_all_bench_containers
 from inference_agent.utils.logging import setup_logging
 
 

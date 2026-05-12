@@ -766,7 +766,7 @@ with tabs[6]:
     exp_data = get_experiment_payload(selected_exp) if selected_exp else None
     if exp_data:
         config = exp_data.get("config", {})
-        docker_cmd = exp_data.get("docker_command", "")
+        container_cmd = exp_data.get("container_command", "")
         extra_env = config.get("extra_env") or {}
 
         col1, col2, col3, col4 = st.columns(4)
@@ -779,11 +779,11 @@ with tabs[6]:
         with col4:
             st.metric("Duration", _format_metric(_as_float(exp_data.get("duration_seconds")), " s", 1))
 
-        if docker_cmd:
-            st.markdown("**Docker command:**")
-            st.code(docker_cmd, language="bash")
+        if container_cmd:
+            st.markdown("**Container command:**")
+            st.code(container_cmd, language="bash")
         else:
-            st.info("Docker command not recorded.")
+            st.info("Container command not recorded.")
 
         if extra_env:
             st.markdown("**Extra env:**")
@@ -794,7 +794,7 @@ with tabs[6]:
             pd.DataFrame([
                 {
                     "engine_version": exp_data.get("engine_version", ""),
-                    "docker_image_digest": exp_data.get("docker_image_digest", ""),
+                    "container_image_digest": exp_data.get("container_image_digest", ""),
                     "benchmark_seed": exp_data.get("benchmark_seed"),
                 }
             ]),

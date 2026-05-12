@@ -4,7 +4,7 @@
 
 ## Один эксперимент = одна конфигурация движка
 
-Эксперимент — это **один `docker run`** с конкретными `engine`, `tensor_parallel_size`, `quantization`, `max_model_len`, флагами и т.д. Эта запись фиксируется один раз: один эксперимент → одна строка в таблице `experiments`.
+Эксперимент — это **один `nerdctl run`** с конкретными `engine`, `tensor_parallel_size`, `quantization`, `max_model_len`, флагами и т.д. Эта запись фиксируется один раз: один эксперимент → одна строка в таблице `experiments`.
 
 Внутри эксперимента происходит много отдельных измерений. См. `src/inference_agent/nodes/executor.py`, функция `executor_node`.
 
@@ -108,7 +108,7 @@ start container → healthcheck → correctness gate → benchmark phases → po
 
 Reporter (`src/inference_agent/nodes/reporter.py`) делает **один insert на эксперимент**. Таблица `experiments`:
 
-- **Плоские индексные колонки** для дашборда и быстрых запросов: `engine`, `model_name`, `gpu_*`, `nvlink_available`, `status`, `peak_throughput`, `low_concurrency_ttft_p95`, `docker_*`. Это и есть «агрегаты».
+- **Плоские индексные колонки** для дашборда и быстрых запросов: `engine`, `model_name`, `gpu_*`, `nvlink_available`, `status`, `peak_throughput`, `low_concurrency_ttft_p95`, `container_*`. Это и есть «агрегаты».
 - **JSONB колонка `data`** — полный `ExperimentResult.model_dump(mode="json")`, включая массив `concurrency_results` со всеми фазами, перцентилями, дисперсией и ошибками. Сырые данные не теряются, доступны через `data->'benchmark'->'concurrency_results'`.
 
 Схема создаётся при старте через `Base.metadata.create_all`, без alembic. См. `src/inference_agent/db/`.
@@ -117,8 +117,8 @@ Reporter (`src/inference_agent/nodes/reporter.py`) делает **один inser
 
 В строку эксперимента кладутся:
 
-- `docker_command` и `docker_args` — точная команда запуска
-- `docker_image_digest` — иммутабельный digest образа (sha256 из manifest), а не плавающий tag
+- `container_command` и `container_args` — точная команда запуска (`nerdctl run …`)
+- `container_image_digest` — иммутабельный digest образа (sha256 из manifest), а не плавающий tag
 - `engine_version` — строка версии из `/version` или `--version`
 - `benchmark_seed` — seed для генерации промптов
 

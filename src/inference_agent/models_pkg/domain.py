@@ -277,9 +277,9 @@ class ExperimentResult(BaseModel):
         OptimizationClassification.NONE
     )
     scores: ExperimentScores = Field(default_factory=ExperimentScores)
-    docker_command: str = ""  # one-liner docker run command for reproduction
-    docker_args: list[str] = Field(default_factory=list)  # full argv for reproduction
-    docker_image_digest: str = ""  # immutable image digest for reproducibility
+    container_command: str = ""  # one-liner nerdctl run command for reproduction
+    container_args: list[str] = Field(default_factory=list)  # full argv for reproduction
+    container_image_digest: str = ""  # immutable image digest for reproducibility
     engine_version: str = ""  # engine version string (from /version or --version)
     benchmark_seed: int | None = None  # seed used for prompt generation
     duration_seconds: float = 0.0
@@ -317,7 +317,7 @@ class ExperimentSummary(BaseModel):
     )
     scores: ExperimentScores = Field(default_factory=ExperimentScores)
     llm_commentary: str = ""
-    docker_command: str = ""
+    container_command: str = ""
     rationale: str = ""
 
     @classmethod
@@ -350,7 +350,7 @@ class ExperimentSummary(BaseModel):
 
         # Surface extra_engine_args / extra_env so the planner can compare
         # tail-flags across runs (otherwise these are only visible via the
-        # full docker_command string, which is harder to diff).
+        # full container_command string, which is harder to diff).
         if config.extra_engine_args:
             digest["extra_args"] = list(config.extra_engine_args)
         if config.extra_env:
@@ -381,7 +381,7 @@ class ExperimentSummary(BaseModel):
             optimization_classification=result.optimization_classification,
             scores=result.scores,
             llm_commentary=result.llm_commentary,
-            docker_command=result.docker_command,
+            container_command=result.container_command,
             rationale=result.config.rationale,
         )
 

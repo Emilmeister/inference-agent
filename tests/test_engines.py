@@ -1,4 +1,4 @@
-"""Tests for Docker args building — vLLM and SGLang engines."""
+"""Tests for nerdctl args building — vLLM and SGLang engines."""
 
 from inference_agent.engines.base import dedup_flags
 from inference_agent.engines.sglang import SGLangEngine
@@ -51,9 +51,9 @@ class TestVLLMEngine:
         config = _make_config()
         engine = VLLMEngine(config)
         experiment = _make_experiment(EngineType.VLLM)
-        args = engine.build_docker_args(experiment)
+        args = engine.build_container_args(experiment)
 
-        assert "docker" in args
+        assert "nerdctl" in args
         assert "run" in args
         assert "--model" in args
         assert "test/model" in args
@@ -64,7 +64,7 @@ class TestVLLMEngine:
         config = _make_config()
         engine = VLLMEngine(config)
         experiment = _make_experiment(EngineType.VLLM, quantization="fp8")
-        args = engine.build_docker_args(experiment)
+        args = engine.build_container_args(experiment)
 
         assert "--quantization" in args
         idx = args.index("--quantization")
@@ -74,7 +74,7 @@ class TestVLLMEngine:
         config = _make_config()
         engine = VLLMEngine(config)
         experiment = _make_experiment(EngineType.VLLM, enable_chunked_prefill=True)
-        args = engine.build_docker_args(experiment)
+        args = engine.build_container_args(experiment)
 
         assert "--enable-chunked-prefill" in args
 
@@ -82,7 +82,7 @@ class TestVLLMEngine:
         config = _make_config(hf_token=None)
         engine = VLLMEngine(config)
         experiment = _make_experiment(EngineType.VLLM)
-        args = engine.build_docker_args(experiment)
+        args = engine.build_container_args(experiment)
 
         # Should not have HF_TOKEN
         env_args = [a for a in args if "HF_TOKEN" in a]
@@ -92,7 +92,7 @@ class TestVLLMEngine:
         config = _make_config(hf_token="hf_test123")
         engine = VLLMEngine(config)
         experiment = _make_experiment(EngineType.VLLM)
-        args = engine.build_docker_args(experiment)
+        args = engine.build_container_args(experiment)
 
         assert "HF_TOKEN=hf_test123" in " ".join(args)
 
@@ -102,7 +102,7 @@ class TestVLLMEngine:
         assert config.startup.prefetch_model is True
         engine = VLLMEngine(config)
         experiment = _make_experiment(EngineType.VLLM)
-        args = engine.build_docker_args(experiment)
+        args = engine.build_container_args(experiment)
         flat = " ".join(args)
         assert "HF_HUB_OFFLINE=1" in flat
         assert "TRANSFORMERS_OFFLINE=1" in flat
@@ -113,21 +113,21 @@ class TestVLLMEngine:
         config = _make_config(startup=StartupConfig(prefetch_model=False))
         engine = VLLMEngine(config)
         experiment = _make_experiment(EngineType.VLLM)
-        args = engine.build_docker_args(experiment)
+        args = engine.build_container_args(experiment)
         flat = " ".join(args)
         assert "HF_HUB_OFFLINE" not in flat
         assert "TRANSFORMERS_OFFLINE" not in flat
 
     def test_offline_env_overrides_llm_extra_env(self):
         # LLM tries to disable offline mode via extra_env — our env must win,
-        # i.e. appear AFTER the LLM's. Last `-e` wins in `docker run`.
+        # i.e. appear AFTER the LLM's. Last `-e` wins in `nerdctl run`.
         config = _make_config()
         engine = VLLMEngine(config)
         experiment = _make_experiment(
             EngineType.VLLM,
             extra_env={"HF_HUB_OFFLINE": "0"},
         )
-        args = engine.build_docker_args(experiment)
+        args = engine.build_container_args(experiment)
         # find indices of both occurrences
         indices = [i for i, a in enumerate(args) if a.startswith("HF_HUB_OFFLINE=")]
         assert len(indices) == 2
@@ -137,7 +137,7 @@ class TestVLLMEngine:
         config = _make_config()
         engine = VLLMEngine(config)
         experiment = _make_experiment(EngineType.VLLM, attention_backend="FLASHINFER")
-        args = engine.build_docker_args(experiment)
+        args = engine.build_container_args(experiment)
         idx = args.index("--attention-backend")
         assert args[idx + 1] == "FLASHINFER"
 
@@ -153,9 +153,9 @@ class TestSGLangEngine:
         config = _make_config()
         engine = SGLangEngine(config)
         experiment = _make_experiment(EngineType.SGLANG)
-        args = engine.build_docker_args(experiment)
+        args = engine.build_container_args(experiment)
 
-        assert "docker" in args
+        assert "nerdctl" in args
         assert "sglang.launch_server" in args
         assert "--tp-size" in args
         assert "--enable-metrics" in args
@@ -168,7 +168,7 @@ class TestSGLangEngine:
             speculative_algorithm="NEXTN",
             speculative_num_steps=3,
         )
-        args = engine.build_docker_args(experiment)
+        args = engine.build_container_args(experiment)
 
         assert "--speculative-algorithm" in args
         assert "NEXTN" in args
@@ -185,7 +185,7 @@ class TestSGLangEngine:
             speculative_algorithm="NEXTN",
             mem_fraction_static=0.7,
         )
-        args = engine.build_docker_args(experiment)
+        args = engine.build_container_args(experiment)
 
         # No auto-bump for NEXTN — value comes through as set by the planner.
         idx = args.index("--mem-fraction-static")
@@ -200,7 +200,7 @@ class TestSGLangEngine:
             enable_chunked_prefill=True,
             chunked_prefill_size=None,
         )
-        args = engine.build_docker_args(experiment)
+        args = engine.build_container_args(experiment)
         assert "--chunked-prefill-size" not in args
 
     def test_chunked_prefill_with_explicit_size(self):
@@ -211,7 +211,7 @@ class TestSGLangEngine:
             enable_chunked_prefill=True,
             chunked_prefill_size=4096,
         )
-        args = engine.build_docker_args(experiment)
+        args = engine.build_container_args(experiment)
         idx = args.index("--chunked-prefill-size")
         assert args[idx + 1] == "4096"
 
@@ -219,7 +219,7 @@ class TestSGLangEngine:
         config = _make_config()
         engine = SGLangEngine(config)
         experiment = _make_experiment(EngineType.SGLANG, attention_backend="flashinfer")
-        args = engine.build_docker_args(experiment)
+        args = engine.build_container_args(experiment)
         idx = args.index("--attention-backend")
         assert args[idx + 1] == "flashinfer"
 
@@ -227,7 +227,7 @@ class TestSGLangEngine:
         config = _make_config()
         engine = SGLangEngine(config)
         experiment = _make_experiment(EngineType.SGLANG, attention_backend=None)
-        args = engine.build_docker_args(experiment)
+        args = engine.build_container_args(experiment)
         assert "--attention-backend" not in args
 
     def test_container_name(self):
@@ -243,5 +243,5 @@ class TestSGLangEngine:
             EngineType.SGLANG,
             enable_prefix_caching=False,
         )
-        args = engine.build_docker_args(experiment)
+        args = engine.build_container_args(experiment)
         assert "--disable-radix-cache" in args

@@ -1,4 +1,11 @@
-"""Docker helper functions for container lifecycle management."""
+"""nerdctl helper functions for container lifecycle management.
+
+The agent shells out to `nerdctl` (containerd's docker-compatible CLI) for
+all container ops. Flag surface used here is identical to docker's, so all
+`nerdctl run` arguments built by the engines work as-is. Requires nerdctl,
+containerd, CNI plugins and (for GPU passthrough) nvidia-container-toolkit
+installed on the host VM.
+"""
 
 from __future__ import annotations
 
@@ -12,10 +19,10 @@ logger = logging.getLogger(__name__)
 
 
 async def run_container(args: list[str], timeout: int = 60) -> str:
-    """Run a docker command and return the container ID.
+    """Run a nerdctl command and return the container ID.
 
-    Assumes the image is already pulled — `docker run -d` on a present image
-    returns in seconds. If the image isn't local, Docker would do an implicit
+    Assumes the image is already pulled — `nerdctl run -d` on a present image
+    returns in seconds. If the image isn't local, nerdctl would do an implicit
     pull here and a multi-GB image would blow this timeout. Use `pull_image`
     before calling to keep responsibilities separate and timeouts honest.
     """
@@ -27,15 +34,15 @@ async def run_container(args: list[str], timeout: int = 60) -> str:
     stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     if proc.returncode != 0:
         error = stderr.decode().strip()
-        raise RuntimeError(f"Docker run failed (rc={proc.returncode}): {error}")
+        raise RuntimeError(f"nerdctl run failed (rc={proc.returncode}): {error}")
     return stdout.decode().strip()
 
 
 async def image_exists_locally(image: str) -> bool:
-    """Return True if Docker has the exact image:tag present locally."""
+    """Return True if nerdctl has the exact image:tag present locally."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "docker", "image", "inspect", image,
+            "nerdctl", "image", "inspect", image,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -45,13 +52,13 @@ async def image_exists_locally(image: str) -> bool:
 
 
 async def pull_image(image: str, timeout: int = 900) -> None:
-    """Pull a Docker image with a long, explicit timeout.
+    """Pull a container image with a long, explicit timeout.
 
     Raises RuntimeError on failure (including timeout) so callers can classify
     the experiment as `image_pull_failed` rather than a generic startup crash.
     """
     proc = await asyncio.create_subprocess_exec(
-        "docker", "pull", image,
+        "nerdctl", "pull", image,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -63,17 +70,17 @@ async def pull_image(image: str, timeout: int = 900) -> None:
             await proc.wait()
         except ProcessLookupError:
             pass
-        raise RuntimeError(f"docker pull {image} timed out after {timeout}s")
+        raise RuntimeError(f"nerdctl pull {image} timed out after {timeout}s")
     if proc.returncode != 0:
         err = stderr.decode().strip()
-        raise RuntimeError(f"docker pull {image} failed (rc={proc.returncode}): {err}")
+        raise RuntimeError(f"nerdctl pull {image} failed (rc={proc.returncode}): {err}")
 
 
 async def stop_container(name: str, timeout: int = 30) -> None:
     """Stop and remove a container by name. Ignores errors if not running."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "docker", "stop", "-t", "10", name,
+            "nerdctl", "stop", "-t", "10", name,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -84,7 +91,7 @@ async def stop_container(name: str, timeout: int = 30) -> None:
     # Force remove if still exists
     try:
         proc = await asyncio.create_subprocess_exec(
-            "docker", "rm", "-f", name,
+            "nerdctl", "rm", "-f", name,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -94,10 +101,10 @@ async def stop_container(name: str, timeout: int = 30) -> None:
 
 
 async def _is_container_running(name: str) -> bool:
-    """Check if a Docker container is still running."""
+    """Check if a container is still running."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "docker", "inspect", "-f", "{{.State.Running}}", name,
+            "nerdctl", "inspect", "-f", "{{.State.Running}}", name,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -150,7 +157,7 @@ _PROGRESS_MARKERS: tuple[str, ...] = (
 
 
 def scan_engine_logs(logs: str) -> dict:
-    """Classify the state of a starting engine from its docker logs.
+    """Classify the state of a starting engine from its container logs.
 
     Returns one of:
       {"state": "fatal", "classification": "<kind>", "marker": "..."}
@@ -317,7 +324,7 @@ async def get_container_logs(name: str, tail: int = 100) -> str:
     """Get the last N lines of container logs."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "docker", "logs", "--tail", str(tail), name,
+            "nerdctl", "logs", "--tail", str(tail), name,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -328,10 +335,10 @@ async def get_container_logs(name: str, tail: int = 100) -> str:
 
 
 async def get_image_digest(image: str) -> str:
-    """Get the digest of a Docker image. Returns empty string on failure."""
+    """Get the digest of a container image. Returns empty string on failure."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "docker", "inspect", "--format", "{{index .RepoDigests 0}}", image,
+            "nerdctl", "inspect", "--format", "{{index .RepoDigests 0}}", image,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -341,7 +348,7 @@ async def get_image_digest(image: str) -> str:
             return digest
         # Fallback to image ID
         proc2 = await asyncio.create_subprocess_exec(
-            "docker", "inspect", "--format", "{{.Id}}", image,
+            "nerdctl", "inspect", "--format", "{{.Id}}", image,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -356,7 +363,7 @@ async def get_container_exit_code(name: str) -> int | None:
     """Get the exit code of a stopped container. Returns None if unknown."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "docker", "inspect", "-f", "{{.State.ExitCode}}", name,
+            "nerdctl", "inspect", "-f", "{{.State.ExitCode}}", name,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -400,7 +407,7 @@ def stop_all_bench_containers() -> None:
     """Stop all containers with bench- prefix. For cleanup."""
     try:
         result = subprocess.run(
-            ["docker", "ps", "-q", "--filter", "name=bench-"],
+            ["nerdctl", "ps", "-q", "--filter", "name=bench-"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -409,7 +416,7 @@ def stop_all_bench_containers() -> None:
         for cid in container_ids:
             if cid.strip():
                 subprocess.run(
-                    ["docker", "rm", "-f", cid.strip()],
+                    ["nerdctl", "rm", "-f", cid.strip()],
                     capture_output=True,
                     timeout=10,
                 )

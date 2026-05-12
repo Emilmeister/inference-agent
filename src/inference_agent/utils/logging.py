@@ -70,7 +70,7 @@ def setup_logging(verbose: bool = False) -> None:
 
     # Silence noisy third-party loggers
     for noisy in [
-        "httpcore", "httpx", "openai", "urllib3", "docker",
+        "httpcore", "httpx", "openai", "urllib3",
         "asyncio", "huggingface_hub", "filelock",
     ]:
         logging.getLogger(noisy).setLevel(logging.WARNING)

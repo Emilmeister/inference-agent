@@ -168,7 +168,7 @@ def prefetch_and_normalize_model(
         if not os.access(cache_dir, os.W_OK):
             raise PermissionError(
                 f"cache_dir={cache_dir} is not writable by current user. "
-                f"Set docker.host_cache_dir to a path you own (e.g. ~/.cache/huggingface)."
+                f"Set container.host_cache_dir to a path you own (e.g. ~/.cache/huggingface)."
             )
     except Exception as e:
         if raise_on_failure:
@@ -304,7 +304,7 @@ def _normalize_cached_config(snapshot_path: str) -> None:
 
 
 def _detect_available_engines() -> list[EngineType]:
-    """Check which Docker images are available locally."""
+    """Check which engine images are available locally via nerdctl."""
     engines = []
     for engine, image_check in [
         (EngineType.VLLM, "vllm/vllm-openai"),
@@ -312,7 +312,7 @@ def _detect_available_engines() -> list[EngineType]:
     ]:
         try:
             result = subprocess.run(
-                ["docker", "images", "-q", image_check],
+                ["nerdctl", "images", "-q", image_check],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -324,10 +324,10 @@ def _detect_available_engines() -> list[EngineType]:
 
     if not engines:
         logger.warning(
-            "No engine Docker images found locally. "
+            "No engine images found locally. "
             "Pull at least one image before running: "
-            "'docker pull vllm/vllm-openai:latest' or "
-            "'docker pull lmsysorg/sglang:latest'"
+            "'nerdctl pull vllm/vllm-openai:latest' or "
+            "'nerdctl pull lmsysorg/sglang:latest'"
         )
 
     return engines
@@ -353,13 +353,13 @@ async def discovery_node(state: AgentState) -> dict:
     )
 
     # Prefetch weights into the host cache (mounted into containers) so
-    # subsequent docker runs don't each re-download the model.
+    # subsequent container runs don't each re-download the model.
     if config.startup.prefetch_model:
         await loop.run_in_executor(
             None,
             prefetch_and_normalize_model,
             config.model_name,
-            config.docker.host_cache_dir,
+            config.container.host_cache_dir,
             config.model_revision,
             config.hf_token,
             config.startup.prefetch_allow_patterns,
@@ -465,7 +465,7 @@ async def discovery_node(state: AgentState) -> dict:
             f"No usable engine images found. "
             f"Requested engines: {requested}. "
             f"Images found locally: {found or 'none'}. "
-            f"Pull the required Docker images first."
+            f"Pull the required container images first."
         )
 
     hardware = HardwareProfile(

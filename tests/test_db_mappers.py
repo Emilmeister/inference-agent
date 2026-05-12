@@ -25,8 +25,8 @@ def _make_result(
     gpus: list[GPUInfo] | None = None,
     gpu_count: int = 1,
     nvlink: bool = False,
-    docker_command: str = "docker run vllm/vllm-openai",
-    docker_args: list[str] | None = None,
+    container_command: str = "nerdctl run vllm/vllm-openai",
+    container_args: list[str] | None = None,
     config_max_model_len: int | None = None,
     model_max_context: int = 32768,
 ) -> ExperimentResult:
@@ -55,9 +55,9 @@ def _make_result(
             peak_output_tokens_per_sec=512.5,
             low_concurrency_ttft_p95_ms=120.0,
         ),
-        docker_command=docker_command,
-        docker_args=docker_args or ["--tensor-parallel-size", "2"],
-        docker_image_digest="sha256:abc",
+        container_command=container_command,
+        container_args=container_args or ["--tensor-parallel-size", "2"],
+        container_image_digest="sha256:abc",
     )
 
 
@@ -77,9 +77,9 @@ def test_result_to_row_basic_fields():
     assert row.correctness_gate_passed is True
     assert row.peak_throughput == pytest.approx(512.5)
     assert row.low_concurrency_ttft_p95 == pytest.approx(120.0)
-    assert row.docker_command.startswith("docker run")
-    assert row.docker_args == ["--tensor-parallel-size", "2"]
-    assert row.docker_image_digest == "sha256:abc"
+    assert row.container_command.startswith("nerdctl run")
+    assert row.container_args == ["--tensor-parallel-size", "2"]
+    assert row.container_image_digest == "sha256:abc"
     # Full payload preserved in JSONB
     assert row.data["experiment_id"] == "exp_abc"
     assert row.data["benchmark"]["peak_output_tokens_per_sec"] == pytest.approx(512.5)

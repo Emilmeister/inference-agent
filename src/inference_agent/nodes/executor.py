@@ -1,4 +1,4 @@
-"""Executor node — launches Docker container and runs benchmark."""
+"""Executor node — launches engine container via nerdctl and runs benchmark."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from inference_agent.models import (
     SmokeTestResult,
 )
 from inference_agent.state import AgentState
-from inference_agent.utils.docker import (
+from inference_agent.utils.container import (
     get_container_exit_code,
     get_container_logs,
     get_engine_version,
@@ -52,11 +52,11 @@ def _get_engine(state: AgentState) -> BaseEngine:
 
 async def _start_engine(
     engine: BaseEngine,
-    docker_args: list[str],
+    container_args: list[str],
     container_name: str,
     experiment_id: str,
 ) -> tuple[str | None, list[ExperimentError], float]:
-    """Start Docker container and wait for health check.
+    """Start engine container and wait for health check.
 
     Returns (container_id, errors, time_to_healthy_sec).
     If container_id is None, startup failed.
@@ -66,8 +66,8 @@ async def _start_engine(
     # Stop any previous container
     await stop_container(container_name)
 
-    # Ensure the engine image is present locally before `docker run -d`.
-    # `docker run` on a missing image triggers an implicit pull that can take
+    # Ensure the engine image is present locally before `nerdctl run -d`.
+    # `nerdctl run` on a missing image triggers an implicit pull that can take
     # 5-15 min for multi-GB engine images, blowing past any reasonable run
     # timeout. Doing pull as an explicit step keeps timeouts honest and lets
     # us classify pull failures distinctly from container start failures.
@@ -92,21 +92,21 @@ async def _start_engine(
     else:
         logger.info("Image %s already present locally, skipping pull", image)
 
-    # Run container. Image is local but `docker run -d` itself can be slow
+    # Run container. Image is local but `nerdctl run -d` itself can be slow
     # under NVIDIA runtime with multi-GPU + new CUDA images — timeout is
-    # configurable via startup.docker_run_timeout_sec.
-    run_timeout = engine.config.startup.docker_run_timeout_sec
+    # configurable via startup.container_run_timeout_sec.
+    run_timeout = engine.config.startup.container_run_timeout_sec
     try:
-        container_id = await run_container(docker_args, timeout=run_timeout)
+        container_id = await run_container(container_args, timeout=run_timeout)
         logger.info("Container started: %s", container_id[:12])
     except (RuntimeError, asyncio.TimeoutError) as e:
         logs = await get_container_logs(container_name)
         if isinstance(e, asyncio.TimeoutError):
             message = (
                 f"Container start timed out after {run_timeout}s "
-                f"(docker run -d did not return a container ID — likely slow "
+                f"(nerdctl run -d did not return a container ID — likely slow "
                 f"NVIDIA runtime or partial image. Bump "
-                f"startup.docker_run_timeout_sec)"
+                f"startup.container_run_timeout_sec)"
             )
             classification = "startup_timeout"
         else:
@@ -284,7 +284,7 @@ def _classify_failure(
 
 
 async def executor_node(state: AgentState) -> dict:
-    """Launch the inference engine in Docker and run benchmarks.
+    """Launch the inference engine container via nerdctl and run benchmarks.
 
     Flow:
     1. Start engine container, wait for health
@@ -323,10 +323,10 @@ async def executor_node(state: AgentState) -> dict:
     logger.info("Rationale: %s", experiment.rationale)
     logger.info("=" * 60)
 
-    # Build Docker command
-    docker_args = engine.build_docker_args(experiment)
-    docker_command = " ".join(docker_args)
-    logger.info("Docker command: %s", docker_command)
+    # Build nerdctl command
+    container_args = engine.build_container_args(experiment)
+    container_command = " ".join(container_args)
+    logger.info("Container command: %s", container_command)
 
     # Resolve image digest for reproducibility
     image_digest = await get_image_digest(engine.image())
@@ -341,7 +341,7 @@ async def executor_node(state: AgentState) -> dict:
     # snapshot_download is idempotent — if the draft is already cached this
     # is a no-op. A failed download (bad repo ID, auth, network) surfaces
     # here as a clean `prefetch_failed` failure instead of a 20-minute
-    # container hang inside docker.
+    # container hang during engine startup.
     draft_model = experiment.speculative_draft_model
     if draft_model and config.startup.prefetch_model:
         logger.info("Prefetching speculative_draft_model: %s", draft_model)
@@ -351,7 +351,7 @@ async def executor_node(state: AgentState) -> dict:
                 None,
                 prefetch_and_normalize_model,
                 draft_model,
-                config.docker.host_cache_dir,
+                config.container.host_cache_dir,
                 None,  # no separate revision pin for draft model
                 config.hf_token,
                 config.startup.prefetch_allow_patterns,
@@ -378,9 +378,9 @@ async def executor_node(state: AgentState) -> dict:
                             "draft_model": draft_model,
                         },
                     )],
-                    docker_command=docker_command,
-                    docker_args=docker_args,
-                    docker_image_digest=image_digest,
+                    container_command=container_command,
+                    container_args=container_args,
+                    container_image_digest=image_digest,
                     benchmark_seed=seed,
                     duration_seconds=time.time() - start_time,
                     time_to_healthy_sec=0.0,
@@ -390,7 +390,7 @@ async def executor_node(state: AgentState) -> dict:
 
     # ── Step 1: Start engine ──────────────────────────────────────────
     container_id, startup_errors, time_to_healthy = await _start_engine(
-        engine, docker_args, container_name, experiment.experiment_id,
+        engine, container_args, container_name, experiment.experiment_id,
     )
 
     if container_id is None:
@@ -407,9 +407,9 @@ async def executor_node(state: AgentState) -> dict:
                 status=ExperimentStatus.FAILED,
                 error=error_msg,
                 errors=startup_errors,
-                docker_command=docker_command,
-                docker_args=docker_args,
-                docker_image_digest=image_digest,
+                container_command=container_command,
+                container_args=container_args,
+                container_image_digest=image_digest,
                 benchmark_seed=seed,
                 duration_seconds=time.time() - start_time,
                 time_to_healthy_sec=time_to_healthy,
@@ -474,9 +474,9 @@ async def executor_node(state: AgentState) -> dict:
                     },
                 )],
                 smoke_tests=smoke_results,
-                docker_command=docker_command,
-                docker_args=docker_args,
-                docker_image_digest=image_digest,
+                container_command=container_command,
+                container_args=container_args,
+                container_image_digest=image_digest,
                 engine_version=engine_version,
                 benchmark_seed=seed,
                 duration_seconds=time.time() - start_time,
@@ -522,7 +522,7 @@ async def executor_node(state: AgentState) -> dict:
     gpu_agg = GPUMonitor.aggregate_snapshots(gpu_snapshots)
 
     # Check if container is still alive
-    from inference_agent.utils.docker import _is_container_running
+    from inference_agent.utils.container import _is_container_running
     container_alive = await _is_container_running(container_name)
     container_crashed = not container_alive
 
@@ -590,9 +590,9 @@ async def executor_node(state: AgentState) -> dict:
             errors=all_errors,
             benchmark=benchmark,
             smoke_tests=smoke_results,
-            docker_command=docker_command,
-            docker_args=docker_args,
-            docker_image_digest=image_digest,
+            container_command=container_command,
+            container_args=container_args,
+            container_image_digest=image_digest,
             engine_version=engine_version,
             benchmark_seed=seed,
             duration_seconds=duration,

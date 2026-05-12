@@ -2,12 +2,12 @@
 
 Автономный агент на базе LangGraph для автоматического бенчмаркинга и оптимизации конфигураций LLM inference движков — **vLLM** и **SGLang**.
 
-Агент запускается на VM с GPU, перебирает конфигурации запуска через Docker, замеряет производительность, проверяет корректность (tool-calling, structured output) и сохраняет результаты. LLM анализирует результаты и решает, какую конфигурацию попробовать следующей.
+Агент запускается на VM с GPU, перебирает конфигурации запуска через containerd (nerdctl), замеряет производительность, проверяет корректность (tool-calling, structured output) и сохраняет результаты. LLM анализирует результаты и решает, какую конфигурацию попробовать следующей.
 
 ## Возможности
 
 - **LLM-driven поиск** — агент использует LLM для выбора следующей конфигурации на основе истории экспериментов, а не слепой перебор
-- **Два движка** — vLLM и SGLang запускаются через Docker с полным набором параметров
+- **Два движка** — vLLM и SGLang запускаются через nerdctl/containerd с полным набором параметров
 - **Три цели оптимизации**:
   - Max Throughput — максимальная пропускная способность при высоком concurrency
   - Min Latency — минимальный TTFT/TPOT при единичных запросах
@@ -24,9 +24,9 @@
 ### Требования
 
 - Python 3.11+
-- Docker с доступом к GPU (`nvidia-container-toolkit`)
+- containerd + nerdctl + CNI plugins; nvidia-container-toolkit для GPU passthrough
 - NVIDIA GPU (одна или несколько)
-- Docker images: `vllm/vllm-openai:latest`, `lmsysorg/sglang:latest`
+- Container images: `vllm/vllm-openai:latest`, `lmsysorg/sglang:latest` (тянутся через `nerdctl pull`)
 - API ключ для OpenAI-compatible LLM (для принятия решений агентом)
 
 ### Установка
@@ -37,11 +37,11 @@ cd inference-agent
 pip install -e .
 ```
 
-### Подготовка Docker images
+### Подготовка container images
 
 ```bash
-docker pull vllm/vllm-openai:latest
-docker pull lmsysorg/sglang:latest
+nerdctl pull vllm/vllm-openai:latest
+nerdctl pull lmsysorg/sglang:latest
 ```
 
 ### Конфигурация
@@ -159,9 +159,9 @@ discovery → planner → executor → reporter → analyzer → planner → ...
 
 | Node | Описание |
 |------|----------|
-| **Discovery** | Определяет GPU (nvidia-smi), читает config.json модели с HuggingFace, находит Docker images |
+| **Discovery** | Определяет GPU (nvidia-smi), читает config.json модели с HuggingFace, находит container images через `nerdctl images` |
 | **Planner** | LLM выбирает следующую конфигурацию (engine, TP, quantization, batching, ...) |
-| **Executor** | Запускает Docker контейнер, ждёт healthcheck, прогоняет бенчмарк + smoke tests |
+| **Executor** | Запускает контейнер через nerdctl, ждёт healthcheck, прогоняет бенчмарк + smoke tests |
 | **Reporter** | Сохраняет результат в JSON файл |
 | **Analyzer** | LLM анализирует результаты, обновляет лидерборды, строит Pareto-фронт, решает continue/stop |
 
@@ -265,10 +265,10 @@ inference-agent/
 │   ├── state.py                         # LangGraph state
 │   ├── agent.py                         # LangGraph граф
 │   ├── cli.py                           # CLI
-│   ├── engines/{base,vllm,sglang}.py    # Docker builders
+│   ├── engines/{base,vllm,sglang}.py    # nerdctl arg builders
 │   ├── nodes/{discovery,planner,executor,reporter,analyzer}.py
 │   ├── benchmark/{runner,smoke_tests,gpu_monitor}.py
-│   └── utils/{docker,metrics}.py
+│   └── utils/{container,metrics}.py
 ├── streamlit_app/app.py
 ├── experiments/                         # результаты (gitignored)
 └── logs/                                # логи контейнеров (gitignored)

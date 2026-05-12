@@ -191,7 +191,7 @@ _PROMPT_FOOTER = """
   field in this schema. Each list element is one CLI token, e.g. \
   `["--mamba-scheduler-strategy", "extra_buffer"]`. Do NOT duplicate flags the \
   engine manages automatically. Do NOT put `-e KEY=VALUE` tokens here — those \
-  are docker flags, not engine flags, and the engine will reject them with \
+  are container-runtime flags, not engine flags, and the engine will reject them with \
   `unrecognized arguments`.
 - `extra_env: dict[str, str]` — environment variables for the container. ALWAYS \
   use this field for env vars (e.g. `VLLM_FLASH_ATTN_VERSION`, \
@@ -348,7 +348,7 @@ def _summary_to_prompt_entry(h: ExperimentSummary) -> dict:
         "engine": h.engine.value,
         "status": h.status.value,
         "config": h.config_digest,
-        "docker_command": h.docker_command,
+        "container_command": h.container_command,
         "rationale": h.rationale,
         "peak_throughput": h.peak_throughput,
         "ttft_p95": h.low_concurrency_ttft_p95,
@@ -375,7 +375,7 @@ async def planner_node(state: AgentState) -> dict:
     goal = state.get("next_optimization_goal", OptimizationGoal.EXPLORE)
 
     # Format history for LLM (last 15 experiments).
-    # Validation failures are stored compactly: full config/docker_command/rationale
+    # Validation failures are stored compactly: full config/container_command/rationale
     # would just balloon the prompt without teaching the LLM anything beyond
     # "fields-of-the-other-engine were populated", which the sanitizer in
     # _build_experiment_config now prevents structurally.
@@ -563,7 +563,7 @@ def _str_to_none(s: str | None) -> str | None:
 
     Strict json_schema clients sometimes serialize JSON null as the literal
     string "null" for `str | None` fields. Engine builders pass these through
-    to docker run, producing invalid CLI flags like `--quantization null`.
+    to nerdctl run, producing invalid CLI flags like `--quantization null`.
     """
     if s is None:
         return None

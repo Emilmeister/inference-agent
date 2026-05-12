@@ -10,7 +10,6 @@ requires-python = ">=3.10"
 dependencies = [
     "langgraph>=0.2",
     "openai>=1.50",
-    "docker>=7.0",
     "aiohttp>=3.9",
     "pydantic>=2.0",
     "pyyaml>=6.0",
@@ -41,7 +40,7 @@ inference-agent = "inference_agent.cli:main"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "integration: integration tests requiring Docker (Postgres testcontainer)",
+    "integration: integration tests requiring a container runtime (Postgres testcontainer)",
 ]
 
 [tool.hatch.build.targets.wheel]

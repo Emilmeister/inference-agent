@@ -2,17 +2,17 @@
 
 ## What is this project
 
-Автономный LangGraph-агент для бенчмаркинга LLM inference движков (vLLM, SGLang). Запускается на VM с GPU, перебирает конфигурации запуска через Docker, замеряет производительность и ищет оптимальные настройки по трём целям: max throughput, min latency, Pareto-balanced.
+Автономный LangGraph-агент для бенчмаркинга LLM inference движков (vLLM, SGLang). Запускается на VM с GPU, перебирает конфигурации запуска через containerd (nerdctl CLI), замеряет производительность и ищет оптимальные настройки по трём целям: max throughput, min latency, Pareto-balanced.
 
 ## Architecture
 
 LangGraph граф: `discovery → history_loader → planner → validator → executor → analyzer → reporter → (planner | END)`
 
-- **discovery** — детектит GPU (nvidia-smi), читает model config с HuggingFace, определяет доступные Docker images. Fails fast если нет engine images.
+- **discovery** — детектит GPU (nvidia-smi), читает model config с HuggingFace, определяет доступные container images через `nerdctl images`. Fails fast если нет engine images.
 - **history_loader** — после discovery подгружает из Postgres top-2 экспериментов по каждой из 3 категорий (throughput, latency, balanced) для текущей конфигурации железа (полный матч HardwareProfile) и текущей модели. Кладёт результат в `state["loaded_top_history"]` (max 6, дедуп по experiment_id).
 - **planner** — LLM выбирает следующую конфигурацию на основе истории экспериментов (текущая сессия + loaded_top_history)
-- **validator** — проверяет конфиг против hardware profile и engine capabilities до запуска Docker. Невалидные конфигурации скипают executor.
-- **executor** — запускает движок в Docker, проводит correctness gate (smoke tests до performance), прогоняет бенчмарк (async HTTP load generator), проводит post-benchmark correctness check, собирает GPU метрики. Структурированные ошибки и failure classification по стадиям.
+- **validator** — проверяет конфиг против hardware profile и engine capabilities до запуска контейнера. Невалидные конфигурации скипают executor.
+- **executor** — запускает движок через nerdctl, проводит correctness gate (smoke tests до performance), прогоняет бенчмарк (async HTTP load generator), проводит post-benchmark correctness check, собирает GPU метрики. Структурированные ошибки и failure classification по стадиям.
 - **analyzer** — LLM анализирует результаты, строит Pareto-фронт, решает continue/stop. Leaderboards и Pareto учитывают объединение текущей сессии + loaded_top_history; plateau detection и обновление best_* — только сессия (иначе плато сработает на исторических топах).
 - **reporter** — async insert полного `ExperimentResult` в Postgres (одна строка на эксперимент, JSONB колонка `data` + плоские индексные колонки).
 
@@ -23,17 +23,17 @@ src/inference_agent/
   models.py          — backward-compat shim, re-exports из models_pkg/
   models_pkg/
     domain.py        — enums, hardware, experiment, benchmark, errors, scores
-    config.py        — AgentConfig и sub-configs (Docker, Benchmark, Storage, Database)
+    config.py        — AgentConfig и sub-configs (Container, Benchmark, Storage, Database)
     llm_schemas.py   — PlannerOutput, AnalyzerOutput (LLM DTOs)
     __init__.py      — re-exports всего для backward compatibility
   state.py           — LangGraph AgentState (TypedDict с reducers); separate experiment_history (session) and loaded_top_history (DB)
   agent.py           — сборка графа (build_graph(repo) — DI)
   cli.py             — CLI entrypoint, env-overrides AGENT_LLM_* / DATABASE_*, async engine bootstrap
   db/                — SQLAlchemy ORM (Base, ExperimentRow), async engine, ExperimentRepository, mappers (homogeneous-cluster check)
-  engines/           — Docker command builders (base.py, vllm.py, sglang.py)
+  engines/           — nerdctl command builders (base.py, vllm.py, sglang.py)
   nodes/             — LangGraph nodes (discovery, history_loader, planner, validator, executor, reporter, analyzer); reporter и history_loader строятся фабриками `make_*_node(repo)`
   benchmark/         — load generator (runner.py), smoke tests, GPU monitor (nvidia-smi)
-  utils/             — Docker helpers, Prometheus metrics parser, structured logging
+  utils/             — container (nerdctl) helpers, Prometheus metrics parser, structured logging
 tests/               — unit + integration tests (integration через testcontainers[postgres], отметка `@pytest.mark.integration`)
 streamlit_app/
   app.py             — Streamlit dashboard, источник данных — Postgres
@@ -45,8 +45,8 @@ config.yaml          — конфигурация по умолчанию (вк�
 
 - Python 3.10+, Pydantic v2 для всех моделей
 - Все nodes — async функции `async def node_name(state: AgentState) -> dict`. Reporter и history_loader получают `ExperimentRepository` через фабрики (`make_*_node(repo)`).
-- Engines строят `docker run` аргументы как `list[str]`, не используют Docker SDK (прямой subprocess)
-- Хранилище экспериментов — Postgres. Одна таблица `experiments`: индексные плоские колонки (engine, model_name, gpu_*, nvlink_available, status, peak_throughput, low_concurrency_ttft_p95, docker_*) + JSONB колонка `data` с полным `ExperimentResult.model_dump(mode="json")`. Схема создаётся через `Base.metadata.create_all` при старте (без alembic).
+- Engines строят `nerdctl run` аргументы как `list[str]` (прямой subprocess, без SDK). Container runtime — containerd через nerdctl; docker SDK/CLI не используется.
+- Хранилище экспериментов — Postgres. Одна таблица `experiments`: индексные плоские колонки (engine, model_name, gpu_*, nvlink_available, status, peak_throughput, low_concurrency_ttft_p95, container_*) + JSONB колонка `data` с полным `ExperimentResult.model_dump(mode="json")`. Схема ведётся alembic-миграциями в `src/inference_agent/db/migrations/versions/`.
 - Кластер GPU считается однородным (все карты одной модели/VRAM); гетерогенный случай отвергается мapper-ом с `HeterogeneousClusterError`.
 - LLM для агента — любой OpenAI-совместимый Chat Completions endpoint через `openai.AsyncOpenAI` (`base_url`, `api_key`, `model` из `agent_llm` в config). Structured output: `response_format={"type": "json_schema", strict: true}` либо `json_object` fallback. Реализация: `src/inference_agent/utils/llm.py`
 - Бенчмарк — свой async HTTP клиент на aiohttp (streaming SSE parsing для TTFT/TPOT)
@@ -58,8 +58,8 @@ config.yaml          — конфигурация по умолчанию (вк�
 ```bash
 pip install -e .
 
-# 1) Postgres (локально через Docker — для прода используй managed PG)
-docker run -d --name inference-pg -p 5432:5432 \
+# 1) Postgres (локально через nerdctl — для прода используй managed PG)
+nerdctl run -d --name inference-pg -p 5432:5432 \
   -e POSTGRES_USER=inference_agent \
   -e POSTGRES_DB=inference_agent \
   -e POSTGRES_PASSWORD=secret \
@@ -87,7 +87,7 @@ inference-agent -c config.yaml -v
 
 # Tests
 pip install -e ".[dev]"
-pytest -m "not integration"          # быстрые unit-тесты без Docker
+pytest -m "not integration"          # быстрые unit-тесты без контейнерного рантайма
 pytest                                # включая integration (testcontainers поднимет свой Postgres)
 
 # Dashboard (читает из той же БД через DATABASE_*)

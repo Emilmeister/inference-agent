@@ -1,4 +1,4 @@
-"""SGLang Docker engine implementation."""
+"""SGLang engine implementation (runs via nerdctl)."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ class SGLangEngine(BaseEngine):
         super().__init__(config)
 
     def image(self) -> str:
-        return self.config.docker.sglang_image
+        return self.config.container.sglang_image
 
     def container_name(self, experiment: ExperimentConfig) -> str:
         return f"bench-sglang-{experiment.experiment_id}"
@@ -29,8 +29,8 @@ class SGLangEngine(BaseEngine):
     def api_base_url(self) -> str:
         return f"http://localhost:{self.default_port()}/v1"
 
-    def build_docker_args(self, experiment: ExperimentConfig) -> list[str]:
-        args = self.build_common_docker_args(experiment)
+    def build_container_args(self, experiment: ExperimentConfig) -> list[str]:
+        args = self.build_common_container_args(experiment)
         args.append(self.image())
 
         serve_args = [
@@ -101,8 +101,8 @@ class SGLangEngine(BaseEngine):
         if experiment.extra_engine_args:
             serve_args.extend(experiment.extra_engine_args)
 
-        if self.config.docker.sglang_extra_args:
-            serve_args.extend(self.config.docker.sglang_extra_args)
+        if self.config.container.sglang_extra_args:
+            serve_args.extend(self.config.container.sglang_extra_args)
 
         serve_args = dedup_flags(serve_args)
 

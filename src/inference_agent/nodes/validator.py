@@ -1,4 +1,4 @@
-"""Validator node — checks experiment config before expensive Docker run."""
+"""Validator node — checks experiment config before expensive container run."""
 
 from __future__ import annotations
 

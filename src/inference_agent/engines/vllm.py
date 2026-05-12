@@ -1,4 +1,4 @@
-"""vLLM Docker engine implementation."""
+"""vLLM engine implementation (runs via nerdctl)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ class VLLMEngine(BaseEngine):
         super().__init__(config)
 
     def image(self) -> str:
-        return self.config.docker.vllm_image
+        return self.config.container.vllm_image
 
     def container_name(self, experiment: ExperimentConfig) -> str:
         return f"bench-vllm-{experiment.experiment_id}"
@@ -25,8 +25,8 @@ class VLLMEngine(BaseEngine):
     def api_base_url(self) -> str:
         return f"http://localhost:{self.default_port()}/v1"
 
-    def build_docker_args(self, experiment: ExperimentConfig) -> list[str]:
-        args = self.build_common_docker_args(experiment)
+    def build_container_args(self, experiment: ExperimentConfig) -> list[str]:
+        args = self.build_common_container_args(experiment)
         args.append(self.image())
 
         # vllm serve command
@@ -104,8 +104,8 @@ class VLLMEngine(BaseEngine):
             serve_args.extend(experiment.extra_engine_args)
 
         # Fixed user-defined args from config (tool parsers, reasoning, etc.)
-        if self.config.docker.vllm_extra_args:
-            serve_args.extend(self.config.docker.vllm_extra_args)
+        if self.config.container.vllm_extra_args:
+            serve_args.extend(self.config.container.vllm_extra_args)
 
         # Deduplicate flags (extra_engine_args / config may overlap)
         serve_args = dedup_flags(serve_args)
