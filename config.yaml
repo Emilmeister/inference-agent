@@ -1,5 +1,5 @@
 # Модель для бенчмарка
-model_name: "ai-sage/GigaChat3-10B-A1.8B-bf16"
+model_name: "Qwen/Qwen3.6-27B-FP8"
 model_revision: null
 
 # Квантизация фиксируется на уровне всего прогона: один и тот же режим
@@ -22,7 +22,7 @@ agent_llm:
 
 # Container runtime (nerdctl + containerd)
 container:
-  vllm_image: "vllm/vllm-openai:v0.15.0"
+  vllm_image: "vllm/vllm-openai:latest"
   sglang_image: "lmsysorg/sglang:latest"
   network: "host"
   shm_size: "16g"
@@ -32,14 +32,16 @@ container:
   # (не перебираются LLM, передаются как есть)
   vllm_extra_args:
     - "--enable-auto-tool-choice"
+    - "--reasoning-parser"
+    - "qwen3"
     - "--tool-call-parser"
-    - "gigachat3"
-    - "--trust-remote-code"
-    - "--hf-overrides"
-    - '{"routed_scaling_factor": 1.0}'
+    - "qwen3_coder"
+    - "--language-model-only"
   sglang_extra_args:
+    - "--reasoning-parser"
+    - "qwen3"
     - "--tool-call-parser"
-    - "gigachat3"
+    - "qwen3_coder"
 
 # Поведение при старте движка (healthcheck, pull образа).
 # Бюджет ожидания ограничен двумя часами:
