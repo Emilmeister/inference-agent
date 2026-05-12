@@ -111,34 +111,5 @@ database:
 # Пиши сюда на какие параметры обратить внимание, что попробовать,
 # что пропустить и т.д.
 planner_instructions: |
-  Отталкивайся от такого бейзлайна:
-  
-  envs:
-  
-  ```
-  CUDA_DISABLE_CONTROL: "true"
-  OMP_NUM_THREADS: "32"
-  NCCL_CUMEM_ENABLE: "true"
-  VLLM_FLASH_ATTN_VERSION: "2"
-  ```
-  
-  command:
-  ```
-  vllm serve \
-  --host 0.0.0.0 \
-  --port 8080 \
-  --dtype bfloat16 \
-  --max-model-len 262144 \
-  --gpu-memory-utilization 0.88 \
-  --tensor-parallel-size 1 \
-  --max-num-batched-tokens 16384 \
-  --optimization-level 3 \
-  --enable-expert-parallel \
-  --enable-prefix-caching \
-  --enable-chunked-prefill \
-  --enable-prompt-tokens-details \
-  --enable-force-include-usage \
-  --enable-auto-tool-choice --tool-call-parser gigachat3 \
-  --speculative-config '{"method": "mtp", "num_speculative_tokens": 1, "disable_padded_drafter_batch": false}'
-  ```
+  Оптимизируй на свое усмотрение
 

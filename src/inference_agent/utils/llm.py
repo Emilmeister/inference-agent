@@ -41,12 +41,23 @@ def _strictify_schema(schema: dict[str, Any]) -> dict[str, Any]:
       - every object has additionalProperties: false
       - every property is listed in required (Optional types use null in their
         anyOf, which Pydantic already emits for Optional[X] fields)
+
+    Open-dict fields (Pydantic `dict[str, X]`) are emitted as
+    `{"type": "object", "additionalProperties": {"type": ...}}` — we keep that
+    schema-valued `additionalProperties` instead of clobbering it with `false`,
+    otherwise the LLM sees a closed object with zero properties and concludes
+    that no keys are allowed (which is what it logically is). Strict OpenAI
+    rejects open dicts entirely, so on that provider the right answer is
+    `structured_output_mode: json_object`; non-OpenAI providers (Claude,
+    Cloud.ru, vLLM/SGLang-OpenAI servers) accept schema-valued
+    `additionalProperties` and let the LLM fill the dict properly.
     """
 
     def _walk(node: Any) -> None:
         if isinstance(node, dict):
             if node.get("type") == "object" or "properties" in node:
-                node["additionalProperties"] = False
+                if "additionalProperties" not in node:
+                    node["additionalProperties"] = False
                 props = node.get("properties")
                 if isinstance(props, dict):
                     node["required"] = list(props.keys())

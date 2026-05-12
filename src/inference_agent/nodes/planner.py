@@ -196,8 +196,13 @@ _PROMPT_FOOTER = """
 - `extra_env: dict[str, str]` — environment variables for the container. ALWAYS \
   use this field for env vars (e.g. `VLLM_FLASH_ATTN_VERSION`, \
   `OMP_NUM_THREADS`, `NCCL_CUMEM_ENABLE`, `CUDA_DISABLE_CONTROL`, \
-  `SGLANG_ENABLE_SPEC_V2`). Format: `{{"VAR": "value"}}`. NEVER pass env vars \
-  via `extra_engine_args` — that breaks argparse and crashes startup.
+  `SGLANG_ENABLE_SPEC_V2`). Format: `{{"VAR": "value"}}`. This is an open \
+  dictionary — arbitrary keys are accepted; the schema does not constrain \
+  key names. NEVER pass env vars via `extra_engine_args` — that breaks \
+  argparse and crashes startup.
+- For optional fields with no value, emit JSON `null`, not the string `"null"` \
+  or empty string `""`. Empty/quoted-empty strings are treated as `null` \
+  defensively, but emitting `null` directly is cleaner.
 {user_instructions}
 Generate the next experiment configuration.
 """
@@ -558,6 +563,19 @@ def _zero_to_none(value: int | float | None) -> int | float | None:
 _SENTINEL_STRINGS = {"null", "none", "nil", "n/a", "na", "undefined", ""}
 
 
+def _strip_wrapping_quotes(s: str) -> str:
+    """Strip a matched pair of leading/trailing quotes (`"foo"`, `'foo'`).
+
+    The LLM occasionally emits `'""'` for "no value" — two literal quote
+    characters as the field value. Without unwrapping, sentinel detection
+    sees a non-empty string and lets it through; the engine then tries to
+    download a HF repo literally named `""` and crashes.
+    """
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        return s[1:-1]
+    return s
+
+
 def _str_to_none(s: str | None) -> str | None:
     """Treat sentinel string values like 'null' / 'none' / '' as None.
 
@@ -567,8 +585,10 @@ def _str_to_none(s: str | None) -> str | None:
     """
     if s is None:
         return None
-    if s.strip().lower() in _SENTINEL_STRINGS:
+    cleaned = _strip_wrapping_quotes(s.strip())
+    if cleaned.strip().lower() in _SENTINEL_STRINGS:
         return None
+    s = cleaned
     return s
 
 
@@ -576,6 +596,46 @@ def _str_with_default(s: str | None, default: str) -> str:
     """Same as _str_to_none but returns a default for required string fields."""
     cleaned = _str_to_none(s)
     return cleaned if cleaned is not None else default
+
+
+def _lift_env_tokens_from_engine_args(
+    args: list[str],
+    extra_env: dict[str, str],
+) -> list[str]:
+    """Move `-e KEY=VALUE` / `--env KEY=VALUE` tokens out of engine args.
+
+    The LLM occasionally smuggles container-runtime env tokens through
+    `extra_engine_args` when it can't (or thinks it can't) fill `extra_env`.
+    Those tokens land AFTER the image name in `nerdctl run` and become argv
+    to the engine binary, which rejects them with `unrecognized arguments`.
+    Detect and re-route to `extra_env`; existing keys win (don't clobber what
+    the LLM already put in `extra_env`).
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        # `-e KEY=VALUE` or `--env KEY=VALUE` (two-token form)
+        if tok in ("-e", "--env") and i + 1 < len(args) and "=" in args[i + 1]:
+            key, _, val = args[i + 1].partition("=")
+            extra_env.setdefault(key, val)
+            i += 2
+            continue
+        # `-e=KEY=VALUE` / `--env=KEY=VALUE` (single-token form, rarer)
+        for prefix in ("-e=", "--env="):
+            if tok.startswith(prefix):
+                payload = tok[len(prefix):]
+                if "=" in payload:
+                    key, _, val = payload.partition("=")
+                    extra_env.setdefault(key, val)
+                    i += 1
+                    break
+        else:
+            out.append(tok)
+            i += 1
+            continue
+        # ran the for-else's break — token consumed, continue loop
+    return out
 
 
 def _strip_flag(args: list[str], flag: str) -> list[str]:
@@ -690,6 +750,23 @@ def _build_experiment_config(
     # setting (and dedup_flags can't tell which value to keep). Strip both the
     # flag and its value before they reach the engine builder.
     extra_engine_args = _strip_flag(output.extra_engine_args, "--quantization")
+    # Same defense for engine flags that have dedicated fields in this schema:
+    # if the LLM duplicates them in extra_engine_args, we'd emit conflicting
+    # tokens (and dedup_flags keeps the first occurrence — unstable wrt order).
+    for dup_flag in (
+        "--speculative-draft-model-path",
+        "--speculative-draft-model",
+        "--speculative-algorithm",
+        "--speculative-num-steps",
+        "--max-model-len",
+        "--context-length",
+        "--tensor-parallel-size",
+        "--tp-size",
+    ):
+        extra_engine_args = _strip_flag(extra_engine_args, dup_flag)
+    # Sanitize: relocate misrouted `-e KEY=VALUE` tokens (which would otherwise
+    # become argv to the engine binary, not container env) into `extra_env`.
+    extra_engine_args = _lift_env_tokens_from_engine_args(extra_engine_args, extra_env)
 
     return ExperimentConfig(
         engine=engine,
