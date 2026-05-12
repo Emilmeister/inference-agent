@@ -2,7 +2,7 @@
 
 ## Context
 
-Нужен автономный агент на базе LangGraph, который запускается на VM с GPU и автоматически перебирает конфигурации запуска vLLM и SGLang (через Docker), замеряет производительность, проверяет корректность (tool-calling, structured output) и сохраняет результаты.
+Нужен автономный агент на базе LangGraph, который запускается на VM с GPU и автоматически перебирает конфигурации запуска vLLM и SGLang (через nerdctl/containerd), замеряет производительность, проверяет корректность (tool-calling, structured output) и сохраняет результаты.
 
 ### Цели оптимизации (три режима)
 
@@ -24,7 +24,7 @@ LLM Analyzer оценивает каждый эксперимент по все�
 │                                                      │
 │  ┌──────────┐   ┌───────────┐   ┌────────────────┐  │
 │  │ Discovery │──▶│ Planner   │──▶│ Executor       │  │
-│  │ (GPU,     │   │ (LLM:     │   │ (Docker +      │  │
+│  │ (GPU,     │   │ (LLM:     │   │ (nerdctl +     │  │
 │  │  model    │   │  выбирает │   │  bench tools)  │  │
 │  │  detect)  │   │  params)  │   │                │  │
 │  └──────────┘   └───────────┘   └───────┬────────┘  │
@@ -73,7 +73,7 @@ analyzer → END            (стоп-условие достигнуто)
 - Количество и модель GPU (`nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv`)
 - Доступная VRAM на каждой карте
 - NVLink/P2P connectivity (`nvidia-smi topo -m`)
-- Доступные Docker images для vLLM и SGLang
+- Доступные container images для vLLM и SGLang (через nerdctl)
 - Размер модели (из HuggingFace config.json: `num_hidden_layers`, `hidden_size`, `num_attention_heads`)
 
 **Output** → `HardwareProfile`:
@@ -151,18 +151,18 @@ class ExperimentConfig:
 3. LLM имеет system prompt с знаниями о best practices для каждого движка
 
 ### 2.3 Executor Node
-**Запускает движок в Docker и прогоняет бенчмарк.**
+**Запускает движок через nerdctl и прогоняет бенчмарк.**
 
 Шаги:
 1. Остановить предыдущий контейнер (если есть)
-2. Сформировать `docker run` команду из `ExperimentConfig`
+2. Сформировать `nerdctl run` команду из `ExperimentConfig`
 3. Запустить контейнер, дождаться healthcheck (`/health` endpoint)
 4. Запустить сбор GPU метрик в фоне (`nvidia-smi dmon` каждые 1 сек)
 5. Запустить бенчмарк нагрузки (см. секцию 4)
 6. Собрать метрики с `/metrics` endpoint (Prometheus)
 7. Остановить контейнер
 
-**Docker images:**
+**Container images:**
 ```
 vllm:  vllm/vllm-openai:latest
 sglang: lmsysorg/sglang:latest
@@ -417,8 +417,8 @@ agent_llm:
   api_key: "${AGENT_LLM_API_KEY}"
   model: "gpt-4o"
 
-# Docker
-docker:
+# Container runtime (nerdctl + containerd)
+container:
   vllm_image: "vllm/vllm-openai:latest"
   sglang_image: "lmsysorg/sglang:latest"
   network: "host"
@@ -467,15 +467,15 @@ inference-agent/
 │       │   ├── __init__.py
 │       │   ├── discovery.py        # HW detection
 │       │   ├── planner.py          # LLM-driven param selection
-│       │   ├── executor.py         # Docker + benchmark runner
+│       │   ├── executor.py         # nerdctl + benchmark runner
 │       │   ├── evaluator.py        # metrics collection + smoke tests
 │       │   ├── reporter.py         # JSON file writer
 │       │   └── analyzer.py         # LLM analysis + stop condition
 │       ├── engines/
 │       │   ├── __init__.py
 │       │   ├── base.py             # абстрактный engine interface
-│       │   ├── vllm.py             # vLLM Docker commands + config mapping
-│       │   └── sglang.py           # SGLang Docker commands + config mapping
+│       │   ├── vllm.py             # vLLM nerdctl commands + config mapping
+│       │   └── sglang.py           # SGLang nerdctl commands + config mapping
 │       ├── benchmark/
 │       │   ├── __init__.py
 │       │   ├── runner.py           # async HTTP load generator
@@ -483,7 +483,7 @@ inference-agent/
 │       │   └── gpu_monitor.py      # nvidia-smi metrics collector
 │       └── utils/
 │           ├── __init__.py
-│           ├── docker.py           # Docker helper functions
+│           ├── container.py        # nerdctl helper functions
 │           └── metrics.py          # Prometheus /metrics parser
 ├── streamlit_app/
 │   └── app.py                      # Streamlit viewer (upload JSON)
@@ -543,7 +543,6 @@ class AgentState(TypedDict):
 ```
 langgraph >= 0.2
 langchain-openai >= 0.2         # OpenAI-compatible LLM
-docker >= 7.0                    # Docker SDK for Python
 aiohttp >= 3.9                   # async HTTP client для бенчмарков
 pydantic >= 2.0                  # data models
 pyyaml >= 6.0                    # config
@@ -558,11 +557,11 @@ prometheus-client >= 0.20        # metrics parsing (optional)
 ## 9. Порядок реализации
 
 1. **models.py + state.py** — все dataclasses и типы
-2. **engines/base.py, vllm.py, sglang.py** — Docker-команды и маппинг параметров
+2. **engines/base.py, vllm.py, sglang.py** — nerdctl-команды и маппинг параметров
 3. **nodes/discovery.py** — GPU detection
 4. **benchmark/runner.py + gpu_monitor.py** — нагрузочный тест и сбор GPU метрик
 5. **benchmark/smoke_tests.py** — проверки tool-calling/structured output
-6. **utils/docker.py + metrics.py** — хелперы
+6. **utils/container.py + metrics.py** — хелперы
 7. **nodes/executor.py + evaluator.py** — запуск и оценка
 8. **nodes/planner.py + analyzer.py** — LLM-driven nodes
 9. **nodes/reporter.py** — сохранение JSON
@@ -575,7 +574,7 @@ prometheus-client >= 0.20        # metrics parsing (optional)
 
 ## 10. Верификация
 
-- **Unit**: mock Docker + mock LLM, проверка что граф проходит все ноды
+- **Unit**: mock container runtime + mock LLM, проверка что граф проходит все ноды
 - **Integration**: запуск на VM с 1 GPU + маленькая модель (e.g. `Qwen/Qwen2.5-0.5B-Instruct`), 3-5 экспериментов
 - **Streamlit**: загрузить JSON из integration теста, проверить что графики рендерятся
 - **Smoke tests**: убедиться что tool-calling и structured output тесты дают pass на рабочей конфигурации

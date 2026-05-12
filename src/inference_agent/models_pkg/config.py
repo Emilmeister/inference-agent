@@ -112,6 +112,7 @@ class StartupConfig(BaseModel):
             "*.txt",
             "*.jinja",
             "*.safetensors",
+            "*.bin",          # legacy pytorch_model.bin and GPTQ .bin shards
             "tokenizer.model",
             "tokenizer.json",
         ]

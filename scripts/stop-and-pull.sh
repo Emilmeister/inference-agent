@@ -8,7 +8,7 @@
 #
 # Behavior:
 #   1. SIGTERM all `inference-agent` processes; SIGKILL stragglers after 10s.
-#   2. `docker kill` any `bench-vllm-*` / `bench-sglang-*` containers.
+#   2. `nerdctl kill` any `bench-vllm-*` / `bench-sglang-*` containers.
 #   3. If git working tree has local changes, stash them.
 #   4. `git pull --ff-only` (refuses to merge — we want fast-forward only).
 #   5. `git stash pop` (only if we actually stashed in step 3).
@@ -80,16 +80,16 @@ fi
 # engines/base.py:container_name. Anything else (user's own containers,
 # unrelated services) is left alone.
 mapfile -t BENCH_CONTAINERS < <(
-    docker ps --filter 'name=bench-vllm-' --filter 'name=bench-sglang-' \
+    nerdctl ps --filter 'name=bench-vllm-' --filter 'name=bench-sglang-' \
         --format '{{.ID}} {{.Names}}' 2>/dev/null || true
 )
 if [[ ${#BENCH_CONTAINERS[@]} -eq 0 ]]; then
     log "no bench-* containers running"
 else
     for line in "${BENCH_CONTAINERS[@]}"; do
-        log "docker kill $line"
+        log "nerdctl kill $line"
         cid="${line%% *}"
-        docker kill "$cid" >/dev/null 2>&1 || true
+        nerdctl kill "$cid" >/dev/null 2>&1 || true
     done
 fi
 

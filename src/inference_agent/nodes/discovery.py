@@ -355,16 +355,35 @@ async def discovery_node(state: AgentState) -> dict:
 
     # Prefetch weights into the host cache (mounted into containers) so
     # subsequent container runs don't each re-download the model.
+    #
+    # Fail loud here when prefetch_model=True: engines/base.py forces
+    # HF_HUB_OFFLINE=1 in that mode, so a silent prefetch failure becomes
+    # a cryptic container crash later ("Can't load image processor",
+    # "config.json not found"). Surfacing the real cause — wrong repo id,
+    # gated model without token, registry down — at discovery time saves
+    # hours of confused planning.
     if config.startup.prefetch_model:
-        await loop.run_in_executor(
-            None,
-            prefetch_and_normalize_model,
-            config.model_name,
-            config.container.host_cache_dir,
-            config.model_revision,
-            config.hf_token,
-            config.startup.prefetch_allow_patterns,
-        )
+        try:
+            await loop.run_in_executor(
+                None,
+                prefetch_and_normalize_model,
+                config.model_name,
+                config.container.host_cache_dir,
+                config.model_revision,
+                config.hf_token,
+                config.startup.prefetch_allow_patterns,
+                True,  # raise_on_failure
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to prefetch model '{config.model_name}'"
+                + (f" @ revision {config.model_revision}" if config.model_revision else "")
+                + f": {e}. "
+                f"With startup.prefetch_model=true the container runs in HF offline "
+                f"mode and needs weights present in container.host_cache_dir. "
+                f"Fix the model name / hf_token, or set startup.prefetch_model=false "
+                f"to let the engine download inside the container at run time."
+            ) from e
 
     # Extract model info from config.json
     model_architecture = None
