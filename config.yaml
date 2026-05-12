@@ -102,12 +102,12 @@ benchmark:
   agentic_tool_result_min_tokens: 512
   agentic_tool_result_max_tokens: 3072
   agentic_turns_per_session: 4
-  agentic_concurrency_levels: [4, 8, 16]
-  agentic_session_timeout_sec: 1800       # 30 мин на одну агентскую сессию
-  agentic_per_turn_timeout_sec: 600       # 10 мин на один HTTP request
+  agentic_concurrency_levels: [8, 16, 32, 64, 128]
+  agentic_session_timeout_sec: 600       # 10 мин на одну агентскую сессию
+  agentic_per_turn_timeout_sec: 60       # 1 мин на один HTTP request
   agentic_ttft_p95_slo_ms: 60000           # turn-1 prefill 48k ~5-8s на H100; держим запас
   agentic_e2e_p95_slo_ms: 0               # 0 → 0.8 * session_timeout автоматически
-  agentic_concurrency_ceiling_search: false  # включи, если хочешь искать реальный потолок выше sweep'а
+  agentic_concurrency_ceiling_search: true  # включи, если хочешь искать реальный потолок выше sweep'а
 
 # Эксперименты
 experiments:
