@@ -224,8 +224,8 @@ while an entire workload (e.g. `agentic_long_context`) is broken. Rules:
   like rising error_rate / TTFT across the sweep, not flat 100% everywhere.
 
 ## `agentic` block in history entries — read this for ceiling info
-History entries may include `agentic: {max_viable_concurrency, probed, \
-viable, ceiling_probed}`. This is the result of the agentic_long_context \
+History entries may include `agentic: {{max_viable_concurrency, probed, \
+viable, ceiling_probed}}`. This is the result of the agentic_long_context \
 sweep: a deliberate ceiling probe to measure how many concurrent code-agent \
 sessions this config can serve while meeting the agentic SLO. The fields:
 - `probed` — concurrencies actually tested in this run.
