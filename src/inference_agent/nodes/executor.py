@@ -20,6 +20,7 @@ from inference_agent.engines.vllm import VLLMEngine
 from inference_agent.nodes.discovery import prefetch_and_normalize_model
 from inference_agent.models import (
     BenchmarkResult,
+    CeilingProbeInfo,
     ConcurrencyResult,
     EngineType,
     ExperimentError,
@@ -165,16 +166,75 @@ async def _start_engine(
     return container_id, errors, time_to_healthy
 
 
+_TIMEOUT_ERROR_PATTERNS: tuple[str, ...] = (
+    "timeout",
+    "timed out",
+    "asyncio.timeouterror",
+    "session timeout",
+    "per-turn timeout",
+)
+
+
+def _classify_phase_outcome(
+    workload_id: str,
+    error_details: list[str],
+) -> str:
+    """Decide whether an over-threshold phase is a real malfunction or a
+    ceiling-probe SLO miss.
+
+    Returns:
+      "ceiling_probe" — agentic_long_context phase whose errors are dominantly
+        timeout-shaped. This is an expected sweep outcome ("this concurrency
+        doesn't fit SLO"), NOT a bug. Surfaced via ceiling_probe_phases.
+      "malfunction"   — everything else (any non-agentic failure, or agentic
+        with non-timeout errors like HTTP 5xx, connection refused, parse
+        errors). Surfaced via failed_phases / errors.
+
+    Rationale: agentic_long_context is a deliberate ceiling probe; pushing
+    concurrency past SLO is the whole point. Classifying those as failures
+    pollutes status=partial, error strings, and the LLM's view of the run.
+    """
+    if workload_id != "agentic_long_context":
+        return "malfunction"
+    if not error_details:
+        # No sample to inspect — be conservative and call it malfunction so
+        # the user/LLM at least sees it.
+        return "malfunction"
+    samples = [s.lower() for s in error_details if s]
+    if not samples:
+        return "malfunction"
+    timeout_hits = sum(
+        1 for s in samples
+        if any(p in s for p in _TIMEOUT_ERROR_PATTERNS)
+    )
+    # Need a clear majority of timeout-shaped errors to call it ceiling.
+    return "ceiling_probe" if timeout_hits * 2 >= len(samples) else "malfunction"
+
+
+def _summarize_ceiling_reason(error_details: list[str]) -> str:
+    """One short human-readable phrase for the ceiling-probe reason."""
+    for s in error_details:
+        low = s.lower()
+        if "session timeout" in low:
+            return "session timeout"
+        if "per-turn timeout" in low or "per_turn" in low:
+            return "per-turn timeout"
+        if "timeout" in low or "timed out" in low:
+            return "request timeout"
+    return "slo violation"
+
+
 async def _run_all_phases(
     engine: BaseEngine,
     config: object,
     hardware: object,
     experiment: object,
     seed: int | None,
-) -> tuple[list[ConcurrencyResult], list[ExperimentError]]:
-    """Run all benchmark phases and return results with any phase errors."""
+) -> tuple[list[ConcurrencyResult], list[ExperimentError], list[CeilingProbeInfo]]:
+    """Run all benchmark phases and return (passing results, malfunction errors, ceiling probes)."""
     concurrency_results: list[ConcurrencyResult] = []
     phase_errors: list[ExperimentError] = []
+    ceiling_probes: list[CeilingProbeInfo] = []
 
     phases = get_benchmark_phases(
         model_max_context=hardware.model_max_context,
@@ -232,23 +292,59 @@ async def _run_all_phases(
                     phase_id=phase_id,
                 )
             if not is_warmup:
-                # Error-rate gate: discard phases with too many errors
+                # Error-rate gate: discard phases with too many errors,
+                # routing agentic ceiling probes (SLO-shaped timeouts) to
+                # ceiling_probes and real malfunctions to phase_errors.
                 if result.error_rate > error_rate_threshold:
-                    logger.warning(
-                        "  Phase %s error_rate=%.1f%% exceeds threshold %.1f%%, marking invalid",
-                        phase_id, result.error_rate * 100, error_rate_threshold * 100,
+                    outcome = _classify_phase_outcome(
+                        workload_id, list(result.error_details)
                     )
-                    phase_errors.append(ExperimentError(
-                        stage="benchmark_phase",
-                        message=f"Phase {phase_id} error_rate={result.error_rate:.2f} exceeds threshold",
-                        details={
-                            "phase_id": phase_id,
-                            "workload_id": workload_id,
-                            "error_rate": result.error_rate,
-                            "errors": result.errors,
-                            "threshold": error_rate_threshold,
-                        },
-                    ))
+                    if outcome == "ceiling_probe":
+                        reason = _summarize_ceiling_reason(list(result.error_details))
+                        logger.info(
+                            "  Phase %s hit agentic ceiling at c=%d "
+                            "(error_rate=%.1f%%, reason=%s) — not a malfunction",
+                            phase_id, concurrency, result.error_rate * 100, reason,
+                        )
+                        ceiling_probes.append(CeilingProbeInfo(
+                            phase_id=phase_id,
+                            workload_id=workload_id,
+                            concurrency=concurrency,
+                            prompt_length=prompt_len,
+                            error_rate=result.error_rate,
+                            errors=result.errors,
+                            reason=reason,
+                        ))
+                    else:
+                        logger.warning(
+                            "  Phase %s error_rate=%.1f%% exceeds threshold %.1f%%, marking invalid",
+                            phase_id, result.error_rate * 100, error_rate_threshold * 100,
+                        )
+                        phase_errors.append(ExperimentError(
+                            stage="benchmark_phase",
+                            message=(
+                                f"Phase {phase_id} error_rate={result.error_rate:.2f} "
+                                f"exceeds threshold"
+                                + (
+                                    f" (sample error: {result.error_details[0][:200]})"
+                                    if result.error_details
+                                    else ""
+                                )
+                            ),
+                            details={
+                                "phase_id": phase_id,
+                                "workload_id": workload_id,
+                                "concurrency": concurrency,
+                                "prompt_length": prompt_len,
+                                "error_rate": result.error_rate,
+                                "errors": result.errors,
+                                "threshold": error_rate_threshold,
+                                # First 3 actual error strings (timeouts, HTTP 5xx, etc.)
+                                # propagate from runner so the LLM sees WHAT broke, not
+                                # just that "error_rate exceeded".
+                                "error_samples": list(result.error_details[:3]),
+                            },
+                        ))
                 else:
                     concurrency_results.append(result)
         except Exception as e:
@@ -264,7 +360,7 @@ async def _run_all_phases(
                 },
             ))
 
-    return concurrency_results, phase_errors
+    return concurrency_results, phase_errors, ceiling_probes
 
 
 def _classify_failure(
@@ -522,7 +618,7 @@ async def executor_node(state: AgentState) -> dict:
     await gpu_monitor.start()
 
     logger.info("Starting benchmark...")
-    concurrency_results, phase_errors = await _run_all_phases(
+    concurrency_results, phase_errors, ceiling_probes = await _run_all_phases(
         engine, config, hardware, experiment, seed,
     )
 
@@ -573,6 +669,7 @@ async def executor_node(state: AgentState) -> dict:
     # ── Step 7: Aggregate results ─────────────────────────────────────
     benchmark = _aggregate_benchmark(
         concurrency_results, gpu_agg, kv_metrics, config.benchmark,
+        ceiling_probes=ceiling_probes,
     )
 
     duration = time.time() - start_time
@@ -596,13 +693,14 @@ async def executor_node(state: AgentState) -> dict:
     logger.info(
         "Experiment %s complete: status=%s, peak_throughput=%.1f tok/s, "
         "low_ttft_p95=%.1f ms, duration=%.0fs, phase_errors=%d, "
-        "correctness_gate=%s, post_correctness_degraded=%s",
+        "ceiling_probes=%d, correctness_gate=%s, post_correctness_degraded=%s",
         experiment.experiment_id,
         status.value,
         benchmark.peak_output_tokens_per_sec,
         benchmark.low_concurrency_ttft_p95_ms,
         duration,
         len(phase_errors),
+        len(ceiling_probes),
         correctness_gate_passed,
         post_correctness_degraded,
     )
@@ -631,6 +729,7 @@ async def executor_node(state: AgentState) -> dict:
             failure_classification=failure_class,
             correctness_gate_passed=correctness_gate_passed,
             post_benchmark_correctness=post_smoke if post_smoke else None,
+            ceiling_probe_phases=ceiling_probes,
         )
     }
 
@@ -640,6 +739,7 @@ def _aggregate_benchmark(
     gpu_agg: dict[int, dict],
     kv_metrics: dict,
     benchmark_config=None,
+    ceiling_probes: list[CeilingProbeInfo] | None = None,
 ) -> BenchmarkResult:
     """Aggregate per-phase results into a single BenchmarkResult.
 
@@ -695,7 +795,9 @@ def _aggregate_benchmark(
     gpu_temp = [gpu_agg[i]["temp_max"] for i in sorted(gpu_agg)]
 
     # ── Agentic derived metrics (max viable parallel agents, saturation) ──
-    agentic_metrics = _compute_agentic_metrics(results, benchmark_config)
+    agentic_metrics = _compute_agentic_metrics(
+        results, benchmark_config, ceiling_probes=ceiling_probes or [],
+    )
 
     return BenchmarkResult(
         ttft_ms=peak_throughput_result.ttft_ms,
@@ -726,6 +828,7 @@ def _aggregate_benchmark(
 def _compute_agentic_metrics(
     results: list[ConcurrencyResult],
     benchmark_config,
+    ceiling_probes: list[CeilingProbeInfo] | None = None,
 ) -> dict:
     """Derive max_viable_agentic_concurrency и сопутствующие метрики.
 
@@ -736,9 +839,15 @@ def _compute_agentic_metrics(
       1) error_rate ≤ phase_error_rate_threshold
       2) ttft_ms.p95 ≤ agentic_ttft_p95_slo_ms
       3) e2e_latency_ms.p95 ≤ agentic_e2e_p95_slo_ms (0 → авто-вычисление)
+
+    `ceiling_probes` несёт concurrencies, которые были пробованы но не вошли
+    в SLO (таймауты на высоких c). Они учитываются для определения sweep_max
+    и, соответственно, ceiling_hit: если максимально viable < максимального
+    пробованного — реальный потолок найден внутри sweep'а, ceiling_hit=False.
     """
     agentic_results = [r for r in results if r.workload_id == "agentic_long_context"]
-    if not agentic_results or benchmark_config is None:
+    ceiling_probes = ceiling_probes or []
+    if (not agentic_results and not ceiling_probes) or benchmark_config is None:
         return {
             "max_viable": 0,
             "ceiling_hit": False,
@@ -761,12 +870,26 @@ def _compute_agentic_metrics(
     ]
     max_viable = max(viable_concurrencies) if viable_concurrencies else 0
 
-    sweep_max = max(r.concurrency for r in agentic_results)
+    # sweep_max должен включать и ceiling-probe'ы, иначе при «c=8 прошло,
+    # c=16/32/64/128 ceiling-probe» мы бы получили sweep_max=8, max_viable=8,
+    # ceiling_hit=True — ложно («потолок не найден»). Правильно — False.
+    sweep_candidates = (
+        [r.concurrency for r in agentic_results]
+        + [p.concurrency for p in ceiling_probes]
+    )
+    sweep_max = max(sweep_candidates) if sweep_candidates else 0
     ceiling_hit = max_viable > 0 and max_viable == sweep_max
 
-    peak_result = max(agentic_results, key=lambda r: r.output_tokens_per_sec)
-    saturation = peak_result.concurrency
-    peak_throughput = peak_result.output_tokens_per_sec
+    if agentic_results:
+        peak_result = max(agentic_results, key=lambda r: r.output_tokens_per_sec)
+        saturation = peak_result.concurrency
+        peak_throughput = peak_result.output_tokens_per_sec
+    else:
+        # Every agentic phase was a ceiling probe — no throughput datapoint
+        # to report. max_viable=0 above already reflects "ceiling below the
+        # lowest probed concurrency".
+        saturation = 0
+        peak_throughput = 0.0
 
     return {
         "max_viable": max_viable,

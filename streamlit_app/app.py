@@ -617,7 +617,7 @@ with tabs[4]:
             x=dimension,
             y=metric,
             color="engine",
-            points="all",
+            points="outliers",
             title=f"{metric} by {dimension}",
             hover_data=["experiment_id"],
         )
@@ -820,36 +820,66 @@ with tabs[6]:
         conc_results = exp_data.get("benchmark", {}).get("concurrency_results", [])
         if conc_results:
             st.subheader("Selected Experiment Curves")
+
             conc_df = pd.DataFrame(conc_results)
-            col1, col2 = st.columns(2)
-            with col1:
-                fig = px.line(
-                    conc_df,
-                    x="concurrency",
-                    y="output_tokens_per_sec",
-                    color="prompt_length",
-                    markers=True,
-                    title="Output Throughput by Concurrency",
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            with col2:
-                ttft_data = [
-                    {
-                        "concurrency": cr.get("concurrency"),
-                        "prompt_length": cr.get("prompt_length"),
-                        "ttft_p95": cr.get("ttft_ms", {}).get("p95", 0),
-                    }
-                    for cr in conc_results
-                ]
-                fig = px.line(
-                    pd.DataFrame(ttft_data),
-                    x="concurrency",
-                    y="ttft_p95",
-                    color="prompt_length",
-                    markers=True,
-                    title="TTFT p95 by Concurrency",
-                )
-                st.plotly_chart(fig, use_container_width=True)
+            # Extract ttft_p95 from the nested dict so we can plot it as a
+            # flat column.
+            conc_df["ttft_p95"] = conc_df.get("ttft_ms", pd.Series([{}] * len(conc_df))).apply(
+                lambda d: (d or {}).get("p95", 0) if isinstance(d, dict) else 0
+            )
+            conc_df["workload_id"] = conc_df.get("workload_id", "").fillna("").replace("", "unknown")
+
+            # Workload filter: mixing agent_short (short prompts) with
+            # long_context (32k) and agentic_long_context (~48k prefix) on the
+            # same concurrency axis makes the line plot unreadable. Filter to
+            # let the user inspect one workload at a time.
+            available_workloads = sorted(
+                w for w in conc_df["workload_id"].unique().tolist()
+                if w and w != "warmup"
+            )
+            selected_workloads = st.multiselect(
+                "Filter by workload",
+                available_workloads,
+                default=available_workloads,
+                key=f"reproduce_workload_filter_{selected_exp}",
+                help=(
+                    "agent_short = short prompts, low concurrency. "
+                    "throughput = short prompts, mid/high concurrency. "
+                    "stress = saturation probe. "
+                    "long_context = 32k+ prompts. "
+                    "agentic_long_context = multi-turn code-agent simulation."
+                ),
+            )
+            view_df = conc_df[conc_df["workload_id"].isin(selected_workloads)].copy()
+
+            if view_df.empty:
+                st.info("No phases match the selected workloads.")
+            else:
+                col1, col2 = st.columns(2)
+                with col1:
+                    fig = px.line(
+                        view_df.sort_values(["workload_id", "prompt_length", "concurrency"]),
+                        x="concurrency",
+                        y="output_tokens_per_sec",
+                        color="workload_id",
+                        line_dash="prompt_length",
+                        markers=True,
+                        title="Output Throughput by Concurrency",
+                        hover_data=["phase_id", "prompt_length"],
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                with col2:
+                    fig = px.line(
+                        view_df.sort_values(["workload_id", "prompt_length", "concurrency"]),
+                        x="concurrency",
+                        y="ttft_p95",
+                        color="workload_id",
+                        line_dash="prompt_length",
+                        markers=True,
+                        title="TTFT p95 by Concurrency",
+                        hover_data=["phase_id", "prompt_length"],
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
 
 
 with tabs[7]:
@@ -959,17 +989,44 @@ with tabs[8]:
             st.info("No experiments passed the agentic SLO gates yet.")
 
         # ── Throughput by concurrency (per engine) ──
-        st.subheader("Agentic throughput by concurrency")
+        # Each row in agentic_phases_df is one (experiment, concurrency) sample,
+        # so at a given concurrency there can be many rows from different
+        # experiments. px.bar without aggregation stacks those rows' y values,
+        # producing bars that are the SUM of all matching runs — misleading.
+        # Pick the winning row (max output_tokens_per_sec) per (concurrency,
+        # engine) so the bar represents the best config at that concurrency.
+        st.subheader("Agentic throughput by concurrency — best config per engine")
+        winners_idx = agentic_phases_df.groupby(["concurrency", "engine"])[
+            "output_tokens_per_sec"
+        ].idxmax()
+        agentic_best = agentic_phases_df.loc[winners_idx].copy()
         fig_tp = px.bar(
-            agentic_phases_df,
+            agentic_best,
             x="concurrency",
             y="output_tokens_per_sec",
             color="engine",
             barmode="group",
             hover_data=["experiment_id", "ttft_p95", "errors"],
-            labels={"output_tokens_per_sec": "Output tokens/sec (aggregate)"},
+            labels={
+                "output_tokens_per_sec": "Output tokens/sec (best run, aggregate over sessions)",
+                "concurrency": "Concurrent agentic sessions",
+            },
         )
         st.plotly_chart(fig_tp, use_container_width=True)
+        with st.expander("Show all runs (not just best per concurrency)"):
+            st.caption(
+                "Scatter view: every (experiment, concurrency) point is one dot. "
+                "Use this to see spread / regressions across configs at the same concurrency."
+            )
+            fig_all = px.strip(
+                agentic_phases_df,
+                x="concurrency",
+                y="output_tokens_per_sec",
+                color="engine",
+                hover_data=["experiment_id", "ttft_p95", "errors"],
+                labels={"output_tokens_per_sec": "Output tokens/sec (aggregate)"},
+            )
+            st.plotly_chart(fig_all, use_container_width=True)
 
         # ── TTFT vs turn_idx (the killer chart) ──
         if not turns_df.empty:
@@ -986,7 +1043,7 @@ with tabs[8]:
                     x="turn_idx",
                     y="ttft_ms",
                     color="engine",
-                    points="all",
+                    points=False,
                     labels={"turn_idx": "Turn index (0 = cold)", "ttft_ms": "TTFT, ms"},
                 )
                 st.plotly_chart(fig_ttft, use_container_width=True)

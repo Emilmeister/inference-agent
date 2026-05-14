@@ -284,6 +284,50 @@ class ExperimentError(BaseModel):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
+class FailedPhaseInfo(BaseModel):
+    """Compact view of one benchmark phase that genuinely malfunctioned.
+
+    Only phases that look like real bugs (HTTP 5xx, connection refused,
+    parse errors, or any non-agentic phase that broke) land here. Agentic
+    ceiling-probe failures (timeouts at high concurrency) go to
+    `ceiling_probe_phases` instead — they are EXPECTED outcomes of the
+    sweep, not malfunctions. See executor._classify_phase_outcome.
+
+    Surfaced in `ExperimentSummary.failed_phases` so the LLM analyzer/planner
+    sees per-phase failure detail (workload, concurrency, sample error text)
+    instead of just a concatenated error string. Without this the LLM tends
+    to hallucinate "no benchmark errors" when headline metrics look fine.
+    """
+    phase_id: str
+    workload_id: str
+    concurrency: int = 0
+    prompt_length: int = 0
+    error_rate: float = 0.0
+    errors: int = 0
+    error_sample: str = ""  # first actual error string from runner (timeout, HTTP code, …)
+
+
+class CeilingProbeInfo(BaseModel):
+    """Compact view of one agentic phase that did NOT meet SLO at this concurrency.
+
+    Distinct from `FailedPhaseInfo`: a ceiling probe is the EXPECTED outcome
+    of pushing agentic concurrency past what the config can serve while
+    holding SLO. Treating it as a malfunction (the prior behavior) leaks
+    "5 phase errors" noise into every experiment and makes the LLM
+    hallucinate engine-side problems. Routed here when:
+      - workload_id == "agentic_long_context", AND
+      - errors are dominated by timeout-shaped messages (per-turn or
+        session timeout) — the SLO-violation signature.
+    """
+    phase_id: str
+    workload_id: str = "agentic_long_context"
+    concurrency: int = 0
+    prompt_length: int = 0
+    error_rate: float = 0.0
+    errors: int = 0
+    reason: str = ""  # short human-readable cause: "per-turn timeout", "session timeout", …
+
+
 # ── Experiment Result ──────────────────────────────────────────────────────
 
 
@@ -324,6 +368,11 @@ class ExperimentResult(BaseModel):
     correctness_gate_passed: bool = False
     post_benchmark_correctness: SmokeTestResult | None = None  # re-check after load
 
+    # Agentic phases that hit SLO at a given concurrency without indicating
+    # an engine bug. Informational, NOT counted in `errors` and NOT promoted
+    # to status=partial. See executor._classify_phase_outcome.
+    ceiling_probe_phases: list[CeilingProbeInfo] = Field(default_factory=list)
+
 
 # ── Experiment Summary (compact, for LLM context) ─────────────────────────
 
@@ -347,6 +396,21 @@ class ExperimentSummary(BaseModel):
     correctness_gate_passed: bool = False
     failure_classification: str | None = None
     error: str | None = None  # error message + container logs for failed experiments
+
+    # Per-phase failures (error-rate gate violations). Populated from
+    # ExperimentResult.errors where stage == "benchmark_phase". The LLM uses
+    # this to detect chronic systemic failures (e.g. agentic phases failing
+    # 100% across many experiments) that headline aggregates hide.
+    failed_phases: list[FailedPhaseInfo] = Field(default_factory=list)
+
+    # Agentic ceiling-probe sweep summary. NOT failures — these are SLO-bound
+    # probes that simply identify the max concurrency a config can serve while
+    # meeting the agentic SLO. Surface separately so the planner doesn't
+    # mistake them for engine-side problems.
+    agentic_max_viable_concurrency: int = 0
+    agentic_concurrencies_probed: list[int] = Field(default_factory=list)
+    agentic_concurrencies_viable: list[int] = Field(default_factory=list)
+    agentic_concurrencies_ceiling: list[int] = Field(default_factory=list)
 
     optimization_classification: OptimizationClassification = (
         OptimizationClassification.NONE
@@ -400,6 +464,41 @@ class ExperimentSummary(BaseModel):
             result.smoke_tests.json_schema,
         ])
 
+        # Extract per-phase failures. executor pushes one ExperimentError per
+        # phase that breached the error-rate threshold AND was classified as a
+        # real malfunction (not an agentic ceiling probe). We project its
+        # details into a typed, compact view that the LLM cannot ignore.
+        failed_phases: list[FailedPhaseInfo] = []
+        for err in result.errors:
+            if err.stage != "benchmark_phase":
+                continue
+            d = err.details or {}
+            samples = d.get("error_samples") or []
+            sample = str(samples[0])[:240] if samples else err.message[:240]
+            failed_phases.append(FailedPhaseInfo(
+                phase_id=str(d.get("phase_id", "")),
+                workload_id=str(d.get("workload_id", "")),
+                concurrency=int(d.get("concurrency") or 0),
+                prompt_length=int(d.get("prompt_length") or 0),
+                error_rate=float(d.get("error_rate") or 0.0),
+                errors=int(d.get("errors") or 0),
+                error_sample=sample,
+            ))
+
+        # Agentic ceiling-probe view: union of passing agentic phases (in
+        # benchmark.concurrency_results) and SLO-bound probes (in
+        # ceiling_probe_phases). Lets the LLM see "tried [8,16,32,64,128],
+        # viable [8,16], ceiling [32,64,128]" — clean ceiling signal.
+        viable_agentic_c = sorted({
+            r.concurrency
+            for r in result.benchmark.concurrency_results
+            if r.workload_id == "agentic_long_context"
+        })
+        ceiling_agentic_c = sorted({
+            p.concurrency for p in result.ceiling_probe_phases
+        })
+        probed_agentic_c = sorted(set(viable_agentic_c) | set(ceiling_agentic_c))
+
         return cls(
             experiment_id=result.experiment_id,
             engine=result.engine,
@@ -419,6 +518,11 @@ class ExperimentSummary(BaseModel):
             llm_commentary=result.llm_commentary,
             container_command=result.container_command,
             rationale=result.config.rationale,
+            failed_phases=failed_phases,
+            agentic_max_viable_concurrency=result.benchmark.max_viable_agentic_concurrency,
+            agentic_concurrencies_probed=probed_agentic_c,
+            agentic_concurrencies_viable=viable_agentic_c,
+            agentic_concurrencies_ceiling=ceiling_agentic_c,
         )
 
 

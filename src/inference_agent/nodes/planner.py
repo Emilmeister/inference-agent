@@ -203,6 +203,43 @@ _PROMPT_FOOTER = """
 - For optional fields with no value, emit JSON `null`, not the string `"null"` \
   or empty string `""`. Empty/quoted-empty strings are treated as `null` \
   defensively, but emitting `null` directly is cleaner.
+
+## `failed_phases` in history entries — read this before choosing knobs
+Each history entry may include `failed_phases: list`. Each item names a \
+benchmark phase (phase_id, workload, concurrency, prompt_length) that \
+breached the error-rate gate, along with `error_rate` and a `sample_error` \
+string (timeout text, HTTP code, etc.). Headline `peak_throughput` / \
+`ttft_p95` are computed from surviving phases ONLY, so they can look fine \
+while an entire workload (e.g. `agentic_long_context`) is broken. Rules:
+- When the SAME workload's failed_phases appear across multiple consecutive \
+  history entries with similar sample_error (e.g. "Session timeout after \
+  60s"), the cause is configuration- or workload-level, not the engine knob \
+  you're sweeping. Do NOT keep iterating engine flags hoping it fixes itself.
+- The failed workload is not what you optimize — your planner_hint and \
+  rationale should NAME the chronic failure and either propose a different \
+  knob class (e.g. raise per-turn timeout, lower agentic concurrency) or \
+  acknowledge that the failure is out of your control (config-side).
+- A 100% error_rate at every probed concurrency for the same workload is \
+  NOT a "ceiling reached" signal — it's a malfunction. A true ceiling looks \
+  like rising error_rate / TTFT across the sweep, not flat 100% everywhere.
+
+## `agentic` block in history entries — read this for ceiling info
+History entries may include `agentic: {max_viable_concurrency, probed, \
+viable, ceiling_probed}`. This is the result of the agentic_long_context \
+sweep: a deliberate ceiling probe to measure how many concurrent code-agent \
+sessions this config can serve while meeting the agentic SLO. The fields:
+- `probed` — concurrencies actually tested in this run.
+- `viable` — those that passed (error_rate gate + TTFT p95 SLO + E2E p95 SLO).
+- `ceiling_probed` — those that exceeded SLO with timeout-shaped errors. \
+  These are NOT bugs and are NOT in `failed_phases`; they are the natural \
+  upper end of the sweep.
+- `max_viable_concurrency` — headline number: how many parallel agents the \
+  config sustained while honoring SLO.
+Reading rule: a config with higher `max_viable_concurrency` serves more \
+parallel agents under SLO — relevant when the goal cares about agentic \
+throughput. A value of 0 with non-empty `ceiling_probed` means the lowest \
+probed concurrency already exceeded SLO; the ceiling is BELOW your probe \
+range (config-side: lower agentic_concurrency_levels or relax SLO).
 {user_instructions}
 Generate the next experiment configuration.
 """
@@ -366,6 +403,32 @@ def _summary_to_prompt_entry(h: ExperimentSummary) -> dict:
         entry["error"] = h.error
     if h.failure_classification:
         entry["failure_type"] = h.failure_classification
+    # Per-phase failure detail (structured, not buried in the error string).
+    # Crucial for spotting systemic patterns like "agentic phase fails 100%
+    # in every recent experiment" that headline metrics hide.
+    if h.failed_phases:
+        entry["failed_phases"] = [
+            {
+                "phase": fp.phase_id,
+                "workload": fp.workload_id,
+                "concurrency": fp.concurrency,
+                "prompt_length": fp.prompt_length,
+                "error_rate": round(fp.error_rate, 3),
+                "sample_error": fp.error_sample,
+            }
+            for fp in h.failed_phases
+        ]
+    # Agentic ceiling-probe sweep: NOT a failure signal. Tells the planner
+    # how many parallel agents this config served while meeting SLO, and at
+    # which concurrencies it ran out of room. Empty when no agentic phases
+    # ran (small max_model_len, or enable_agentic_long_context=false).
+    if h.agentic_concurrencies_probed:
+        entry["agentic"] = {
+            "max_viable_concurrency": h.agentic_max_viable_concurrency,
+            "probed": h.agentic_concurrencies_probed,
+            "viable": h.agentic_concurrencies_viable,
+            "ceiling_probed": h.agentic_concurrencies_ceiling,
+        }
     if h.llm_commentary:
         entry["analysis"] = h.llm_commentary
     return entry

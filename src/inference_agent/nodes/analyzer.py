@@ -41,6 +41,36 @@ The score column already applies a soft noise derate, so a config with high cv \
 won't dominate by raw throughput alone — but you still see the raw numbers and \
 should call out noise explicitly in the commentary when it's load-bearing.
 
+## Per-phase failures (`failed_phases` in the latest experiment payload)
+If `failed_phases` is present, one or more benchmark phases breached the \
+error-rate gate with a NON-timeout-shaped failure (HTTP 5xx, connection \
+refused, parse error, or any non-agentic workload failure). These are real \
+malfunctions, not ceiling probes. The headline peak_throughput / ttft_p95 \
+are computed from the SURVIVING phases only, so they can look fine even \
+when entire workload categories failed 100%. You MUST:
+- Acknowledge each failed phase in your commentary (phase_id, workload, \
+  concurrency, sample_error).
+- NEVER write "no benchmark errors" or "agentic stability improvement" when \
+  `failed_phases` is non-empty — that contradicts the structured signal and \
+  misleads the planner.
+- If the same workload fails across multiple consecutive experiments, treat \
+  it as a systemic issue and route the planner_hint toward addressing the \
+  cause rather than chasing throughput knobs.
+
+## Agentic ceiling probe (`agentic` in the latest experiment payload)
+If `agentic` is present, the run included an agentic_long_context sweep. \
+Fields: `max_viable_concurrency` (headline — how many parallel code-agents \
+this config served while meeting SLO), `probed`, `viable`, `ceiling_probed`. \
+The `ceiling_probed` concurrencies are EXPECTED outcomes of the sweep, NOT \
+failures — they tell you where the config ran out of room. Rules:
+- DO NOT treat ceiling_probed entries as malfunctions. They are not in \
+  `failed_phases` for a reason.
+- DO surface `max_viable_concurrency` when discussing the run's agentic \
+  capacity. A higher value beats a lower one for agentic-throughput goals.
+- If `max_viable_concurrency == 0` AND `ceiling_probed` is non-empty, the \
+  ceiling is below the lowest probed concurrency — flag this as a \
+  configuration/SLO issue, not as a knob to tune.
+
 ## Latest Experiment
 {latest_json}
 
@@ -345,19 +375,61 @@ async def analyzer_node(state: AgentState) -> dict:
             )
         return "\n".join(lines)
 
+    # Compact per-phase failure view — same shape as ExperimentSummary's,
+    # but built directly from result.errors so it's available even before
+    # ExperimentSummary is constructed by the reporter.
+    failed_phases_view = []
+    for err in result.errors:
+        if err.stage != "benchmark_phase":
+            continue
+        d = err.details or {}
+        samples = d.get("error_samples") or []
+        failed_phases_view.append({
+            "phase": str(d.get("phase_id", "")),
+            "workload": str(d.get("workload_id", "")),
+            "concurrency": int(d.get("concurrency") or 0),
+            "prompt_length": int(d.get("prompt_length") or 0),
+            "error_rate": round(float(d.get("error_rate") or 0.0), 3),
+            "errors": int(d.get("errors") or 0),
+            "sample_error": str(samples[0])[:240] if samples else err.message[:240],
+        })
+
+    latest_payload: dict = {
+        "id": result.experiment_id,
+        "engine": result.engine.value,
+        "status": result.status.value,
+        "config": result.config.model_dump(exclude={"rationale"}),
+        "peak_throughput": tp,
+        "peak_throughput_e2e_cv": result.benchmark.peak_throughput_e2e_cv,
+        "ttft_p95": lat,
+        "low_concurrency_ttft_cv": result.benchmark.low_concurrency_ttft_cv,
+        "smoke_tests": result.smoke_tests.model_dump(),
+        "rationale": result.config.rationale,
+    }
+    if result.failure_classification:
+        latest_payload["failure_classification"] = result.failure_classification
+    if result.error:
+        # Cap to avoid blowing the prompt; failed_phases below carry structure.
+        latest_payload["error"] = result.error[:1200]
+    if failed_phases_view:
+        latest_payload["failed_phases"] = failed_phases_view
+
+    # Agentic ceiling-probe view: deliberate sweep, NOT failures.
+    probed = sorted({p.concurrency for p in result.ceiling_probe_phases})
+    viable = sorted({
+        r.concurrency for r in result.benchmark.concurrency_results
+        if r.workload_id == "agentic_long_context"
+    })
+    if probed or viable:
+        latest_payload["agentic"] = {
+            "max_viable_concurrency": result.benchmark.max_viable_agentic_concurrency,
+            "probed": sorted(set(probed) | set(viable)),
+            "viable": viable,
+            "ceiling_probed": probed,
+        }
+
     prompt = ANALYZER_SYSTEM_PROMPT.format(
-        latest_json=json.dumps({
-            "id": result.experiment_id,
-            "engine": result.engine.value,
-            "status": result.status.value,
-            "config": result.config.model_dump(exclude={"rationale"}),
-            "peak_throughput": tp,
-            "peak_throughput_e2e_cv": result.benchmark.peak_throughput_e2e_cv,
-            "ttft_p95": lat,
-            "low_concurrency_ttft_cv": result.benchmark.low_concurrency_ttft_cv,
-            "smoke_tests": result.smoke_tests.model_dump(),
-            "rationale": result.config.rationale,
-        }, indent=2, default=str),
+        latest_json=json.dumps(latest_payload, indent=2, default=str),
         top_throughput=_format_leaderboard(sorted_by_tp),
         top_latency=_format_leaderboard(sorted_by_lat),
         top_balanced=_format_leaderboard(sorted_balanced),
