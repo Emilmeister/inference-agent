@@ -360,27 +360,39 @@ def _should_disable_speculative(
 def _get_quarantined_engines(
     history: list[ExperimentSummary],
     threshold: int = 3,
+    loaded_top_history: list[ExperimentSummary] | None = None,
 ) -> set[EngineType]:
-    """Park engines that keep failing without ever producing a success.
+    """Park engines that have NEVER produced a success and keep failing.
 
-    Counts consecutive failures per engine since its last success in this
-    session; once an engine hits `threshold`, it is excluded from the
-    planner's choices for the rest of the session. Symptom shape doesn't
-    matter — repeated startup_crash, then argparse_error, then OOM usually
-    points at a fundamental engine-image / model incompatibility, and burning
-    more budget on it is wasteful. Restart with a different image to lift
-    the quarantine.
+    Quarantine fires only when an engine has zero successes (across the current
+    session AND `loaded_top_history` from the DB for matching hardware/model)
+    AND has accumulated `threshold` or more failures in the current session.
+    This protects against the "fundamental engine/model incompatibility" case
+    (repeated startup_crash, argparse_error, OOM) where burning more budget is
+    wasteful — without locking out an engine that owns the leaderboard just
+    because the planner queued up a few risky configs in a row. Restart with a
+    different image to lift a quarantine that has fired.
 
-    A success on the engine resets the counter (so a flaky-but-eventually-
-    working engine is not punished forever).
+    Why both histories: if an engine had successes in prior sessions (loaded
+    from DB), those successes are evidence the engine works on this exact
+    hardware/model, so a streak of failures in the current session is a tuning
+    problem the planner should iterate on, not a quarantine signal.
     """
-    consecutive_failures: dict[EngineType, int] = {}
+    successes: set[EngineType] = set()
     for h in history:
         if h.status.value == "success":
-            consecutive_failures[h.engine] = 0
-        else:
-            consecutive_failures[h.engine] = consecutive_failures.get(h.engine, 0) + 1
-    return {e for e, c in consecutive_failures.items() if c >= threshold}
+            successes.add(h.engine)
+    for h in loaded_top_history or []:
+        if h.status.value == "success":
+            successes.add(h.engine)
+    failures: dict[EngineType, int] = {}
+    for h in history:
+        if h.status.value != "success":
+            failures[h.engine] = failures.get(h.engine, 0) + 1
+    return {
+        e for e, c in failures.items()
+        if c >= threshold and e not in successes
+    }
 
 
 def _summary_to_prompt_entry(h: ExperimentSummary) -> dict:
@@ -464,16 +476,20 @@ async def planner_node(state: AgentState) -> dict:
     # with valid metrics, so we don't re-filter here.
     loaded_top_for_llm = [_summary_to_prompt_entry(h) for h in loaded_top_history]
 
-    # Engine quarantine: if an engine has racked up >=3 consecutive failures
-    # since its last success in this session, exclude it from the planner's
-    # choices. Falls back to all available engines only if quarantine would
-    # leave nothing to pick (so the agent can keep trying rather than crash).
-    quarantined = _get_quarantined_engines(history)
+    # Engine quarantine: if an engine has produced zero successes (this session
+    # OR in loaded_top_history from the DB for matching hardware/model) AND has
+    # racked up >=3 failures this session, exclude it from the planner's
+    # choices. An engine with any prior success on this stack is never
+    # quarantined — repeated failures there are a tuning signal, not an
+    # incompatibility signal. Falls back to all available engines only if
+    # quarantine would leave nothing to pick.
+    quarantined = _get_quarantined_engines(history, loaded_top_history=loaded_top_history)
     effective_engines = [e for e in hardware.available_engines if e not in quarantined]
     if quarantined:
         logger.warning(
-            "Engine quarantine active: %s (>=3 consecutive failures, no successes). "
-            "Restart with a different image tag to lift.",
+            "Engine quarantine active: %s (>=3 failures, zero successes this "
+            "session or in loaded history). Restart with a different image tag "
+            "to lift.",
             ", ".join(sorted(e.value for e in quarantined)),
         )
     if not effective_engines:
