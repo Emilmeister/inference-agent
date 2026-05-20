@@ -176,6 +176,11 @@ class DatabaseConfig(BaseModel):
 
     Password may be set directly, via `password_env` (env var name), or via the
     `DATABASE_PASSWORD` env override applied in `cli._load_config`.
+
+    `http_proxy` / `https_proxy` route DB traffic through an HTTP CONNECT proxy
+    (Postgres is TCP, not HTTP, so this is implemented via a local TCP
+    forwarder — see `utils.db_proxy.DBProxyTunnel`). If unset, standard
+    `HTTP_PROXY` / `HTTPS_PROXY` env vars are honored.
     """
 
     host: str = "localhost"
@@ -190,11 +195,36 @@ class DatabaseConfig(BaseModel):
     pool_timeout_sec: int = 30
     echo: bool = False
 
+    http_proxy: str | None = None
+    https_proxy: str | None = None
+
     @model_validator(mode="after")
     def _resolve_password(self) -> "DatabaseConfig":
         if not self.password and self.password_env:
             self.password = os.environ.get(self.password_env)
         return self
+
+    @model_validator(mode="after")
+    def _resolve_proxy(self) -> "DatabaseConfig":
+        if not self.http_proxy:
+            self.http_proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+        if not self.https_proxy:
+            self.https_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+        return self
+
+    @property
+    def effective_proxy_url(self) -> str | None:
+        """Pick the proxy URL to use for DB traffic.
+
+        HTTPS_PROXY wins because that's the standard env for outbound CONNECT;
+        HTTP_PROXY is a fallback for callers that only set the lower-case form.
+        """
+        return self.https_proxy or self.http_proxy
+
+    def with_endpoint(self, host: str, port: int) -> "DatabaseConfig":
+        """Return a copy pointing at a different (host, port) — used to rewrite
+        the URL onto a local proxy tunnel listener."""
+        return self.model_copy(update={"host": host, "port": port})
 
     @property
     def url(self) -> str:

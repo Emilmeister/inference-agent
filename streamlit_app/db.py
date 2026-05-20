@@ -26,6 +26,7 @@ from sqlalchemy.orm import sessionmaker
 
 from inference_agent.db.models import ExperimentRow
 from inference_agent.models_pkg.config import DatabaseConfig
+from inference_agent.utils.db_proxy import DBProxyTunnel
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,7 @@ def _load_db_config() -> DatabaseConfig:
         "host", "port", "database", "user",
         "password", "password_env",
         "pool_size", "pool_max_overflow", "pool_timeout_sec", "echo",
+        "http_proxy", "https_proxy",
     ):
         env_name = f"DATABASE_{field_name.upper()}"
         if env_name in os.environ:
@@ -67,6 +69,13 @@ def _load_db_config() -> DatabaseConfig:
 @st.cache_resource
 def get_engine() -> Engine:
     cfg = _load_db_config()
+    proxy_url = cfg.effective_proxy_url
+    if proxy_url:
+        # Tunnel is cached together with the engine via st.cache_resource — the
+        # background thread persists for the lifetime of the Streamlit process.
+        tunnel = DBProxyTunnel(proxy_url, cfg.host, cfg.port)
+        local_host, local_port = tunnel.start_sync()
+        cfg = cfg.with_endpoint(local_host, local_port)
     return create_engine(cfg.sync_url, pool_pre_ping=True)
 
 

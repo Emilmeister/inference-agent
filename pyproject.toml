@@ -20,6 +20,7 @@ dependencies = [
     "asyncpg>=0.29",
     "psycopg[binary]>=3.1",
     "alembic>=1.13",
+    "python-socks[asyncio]>=2.4",
 ]
 
 [project.optional-dependencies]

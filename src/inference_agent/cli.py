@@ -15,6 +15,7 @@ from inference_agent.agent import compile_agent
 from inference_agent.db import ExperimentRepository, init_schema
 from inference_agent.models import AgentConfig, OptimizationGoal
 from inference_agent.utils.container import stop_all_bench_containers
+from inference_agent.utils.db_proxy import DBProxyTunnel
 from inference_agent.utils.logging import setup_logging
 
 
@@ -44,6 +45,8 @@ _DATABASE_ENV_FIELDS = (
     "pool_max_overflow",
     "pool_timeout_sec",
     "echo",
+    "http_proxy",
+    "https_proxy",
 )
 
 
@@ -90,8 +93,19 @@ async def _run(config: AgentConfig) -> None:
     """Run the agent."""
     logger = logging.getLogger("inference_agent")
 
+    proxy_url = config.database.effective_proxy_url
+    tunnel: DBProxyTunnel | None = None
+    if proxy_url:
+        tunnel = DBProxyTunnel(
+            proxy_url, config.database.host, config.database.port
+        )
+        local_host, local_port = await tunnel.start_async()
+        db_url = config.database.with_endpoint(local_host, local_port).url
+    else:
+        db_url = config.database.url
+
     engine = create_async_engine(
-        config.database.url,
+        db_url,
         pool_size=config.database.pool_size,
         max_overflow=config.database.pool_max_overflow,
         pool_timeout=config.database.pool_timeout_sec,
@@ -142,6 +156,8 @@ async def _run(config: AgentConfig) -> None:
             raise
     finally:
         await engine.dispose()
+        if tunnel is not None:
+            await tunnel.stop_async()
 
     # Print summary
     print("\n" + "=" * 60)
