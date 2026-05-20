@@ -203,6 +203,43 @@ _PROMPT_FOOTER = """
 - For optional fields with no value, emit JSON `null`, not the string `"null"` \
   or empty string `""`. Empty/quoted-empty strings are treated as `null` \
   defensively, but emitting `null` directly is cleaner.
+
+## `failed_phases` in history entries — read this before choosing knobs
+Each history entry may include `failed_phases: list`. Each item names a \
+benchmark phase (phase_id, workload, concurrency, prompt_length) that \
+breached the error-rate gate, along with `error_rate` and a `sample_error` \
+string (timeout text, HTTP code, etc.). Headline `peak_throughput` / \
+`ttft_p95` are computed from surviving phases ONLY, so they can look fine \
+while an entire workload (e.g. `agentic_long_context`) is broken. Rules:
+- When the SAME workload's failed_phases appear across multiple consecutive \
+  history entries with similar sample_error (e.g. "Session timeout after \
+  60s"), the cause is configuration- or workload-level, not the engine knob \
+  you're sweeping. Do NOT keep iterating engine flags hoping it fixes itself.
+- The failed workload is not what you optimize — your planner_hint and \
+  rationale should NAME the chronic failure and either propose a different \
+  knob class (e.g. raise per-turn timeout, lower agentic concurrency) or \
+  acknowledge that the failure is out of your control (config-side).
+- A 100% error_rate at every probed concurrency for the same workload is \
+  NOT a "ceiling reached" signal — it's a malfunction. A true ceiling looks \
+  like rising error_rate / TTFT across the sweep, not flat 100% everywhere.
+
+## `agentic` block in history entries — read this for ceiling info
+History entries may include `agentic: {{max_viable_concurrency, probed, \
+viable, ceiling_probed}}`. This is the result of the agentic_long_context \
+sweep: a deliberate ceiling probe to measure how many concurrent code-agent \
+sessions this config can serve while meeting the agentic SLO. The fields:
+- `probed` — concurrencies actually tested in this run.
+- `viable` — those that passed (error_rate gate + TTFT p95 SLO + E2E p95 SLO).
+- `ceiling_probed` — those that exceeded SLO with timeout-shaped errors. \
+  These are NOT bugs and are NOT in `failed_phases`; they are the natural \
+  upper end of the sweep.
+- `max_viable_concurrency` — headline number: how many parallel agents the \
+  config sustained while honoring SLO.
+Reading rule: a config with higher `max_viable_concurrency` serves more \
+parallel agents under SLO — relevant when the goal cares about agentic \
+throughput. A value of 0 with non-empty `ceiling_probed` means the lowest \
+probed concurrency already exceeded SLO; the ceiling is BELOW your probe \
+range (config-side: lower agentic_concurrency_levels or relax SLO).
 {user_instructions}
 Generate the next experiment configuration.
 """
@@ -323,27 +360,39 @@ def _should_disable_speculative(
 def _get_quarantined_engines(
     history: list[ExperimentSummary],
     threshold: int = 3,
+    loaded_top_history: list[ExperimentSummary] | None = None,
 ) -> set[EngineType]:
-    """Park engines that keep failing without ever producing a success.
+    """Park engines that have NEVER produced a success and keep failing.
 
-    Counts consecutive failures per engine since its last success in this
-    session; once an engine hits `threshold`, it is excluded from the
-    planner's choices for the rest of the session. Symptom shape doesn't
-    matter — repeated startup_crash, then argparse_error, then OOM usually
-    points at a fundamental engine-image / model incompatibility, and burning
-    more budget on it is wasteful. Restart with a different image to lift
-    the quarantine.
+    Quarantine fires only when an engine has zero successes (across the current
+    session AND `loaded_top_history` from the DB for matching hardware/model)
+    AND has accumulated `threshold` or more failures in the current session.
+    This protects against the "fundamental engine/model incompatibility" case
+    (repeated startup_crash, argparse_error, OOM) where burning more budget is
+    wasteful — without locking out an engine that owns the leaderboard just
+    because the planner queued up a few risky configs in a row. Restart with a
+    different image to lift a quarantine that has fired.
 
-    A success on the engine resets the counter (so a flaky-but-eventually-
-    working engine is not punished forever).
+    Why both histories: if an engine had successes in prior sessions (loaded
+    from DB), those successes are evidence the engine works on this exact
+    hardware/model, so a streak of failures in the current session is a tuning
+    problem the planner should iterate on, not a quarantine signal.
     """
-    consecutive_failures: dict[EngineType, int] = {}
+    successes: set[EngineType] = set()
     for h in history:
         if h.status.value == "success":
-            consecutive_failures[h.engine] = 0
-        else:
-            consecutive_failures[h.engine] = consecutive_failures.get(h.engine, 0) + 1
-    return {e for e, c in consecutive_failures.items() if c >= threshold}
+            successes.add(h.engine)
+    for h in loaded_top_history or []:
+        if h.status.value == "success":
+            successes.add(h.engine)
+    failures: dict[EngineType, int] = {}
+    for h in history:
+        if h.status.value != "success":
+            failures[h.engine] = failures.get(h.engine, 0) + 1
+    return {
+        e for e, c in failures.items()
+        if c >= threshold and e not in successes
+    }
 
 
 def _summary_to_prompt_entry(h: ExperimentSummary) -> dict:
@@ -366,6 +415,32 @@ def _summary_to_prompt_entry(h: ExperimentSummary) -> dict:
         entry["error"] = h.error
     if h.failure_classification:
         entry["failure_type"] = h.failure_classification
+    # Per-phase failure detail (structured, not buried in the error string).
+    # Crucial for spotting systemic patterns like "agentic phase fails 100%
+    # in every recent experiment" that headline metrics hide.
+    if h.failed_phases:
+        entry["failed_phases"] = [
+            {
+                "phase": fp.phase_id,
+                "workload": fp.workload_id,
+                "concurrency": fp.concurrency,
+                "prompt_length": fp.prompt_length,
+                "error_rate": round(fp.error_rate, 3),
+                "sample_error": fp.error_sample,
+            }
+            for fp in h.failed_phases
+        ]
+    # Agentic ceiling-probe sweep: NOT a failure signal. Tells the planner
+    # how many parallel agents this config served while meeting SLO, and at
+    # which concurrencies it ran out of room. Empty when no agentic phases
+    # ran (small max_model_len, or enable_agentic_long_context=false).
+    if h.agentic_concurrencies_probed:
+        entry["agentic"] = {
+            "max_viable_concurrency": h.agentic_max_viable_concurrency,
+            "probed": h.agentic_concurrencies_probed,
+            "viable": h.agentic_concurrencies_viable,
+            "ceiling_probed": h.agentic_concurrencies_ceiling,
+        }
     if h.llm_commentary:
         entry["analysis"] = h.llm_commentary
     return entry
@@ -401,16 +476,20 @@ async def planner_node(state: AgentState) -> dict:
     # with valid metrics, so we don't re-filter here.
     loaded_top_for_llm = [_summary_to_prompt_entry(h) for h in loaded_top_history]
 
-    # Engine quarantine: if an engine has racked up >=3 consecutive failures
-    # since its last success in this session, exclude it from the planner's
-    # choices. Falls back to all available engines only if quarantine would
-    # leave nothing to pick (so the agent can keep trying rather than crash).
-    quarantined = _get_quarantined_engines(history)
+    # Engine quarantine: if an engine has produced zero successes (this session
+    # OR in loaded_top_history from the DB for matching hardware/model) AND has
+    # racked up >=3 failures this session, exclude it from the planner's
+    # choices. An engine with any prior success on this stack is never
+    # quarantined — repeated failures there are a tuning signal, not an
+    # incompatibility signal. Falls back to all available engines only if
+    # quarantine would leave nothing to pick.
+    quarantined = _get_quarantined_engines(history, loaded_top_history=loaded_top_history)
     effective_engines = [e for e in hardware.available_engines if e not in quarantined]
     if quarantined:
         logger.warning(
-            "Engine quarantine active: %s (>=3 consecutive failures, no successes). "
-            "Restart with a different image tag to lift.",
+            "Engine quarantine active: %s (>=3 failures, zero successes this "
+            "session or in loaded history). Restart with a different image tag "
+            "to lift.",
             ", ".join(sorted(e.value for e in quarantined)),
         )
     if not effective_engines:

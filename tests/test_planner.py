@@ -260,20 +260,40 @@ class TestGetQuarantinedEngines:
         ]
         assert _get_quarantined_engines(history, threshold=3) == {EngineType.VLLM}
 
-    def test_success_resets_counter(self):
-        # 2 fails, then success, then 2 more fails — only 2 consecutive,
-        # below threshold. Quarantine is about consecutive failures since
-        # last success, not lifetime totals.
+    def test_any_session_success_prevents_quarantine(self):
+        # Engine has produced a success this session, so even a long failure
+        # streak afterwards must NOT quarantine it — those failures are a
+        # tuning signal (planner chasing risky configs), not an
+        # incompatibility signal. Real-world regression: vLLM owned the
+        # Pareto front, then 3 consecutive risky configs failed and the
+        # agent locked vLLM out for the rest of the session.
         history = [
-            _make_summary("a", EngineType.VLLM, ExperimentStatus.FAILED),
+            _make_summary("a", EngineType.VLLM, ExperimentStatus.SUCCESS),
             _make_summary("b", EngineType.VLLM, ExperimentStatus.FAILED),
-            _make_summary("c", EngineType.VLLM, ExperimentStatus.SUCCESS),
+            _make_summary("c", EngineType.VLLM, ExperimentStatus.FAILED),
             _make_summary("d", EngineType.VLLM, ExperimentStatus.FAILED),
             _make_summary("e", EngineType.VLLM, ExperimentStatus.FAILED),
         ]
         assert _get_quarantined_engines(history, threshold=3) == set()
 
+    def test_loaded_top_history_success_prevents_quarantine(self):
+        # Engine has prior-session successes loaded from DB for this exact
+        # hardware/model. A current-session failure streak is still tuning
+        # noise, not an engine/model incompatibility.
+        history = [
+            _make_summary("a", EngineType.VLLM, ExperimentStatus.FAILED),
+            _make_summary("b", EngineType.VLLM, ExperimentStatus.FAILED),
+            _make_summary("c", EngineType.VLLM, ExperimentStatus.FAILED),
+        ]
+        loaded = [_make_summary("old", EngineType.VLLM, ExperimentStatus.SUCCESS)]
+        assert (
+            _get_quarantined_engines(history, threshold=3, loaded_top_history=loaded)
+            == set()
+        )
+
     def test_quarantine_is_per_engine(self):
+        # sglang has a success and is exempt; vllm has zero successes and 3
+        # failures, so only vllm gets parked.
         history = [
             _make_summary("a", EngineType.VLLM, ExperimentStatus.FAILED),
             _make_summary("b", EngineType.SGLANG, ExperimentStatus.SUCCESS),
@@ -281,12 +301,12 @@ class TestGetQuarantinedEngines:
             _make_summary("d", EngineType.SGLANG, ExperimentStatus.SUCCESS),
             _make_summary("e", EngineType.VLLM, ExperimentStatus.FAILED),
         ]
-        # vllm has 3 consecutive fails, sglang has successes — only vllm parked
         assert _get_quarantined_engines(history, threshold=3) == {EngineType.VLLM}
 
     def test_mixed_failure_classifications_still_count(self):
         # Symptom shape doesn't matter — startup_crash + argparse_error +
-        # healthcheck_idle all count toward the same consecutive-failure tally.
+        # healthcheck_idle all count toward the same failure tally when the
+        # engine has produced zero successes.
         history = [
             _make_summary("a", EngineType.VLLM, ExperimentStatus.FAILED),
             _make_summary("b", EngineType.VLLM, ExperimentStatus.FAILED_CORRECTNESS),
