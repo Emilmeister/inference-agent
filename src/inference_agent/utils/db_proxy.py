@@ -60,18 +60,33 @@ class DBProxyTunnel:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
 
+        # Resolve python-socks at construction time so a missing dependency
+        # surfaces immediately (with a clear message) instead of as a silent
+        # per-connection failure that the DB driver only sees as a timeout.
+        try:
+            from python_socks.async_.asyncio import Proxy
+        except ImportError as e:
+            raise RuntimeError(
+                "DB HTTP proxy support requires the 'python-socks' package. "
+                "Install it on the host running the agent: "
+                "`pip install 'python-socks[asyncio]>=2.4'` "
+                "(or re-run `pip install -e .` to pick up the project dependency)."
+            ) from e
+        self._proxy_cls = Proxy
+
     async def _handle_client(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
-        from python_socks import ProxyError
-        from python_socks.async_.asyncio import Proxy
-
         try:
-            proxy = Proxy.from_url(self.proxy_url)
+            proxy = self._proxy_cls.from_url(self.proxy_url)
             sock = await proxy.connect(
                 dest_host=self.target_host, dest_port=self.target_port
             )
-        except (ProxyError, OSError):
+        except Exception:
+            # Catch broadly: python_socks raises various ProxyError subclasses
+            # plus OSError/TimeoutError for network issues. Anything that
+            # escapes leaves the inbound writer half-open and the DB driver
+            # waits the full connect_timeout — which is what we want to avoid.
             logger.exception(
                 "db proxy tunnel: CONNECT to %s:%d failed",
                 self.target_host, self.target_port,
