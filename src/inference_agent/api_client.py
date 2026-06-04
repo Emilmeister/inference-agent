@@ -70,9 +70,15 @@ class ExperimentApiClient:
 
     async def start(self) -> None:
         if self._session is None:
+            # trust_env=True makes aiohttp read HTTP_PROXY / HTTPS_PROXY /
+            # NO_PROXY from the environment the way requests does. Without
+            # this the client tries to dial the API host directly and hangs
+            # on networks where outbound traffic must go through a corporate
+            # HTTP proxy.
             self._session = aiohttp.ClientSession(
                 timeout=self._timeout,
                 headers=self._headers,
+                trust_env=True,
             )
 
     async def close(self) -> None:

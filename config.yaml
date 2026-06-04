@@ -1,5 +1,5 @@
 # Модель для бенчмарка
-model_name: "Qwen/Qwen3.5-397B-A17B-FP8"
+model_name: "google/gemma-4-12B-it"
 model_revision: null
 
 # Квантизация фиксируется на уровне всего прогона: один и тот же режим
@@ -22,8 +22,8 @@ agent_llm:
 
 # Container runtime (nerdctl + containerd)
 container:
-  vllm_image: "vllm/vllm-openai:v0.21.0"
-  sglang_image: "lmsysorg/sglang:v0.5.12"
+  vllm_image: "vllm/vllm-openai:latest"
+  sglang_image: "lmsysorg/sglang:latest"
   network: "host"
   shm_size: "16g"
   model_cache_dir: "/root/.cache/huggingface"
@@ -33,24 +33,16 @@ container:
   vllm_extra_args:
     - "--enable-auto-tool-choice"
     - "--reasoning-parser"
-    - "qwen3"
+    - "gemma4"
     - "--tool-call-parser"
-    - "qwen3_coder"
+    - "gemma4"
   sglang_extra_args:
     - "--reasoning-parser"
-    - "qwen3"
+    - "gemma4"
     - "--tool-call-parser"
-    - "qwen3_coder"
+    - "gemma4"
 
-# Поведение при старте движка (healthcheck, pull образа).
-# Бюджет ожидания ограничен двумя часами:
-#   hard_timeout_sec — абсолютный потолок ожидания /health = 200.
-#   idle_timeout_sec — если в логах контейнера нет нового маркера прогресса
-#     (loading weights, capturing cuda graph, ...) дольше этого времени —
-#     считаем, что движок завис, и абортим.
-# Idle-таймер сбрасывается на каждом новом маркере, поэтому большие модели
-# (60+ GB), которые честно грузятся 20+ минут с диска, успешно стартуют —
-# нужно лишь поднять hard_timeout_sec.
+# Поведение при старте движка
 startup:
   hard_timeout_sec: 1800       # 30 мин — увеличь если модель большая (60GB+ → 3600+)
   idle_timeout_sec: 300        # 5 мин без прогресса в логах = stall
@@ -133,35 +125,4 @@ api:
 # Пиши сюда на какие параметры обратить внимание, что попробовать,
 # что пропустить и т.д.
 planner_instructions: |
-  Отталкивайся в vllm от baseline (нельзя делать модель text-only):
-  vllm serve /models/Qwen/Qwen3.5-397B-A17B-FP8 \
-            --served-model-name Qwen/Qwen3.5-397B-A17B \
-            --stream-interval 2 \
-            --async-scheduling \
-            --performance-mode throughput \
-            --scheduling-policy fcfs \
-            --max-model-len 262144 \
-            --max-num-batched-tokens 16384 \
-            --gpu-memory-utilization 0.88 \
-            --enable-expert-parallel \
-            --tensor-parallel-size 8 \
-            --quantization fp8 \
-            --max-num-seqs 64 \
-            --seed 1024 \
-            --kv-cache-dtype fp8_e4m3 \
-            --attention-config.flash_attn_version=3 \
-            --mm-encoder-tp-mode data \
-            --mm-processor-cache-type shm \
-            --mm-processor-cache-gb 8 \
-            --limit-mm-per-prompt '{"image":5,"video":0}' \
-            --mm-processor-kwargs '{"max_pixels":2073600}' \
-            --optimization-level 3 \
-            --enable-prefix-caching \
-            --enable-chunked-prefill \
-            --speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":1}' \
-            --enable-prompt-tokens-details \
-            --enable-force-include-usage \
-            --reasoning-parser qwen3 \
-            --tool-call-parser qwen3_coder --enable-auto-tool-choice \
-            --override-generation-config '{"max_new_tokens": 65536}'
-
+  Полная свобода действий
