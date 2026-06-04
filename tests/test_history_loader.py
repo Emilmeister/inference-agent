@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from inference_agent.db.repository import ExperimentRepository
+from inference_agent.api_client import ExperimentApiClient
 from inference_agent.models import (
     AgentConfig,
     EngineType,
@@ -40,17 +40,17 @@ def _summary(exp_id: str) -> ExperimentSummary:
 
 @pytest.mark.asyncio
 async def test_history_loader_populates_state():
-    repo = AsyncMock(spec=ExperimentRepository)
+    client = AsyncMock(spec=ExperimentApiClient)
     summaries = [_summary("a"), _summary("b")]
-    repo.find_top_for_hardware.return_value = summaries
+    client.find_top_for_hardware.return_value = summaries
 
-    node = make_history_loader_node(repo)
+    node = make_history_loader_node(client)
     config = AgentConfig(model_name="Qwen/Qwen2.5-7B-Instruct")
     out = await node({"config": config, "hardware": _hw()})
 
     assert out == {"loaded_top_history": summaries}
-    repo.find_top_for_hardware.assert_awaited_once()
-    kwargs = repo.find_top_for_hardware.call_args.kwargs
+    client.find_top_for_hardware.assert_awaited_once()
+    kwargs = client.find_top_for_hardware.call_args.kwargs
     assert kwargs["model_name"] == "Qwen/Qwen2.5-7B-Instruct"
     assert kwargs["limit"] == 2
     assert kwargs["latency_threshold_ms"] == config.benchmark.latency_threshold_ms
@@ -58,9 +58,9 @@ async def test_history_loader_populates_state():
 
 @pytest.mark.asyncio
 async def test_history_loader_handles_missing_hardware():
-    repo = AsyncMock(spec=ExperimentRepository)
-    node = make_history_loader_node(repo)
+    client = AsyncMock(spec=ExperimentApiClient)
+    node = make_history_loader_node(client)
     out = await node({"config": AgentConfig()})
 
     assert out == {"loaded_top_history": []}
-    repo.find_top_for_hardware.assert_not_awaited()
+    client.find_top_for_hardware.assert_not_awaited()

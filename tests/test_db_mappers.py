@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from inference_agent.db.mappers import (
+from inference_api.db.mappers import (
     HeterogeneousClusterError,
     result_to_row,
     row_to_summary,

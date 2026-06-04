@@ -1,4 +1,4 @@
-"""Tests for reporter — Postgres persistence via repository."""
+"""Tests for reporter — persistence via the REST API client."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from inference_agent.db.repository import ExperimentRepository
+from inference_agent.api_client import ExperimentApiClient
 from inference_agent.models import (
     AgentConfig,
     EngineType,
@@ -36,33 +36,33 @@ def _make_result(exp_id: str = "test123") -> ExperimentResult:
 
 
 @pytest.mark.asyncio
-async def test_reporter_inserts_current_result():
-    repo = AsyncMock(spec=ExperimentRepository)
-    node = make_reporter_node(repo)
+async def test_reporter_posts_current_result():
+    client = AsyncMock(spec=ExperimentApiClient)
+    node = make_reporter_node(client)
     result = _make_result()
 
     out = await node({"config": AgentConfig(), "current_result": result})
 
-    repo.insert_experiment.assert_awaited_once_with(result)
+    client.insert_experiment.assert_awaited_once_with(result)
     assert out == {}
 
 
 @pytest.mark.asyncio
 async def test_reporter_skips_when_no_result():
-    repo = AsyncMock(spec=ExperimentRepository)
-    node = make_reporter_node(repo)
+    client = AsyncMock(spec=ExperimentApiClient)
+    node = make_reporter_node(client)
 
     out = await node({"config": AgentConfig(), "current_result": None})
 
-    repo.insert_experiment.assert_not_awaited()
+    client.insert_experiment.assert_not_awaited()
     assert out == {}
 
 
 @pytest.mark.asyncio
-async def test_reporter_propagates_repo_errors():
-    repo = AsyncMock(spec=ExperimentRepository)
-    repo.insert_experiment.side_effect = RuntimeError("DB down")
-    node = make_reporter_node(repo)
+async def test_reporter_propagates_api_errors():
+    client = AsyncMock(spec=ExperimentApiClient)
+    client.insert_experiment.side_effect = RuntimeError("API down")
+    node = make_reporter_node(client)
 
-    with pytest.raises(RuntimeError, match="DB down"):
+    with pytest.raises(RuntimeError, match="API down"):
         await node({"config": AgentConfig(), "current_result": _make_result()})

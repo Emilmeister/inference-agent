@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from inference_agent.db import ExperimentRepository, init_schema
+from inference_api.db import ExperimentRepository, init_schema
 from inference_agent.models import (
     BenchmarkResult,
     EngineType,

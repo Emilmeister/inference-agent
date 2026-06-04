@@ -1,4 +1,4 @@
-"""Tests for the DB-connection HTTP CONNECT tunnel (`utils.db_proxy.DBProxyTunnel`).
+"""Tests for the DB-connection HTTP CONNECT tunnel (`inference_api.db_proxy.DBProxyTunnel`).
 
 Stands up two in-process servers — a tiny HTTP CONNECT proxy and an echo
 target — and verifies that bytes routed through the tunnel land on the target
@@ -12,7 +12,7 @@ import asyncio
 
 import pytest
 
-from inference_agent.utils.db_proxy import DBProxyTunnel, _redact_proxy_url
+from inference_api.db_proxy import DBProxyTunnel, _redact_proxy_url
 
 
 async def _start_echo_server() -> tuple[asyncio.AbstractServer, int]:

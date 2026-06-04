@@ -21,8 +21,8 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from inference_agent.db.models import Base
-from inference_agent.models_pkg.config import DatabaseConfig
+from inference_api.config import DatabaseConfig
+from inference_api.db.models import Base
 
 # Alembic Config object.
 config = context.config

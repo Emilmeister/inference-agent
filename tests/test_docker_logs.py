@@ -1,6 +1,6 @@
 """Tests for engine-startup log classification."""
 
-from inference_agent.utils.docker import scan_engine_logs
+from inference_agent.utils.container import scan_engine_logs
 
 
 class TestScanEngineLogs:

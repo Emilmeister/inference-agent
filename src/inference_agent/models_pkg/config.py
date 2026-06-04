@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from typing import Literal
-from urllib.parse import quote_plus
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -171,74 +170,27 @@ class StorageConfig(BaseModel):
     logs_dir: str = "./logs"
 
 
-class DatabaseConfig(BaseModel):
-    """Postgres connection parameters.
+class ApiClientConfig(BaseModel):
+    """Inference-api REST service endpoint and auth.
 
-    Password may be set directly, via `password_env` (env var name), or via the
-    `DATABASE_PASSWORD` env override applied in `cli._load_config`.
+    The agent never speaks to Postgres directly — every persistence and
+    history query goes through `inference_agent.api_client.ExperimentApiClient`,
+    which talks to the FastAPI service (`src/inference_api/`).
 
-    `http_proxy` / `https_proxy` route DB traffic through an HTTP CONNECT proxy
-    (Postgres is TCP, not HTTP, so this is implemented via a local TCP
-    forwarder — see `utils.db_proxy.DBProxyTunnel`). If unset, standard
-    `HTTP_PROXY` / `HTTPS_PROXY` env vars are honored.
+    Token may be set directly or via `token_env` (env var name). The agent
+    refuses to construct the client without a token.
     """
 
-    host: str = "localhost"
-    port: int = 5432
-    database: str = "inference_agent"
-    user: str = "inference_agent"
-    password: str | None = None
-    password_env: str = "DB_PASSWORD"
-
-    pool_size: int = 5
-    pool_max_overflow: int = 10
-    pool_timeout_sec: int = 30
-    echo: bool = False
-
-    http_proxy: str | None = None
-    https_proxy: str | None = None
+    base_url: str = "http://localhost:8080"
+    token: str | None = None
+    token_env: str = "INFERENCE_API_TOKEN"
+    timeout_sec: float = 30.0
 
     @model_validator(mode="after")
-    def _resolve_password(self) -> "DatabaseConfig":
-        if not self.password and self.password_env:
-            self.password = os.environ.get(self.password_env)
+    def _resolve_token(self) -> "ApiClientConfig":
+        if not self.token and self.token_env:
+            self.token = os.environ.get(self.token_env)
         return self
-
-    @model_validator(mode="after")
-    def _resolve_proxy(self) -> "DatabaseConfig":
-        if not self.http_proxy:
-            self.http_proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
-        if not self.https_proxy:
-            self.https_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
-        return self
-
-    @property
-    def effective_proxy_url(self) -> str | None:
-        """Pick the proxy URL to use for DB traffic.
-
-        HTTPS_PROXY wins because that's the standard env for outbound CONNECT;
-        HTTP_PROXY is a fallback for callers that only set the lower-case form.
-        """
-        return self.https_proxy or self.http_proxy
-
-    def with_endpoint(self, host: str, port: int) -> "DatabaseConfig":
-        """Return a copy pointing at a different (host, port) — used to rewrite
-        the URL onto a local proxy tunnel listener."""
-        return self.model_copy(update={"host": host, "port": port})
-
-    @property
-    def url(self) -> str:
-        """Async URL for SQLAlchemy + asyncpg (used by the agent)."""
-        pwd = quote_plus(self.password or "")
-        usr = quote_plus(self.user)
-        return f"postgresql+asyncpg://{usr}:{pwd}@{self.host}:{self.port}/{self.database}"
-
-    @property
-    def sync_url(self) -> str:
-        """Sync URL for SQLAlchemy + psycopg (used by Streamlit)."""
-        pwd = quote_plus(self.password or "")
-        usr = quote_plus(self.user)
-        return f"postgresql+psycopg://{usr}:{pwd}@{self.host}:{self.port}/{self.database}"
 
 
 class AgentConfig(BaseModel):
@@ -256,7 +208,7 @@ class AgentConfig(BaseModel):
     benchmark: BenchmarkConfig = Field(default_factory=BenchmarkConfig)
     experiments: ExperimentsConfig = Field(default_factory=ExperimentsConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
-    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    api: ApiClientConfig = Field(default_factory=ApiClientConfig)
 
     # Natural language instructions for the LLM planner
     # e.g. "Try chunked_prefill_size=4096 with SGLang."

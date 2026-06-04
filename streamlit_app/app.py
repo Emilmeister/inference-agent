@@ -1,6 +1,8 @@
 """Streamlit dashboard for visualizing inference benchmark experiments.
 
-Source: Postgres (configured via DATABASE_* env vars + DB_PASSWORD).
+Source: the inference-api REST service (configured via INFERENCE_API_URL +
+INFERENCE_API_TOKEN). The dashboard never touches Postgres directly.
+
 Run: `streamlit run streamlit_app/app.py`
 """
 
@@ -13,7 +15,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from db import (
+from api import (
     Filters,
     HardwareKey,
     delete_experiments,
@@ -73,7 +75,7 @@ def _summary_label(row: pd.Series) -> str:
     )
 
 
-# ---- Source filters (Postgres-backed) ----
+# ---- Source filters (inference-api backed) ----
 
 
 st.sidebar.header("Source")
@@ -83,7 +85,7 @@ try:
     model_options = list_distinct_models()
     engine_options = list_distinct_engines()
 except Exception as exc:  # pragma: no cover - surfaced to user via UI
-    st.error(f"Failed to connect to Postgres: {exc}")
+    st.error(f"Failed to query inference-api: {exc}")
     st.stop()
 
 if not hardware_options:
@@ -117,7 +119,7 @@ if df.empty:
     st.warning("No experiments match the current filters.")
     st.stop()
 
-st.success(f"Loaded {len(df)} experiments from Postgres")
+st.success(f"Loaded {len(df)} experiments from inference-api")
 
 
 # ---- Display filters (in-page narrowing of the loaded set) ----

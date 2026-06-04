@@ -1,4 +1,4 @@
-"""History loader node — pulls top-N experiments from Postgres on startup.
+"""History loader node — pulls top-N experiments via inference-api on startup.
 
 Runs once per session, between `discovery` (which fixes hardware) and `planner`.
 Loads top-2 experiments per category (throughput, latency, balanced) for the
@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Awaitable, Callable
 
-from inference_agent.db.repository import ExperimentRepository
+from inference_agent.api_client import ExperimentApiClient
 from inference_agent.state import AgentState
 
 logger = logging.getLogger(__name__)
@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 HistoryLoaderNode = Callable[[AgentState], Awaitable[dict]]
 
 
-def make_history_loader_node(repo: ExperimentRepository) -> HistoryLoaderNode:
-    """Build a history_loader node closing over the experiment repository."""
+def make_history_loader_node(client: ExperimentApiClient) -> HistoryLoaderNode:
+    """Build a history_loader node closing over the API client."""
 
     async def history_loader_node(state: AgentState) -> dict:
         config = state["config"]
@@ -34,7 +34,7 @@ def make_history_loader_node(repo: ExperimentRepository) -> HistoryLoaderNode:
             )
             return {"loaded_top_history": []}
 
-        summaries = await repo.find_top_for_hardware(
+        summaries = await client.find_top_for_hardware(
             hardware=hardware,
             model_name=config.model_name,
             latency_threshold_ms=config.benchmark.latency_threshold_ms,

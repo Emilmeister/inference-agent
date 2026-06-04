@@ -1,0 +1,27 @@
+# Inference Benchmark REST API service.
+#
+# Все поля можно переопределить env-переменными:
+#   DATABASE_<UPPER>           — host/port/database/user/password/...
+#   INFERENCE_API_SERVER_<UPPER> — host/port/log_level
+#   INFERENCE_API_TOKEN          — Bearer token (или укажи token_env с другим именем)
+#
+# Запуск:  inference-api -c api.config.yaml
+# Зависимости: pip install -e ".[api]"
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  log_level: "info"
+
+auth:
+  # Не коммить токен в git — лучше задать INFERENCE_API_TOKEN.
+  token_env: "INFERENCE_API_TOKEN"
+
+database:
+  host: "localhost"
+  port: 5432
+  database: "inference_agent"
+  user: "inference_agent"
+  password_env: "DB_PASSWORD"
+  pool_size: 5
+  echo: false

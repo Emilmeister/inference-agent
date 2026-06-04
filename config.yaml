@@ -115,22 +115,19 @@ experiments:
   plateau_window: 5
   engines: ["vllm", "sglang"]
 
-# Storage (logs only; experiment results go to Postgres — см. секцию database)
+# Storage (logs only; experiment results go through the REST API — см. секцию api)
 storage:
   logs_dir: "./logs"
 
-# Postgres для хранения экспериментов и подгрузки топов между запусками.
-# Все поля можно переопределить env-переменными DATABASE_<UPPER> (например
-# DATABASE_HOST, DATABASE_PORT). Пароль читается из DB_PASSWORD по умолчанию;
-# поменяй password_env, если хочешь другую переменную.
-database:
-  host: "localhost"
-  port: 5432
-  database: "inference_agent"
-  user: "inference_agent"
-  password_env: "DB_PASSWORD"
-  pool_size: 5
-  echo: false
+# Inference-api REST сервис. Агент сам в Postgres не ходит — все записи и
+# чтения проходят через этот сервис.
+# Поля можно переопределить env-переменными AGENT_API_<UPPER>:
+#   AGENT_API_BASE_URL, AGENT_API_TOKEN, AGENT_API_TOKEN_ENV, AGENT_API_TIMEOUT_SEC.
+# Токен по умолчанию читается из INFERENCE_API_TOKEN.
+api:
+  base_url: "http://localhost:8080"
+  token_env: "INFERENCE_API_TOKEN"
+  timeout_sec: 30.0
 
 # Инструкции для LLM планировщика на естественном языке.
 # Пиши сюда на какие параметры обратить внимание, что попробовать,

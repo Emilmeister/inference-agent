@@ -9,13 +9,11 @@ import os
 import sys
 
 import yaml
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from inference_agent.agent import compile_agent
-from inference_agent.db import ExperimentRepository, init_schema
+from inference_agent.api_client import ExperimentApiClient
 from inference_agent.models import AgentConfig, OptimizationGoal
 from inference_agent.utils.container import stop_all_bench_containers
-from inference_agent.utils.db_proxy import DBProxyTunnel
 from inference_agent.utils.logging import setup_logging
 
 
@@ -34,19 +32,12 @@ _AGENT_LLM_ENV_FIELDS = (
 )
 
 
-_DATABASE_ENV_FIELDS = (
-    "host",
-    "port",
-    "database",
-    "user",
-    "password",
-    "password_env",
-    "pool_size",
-    "pool_max_overflow",
-    "pool_timeout_sec",
-    "echo",
-    "http_proxy",
-    "https_proxy",
+# api.<field> overridable via AGENT_API_<UPPER>.
+_API_ENV_FIELDS = (
+    "base_url",
+    "token",
+    "token_env",
+    "timeout_sec",
 )
 
 
@@ -59,11 +50,11 @@ def _apply_agent_llm_env_overrides(raw: dict) -> None:
             section[field] = os.environ[env_name]
 
 
-def _apply_database_env_overrides(raw: dict) -> None:
-    """Override database.<field> with env var DATABASE_<FIELD> if set."""
-    section = raw.setdefault("database", {})
-    for field in _DATABASE_ENV_FIELDS:
-        env_name = f"DATABASE_{field.upper()}"
+def _apply_api_env_overrides(raw: dict) -> None:
+    """Override api.<field> with env var AGENT_API_<FIELD> if set."""
+    section = raw.setdefault("api", {})
+    for field in _API_ENV_FIELDS:
+        env_name = f"AGENT_API_{field.upper()}"
         if env_name in os.environ:
             section[field] = os.environ[env_name]
 
@@ -71,7 +62,7 @@ def _apply_database_env_overrides(raw: dict) -> None:
 def _load_config(path: str) -> AgentConfig:
     """Load and validate config from YAML file.
 
-    Env vars override agent_llm and database fields (AGENT_LLM_* / DATABASE_*).
+    Env vars override agent_llm and api fields (AGENT_LLM_* / AGENT_API_*).
     """
     with open(path) as f:
         raw = yaml.safe_load(f)
@@ -84,7 +75,7 @@ def _load_config(path: str) -> AgentConfig:
             raw["agent_llm"]["api_key"] = os.environ.get(env_var, "")
 
     _apply_agent_llm_env_overrides(raw)
-    _apply_database_env_overrides(raw)
+    _apply_api_env_overrides(raw)
 
     return AgentConfig(**raw)
 
@@ -93,30 +84,20 @@ async def _run(config: AgentConfig) -> None:
     """Run the agent."""
     logger = logging.getLogger("inference_agent")
 
-    proxy_url = config.database.effective_proxy_url
-    tunnel: DBProxyTunnel | None = None
-    if proxy_url:
-        tunnel = DBProxyTunnel(
-            proxy_url, config.database.host, config.database.port
+    if not config.api.token:
+        raise RuntimeError(
+            "API token not configured — set INFERENCE_API_TOKEN (or api.token in YAML). "
+            "The agent talks to the inference-api REST service via Bearer auth."
         )
-        local_host, local_port = await tunnel.start_async()
-        db_url = config.database.with_endpoint(local_host, local_port).url
-    else:
-        db_url = config.database.url
 
-    engine = create_async_engine(
-        db_url,
-        pool_size=config.database.pool_size,
-        max_overflow=config.database.pool_max_overflow,
-        pool_timeout=config.database.pool_timeout_sec,
-        echo=config.database.echo,
+    client = ExperimentApiClient(
+        base_url=config.api.base_url,
+        token=config.api.token,
+        timeout_sec=config.api.timeout_sec,
     )
-    try:
-        # First real round-trip to Postgres — fail fast here if DB unreachable.
-        await init_schema(engine)
-        sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
-        repo = ExperimentRepository(sessionmaker)
-        agent = compile_agent(repo)
+
+    async with client:
+        agent = compile_agent(client)
 
         initial_state = {
             "config": config,
@@ -143,6 +124,7 @@ async def _run(config: AgentConfig) -> None:
         logger.info("Model: %s", config.model_name)
         logger.info("Max experiments: %d", config.experiments.max_experiments)
         logger.info("Engines: %s", [e.value for e in config.experiments.engines])
+        logger.info("Inference API: %s", config.api.base_url)
 
         try:
             final_state = await agent.ainvoke(initial_state)
@@ -154,10 +136,6 @@ async def _run(config: AgentConfig) -> None:
             logger.exception("Agent failed")
             stop_all_bench_containers()
             raise
-    finally:
-        await engine.dispose()
-        if tunnel is not None:
-            await tunnel.stop_async()
 
     # Print summary
     print("\n" + "=" * 60)
@@ -188,10 +166,7 @@ async def _run(config: AgentConfig) -> None:
         for p in pareto:
             print(f"  {p.config_id}: {p.throughput:.1f} tok/s, TTFT p95={p.ttft_p95:.1f} ms")
 
-    print(
-        f"\nResults saved to Postgres at "
-        f"{config.database.host}:{config.database.port}/{config.database.database}"
-    )
+    print(f"\nResults posted to {config.api.base_url}")
 
 
 def main() -> None:

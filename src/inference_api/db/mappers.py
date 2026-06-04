@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from inference_agent.db.models import ExperimentRow
+from inference_api.db.models import ExperimentRow
 from inference_agent.models_pkg.domain import (
     ExperimentResult,
     ExperimentSummary,

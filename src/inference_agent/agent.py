@@ -6,7 +6,7 @@ import logging
 
 from langgraph.graph import END, StateGraph
 
-from inference_agent.db.repository import ExperimentRepository
+from inference_agent.api_client import ExperimentApiClient
 from inference_agent.nodes.analyzer import analyzer_node
 from inference_agent.nodes.discovery import discovery_node
 from inference_agent.nodes.executor import executor_node
@@ -35,20 +35,20 @@ def _after_validator(state: AgentState) -> str:
     return "run"
 
 
-def build_graph(repo: ExperimentRepository) -> StateGraph:
+def build_graph(client: ExperimentApiClient) -> StateGraph:
     """Build the LangGraph agent graph.
 
-    `history_loader` and `reporter` are repository-bound (closure DI); other
+    `history_loader` and `reporter` are client-bound (closure DI); other
     nodes are plain async functions.
     """
     graph = StateGraph(AgentState)
 
     graph.add_node("discovery", discovery_node)
-    graph.add_node("history_loader", make_history_loader_node(repo))
+    graph.add_node("history_loader", make_history_loader_node(client))
     graph.add_node("planner", planner_node)
     graph.add_node("validator", validator_node)
     graph.add_node("executor", executor_node)
-    graph.add_node("reporter", make_reporter_node(repo))
+    graph.add_node("reporter", make_reporter_node(client))
     graph.add_node("analyzer", analyzer_node)
 
     graph.set_entry_point("discovery")
@@ -84,7 +84,7 @@ def build_graph(repo: ExperimentRepository) -> StateGraph:
     return graph
 
 
-def compile_agent(repo: ExperimentRepository):
+def compile_agent(client: ExperimentApiClient):
     """Compile and return the runnable agent."""
-    graph = build_graph(repo)
+    graph = build_graph(client)
     return graph.compile()
