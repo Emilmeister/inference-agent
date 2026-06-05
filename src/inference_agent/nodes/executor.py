@@ -10,6 +10,7 @@ import time
 
 from inference_agent.benchmark.gpu_monitor import GPUMonitor
 from inference_agent.benchmark.runner import (
+    _is_connection_failure,
     get_benchmark_phases,
     run_agentic_long_context_phase,
     run_benchmark_phase,
@@ -301,6 +302,33 @@ def _summarize_ceiling_reason(error_details: list[str]) -> str:
 
 _AGENTIC_SATURATION_RATE = 0.95  # error_rate at/above which we lock the agentic sweep
 
+# Experiment-level watchdog: after this many consecutive phases die with
+# socket-level errors, we stop the sweep entirely. The engine is gone and
+# every remaining phase will just produce another batch of unhelpful
+# ECONNREFUSED noise. We allow ONE such phase as the trigger (so a single
+# flaky phase doesn't kill an experiment) and bail on the second.
+_MAX_CONSECUTIVE_DEAD_PHASES = 2
+
+
+def _looks_like_dead_engine_phase(result: ConcurrencyResult) -> bool:
+    """Decide whether a finished phase reads like the engine has crashed.
+
+    Two signals must agree:
+      1. error_rate is at/near 100% — anything lower could still be a real
+         load result with a few failures.
+      2. The majority of captured error samples are socket-level failures
+         ("Cannot connect to host", connection refused, …). HTTP 5xx or
+         timeouts don't trigger this — those can happen on a healthy but
+         overloaded engine.
+    """
+    if result.error_rate < _AGENTIC_SATURATION_RATE:
+        return False
+    samples = [s for s in result.error_details if s]
+    if not samples:
+        return False
+    conn = sum(1 for s in samples if _is_connection_failure(s))
+    return conn * 2 >= len(samples)
+
 
 async def _run_all_phases(
     engine: BaseEngine,
@@ -328,6 +356,12 @@ async def _run_all_phases(
     # first such concurrency and skip the rest of the agentic ladder instead
     # of burning ~60s × N more wasted phases per experiment.
     agentic_ceiling_lock: int | None = None
+
+    # Experiment-level watchdog: count consecutive phases that came back with
+    # socket-shaped 100% failure (engine crashed mid-sweep). After the second,
+    # we break out of the loop instead of running another dozen phases worth
+    # of no-op ECONNREFUSED noise.
+    consecutive_dead_phases = 0
 
     for phase_id, workload_id, concurrency, prompt_len, max_out in phases:
         is_warmup = workload_id == "warmup"
@@ -469,6 +503,23 @@ async def _run_all_phases(
                         ))
                 else:
                     concurrency_results.append(result)
+
+            # Update the dead-engine watchdog regardless of which branch above
+            # took the phase — warmup is excluded because we don't aggregate
+            # it anyway, and a one-off warmup blip shouldn't tip the counter.
+            if not is_warmup:
+                if _looks_like_dead_engine_phase(result):
+                    consecutive_dead_phases += 1
+                    if consecutive_dead_phases >= _MAX_CONSECUTIVE_DEAD_PHASES:
+                        logger.warning(
+                            "  Aborting remaining phases: %d consecutive "
+                            "phases died with socket-level errors — engine "
+                            "is gone, no point loading the rest of the sweep.",
+                            consecutive_dead_phases,
+                        )
+                        break
+                else:
+                    consecutive_dead_phases = 0
         except Exception as e:
             logger.error("  Phase %s failed: %s", phase_id, e)
             phase_errors.append(ExperimentError(

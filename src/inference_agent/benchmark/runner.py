@@ -21,6 +21,44 @@ from inference_agent.models import (
 logger = logging.getLogger(__name__)
 
 
+# Substrings indicating the upstream HTTP server is no longer reachable —
+# socket-level failures we get back as request errors when the engine has
+# crashed or its container exited mid-benchmark. Used by phase watchdog to
+# abort fire-into-the-void loops instead of burning the configured duration
+# stuffing thousands of <5ms ECONNREFUSED bounces into error_details.
+_CONNECTION_FAILURE_SUBSTRINGS: tuple[str, ...] = (
+    "cannot connect to host",
+    "connect call failed",
+    "connection refused",
+    "connection reset",
+    "server disconnected",
+    "econnrefused",
+    "[errno 111]",
+)
+
+
+def _is_connection_failure(error: str | None) -> bool:
+    """Return True when the request error looks like the server is down.
+
+    Conservative: only matches socket-level failure markers. Stream errors
+    mid-response, JSON parse failures, HTTP 5xx — all kept out so a server
+    that's responding but unhappy with a single bad request doesn't trigger
+    the watchdog.
+    """
+    if not error:
+        return False
+    e = error.lower()
+    return any(s in e for s in _CONNECTION_FAILURE_SUBSTRINGS)
+
+
+# Phase-level watchdog: once at least this many requests have come back,
+# AND they're all socket-level failures, abort the phase early. The minimum
+# probe count keeps a single flaky request from killing an otherwise healthy
+# phase, while the all-or-nothing check is safe because partial connectivity
+# (some succeed, some fail) does NOT trip it.
+_PHASE_WATCHDOG_MIN_PROBES = 10
+
+
 def _percentile(sorted_values: list[float], p: float) -> float:
     """Compute percentile with linear interpolation (numpy-compatible)."""
     n = len(sorted_values)
@@ -304,16 +342,40 @@ async def run_benchmark_phase(
 
     all_results: list[dict] = []
     start_time = time.perf_counter()
+    # Watchdog signal — once flipped, every worker drops out of its loop on
+    # the next iteration. Asyncio is single-threaded so we don't need a Lock.
+    server_down = False
 
     connector = aiohttp.TCPConnector(limit=concurrency + 10)
     async with aiohttp.ClientSession(connector=connector) as session:
 
         async def _worker():
-            while time.perf_counter() - start_time < duration_sec:
+            nonlocal server_down
+            while not server_down and time.perf_counter() - start_time < duration_sec:
                 res = await _send_request(
                     session, url, prompt_length, max_output_tokens, model_name, rng,
                 )
                 all_results.append(res)
+                # Phase watchdog: every accumulated request gives us a fresh
+                # chance to notice the engine has died. We check the LAST
+                # N results (so a death mid-phase trips it, not only one at
+                # t=0), and require all of them to look socket-broken before
+                # we abort.
+                if (
+                    not server_down
+                    and len(all_results) >= _PHASE_WATCHDOG_MIN_PROBES
+                    and all(
+                        _is_connection_failure(r.get("error"))
+                        for r in all_results[-_PHASE_WATCHDOG_MIN_PROBES:]
+                    )
+                ):
+                    server_down = True
+                    elapsed = time.perf_counter() - start_time
+                    logger.warning(
+                        "Phase aborted after %.1fs: last %d requests all "
+                        "failed with connection errors — engine appears dead.",
+                        elapsed, _PHASE_WATCHDOG_MIN_PROBES,
+                    )
 
         tasks = [asyncio.create_task(_worker()) for _ in range(concurrency)]
         await asyncio.gather(*tasks)
