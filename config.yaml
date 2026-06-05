@@ -6,7 +6,7 @@ model_revision: null
 # применяется ко ВСЕМ экспериментам, планировщик её не варьирует.
 # Допустимые значения зависят от движка (vLLM/SGLang): fp8, awq, gptq, ...
 # null — без квантизации.
-quantization: fp8
+quantization: null
 
 # LLM агента (для принятия решений — любой OpenAI-совместимый endpoint)
 # api_key читается из переменной окружения OPENAI_API_KEY (или укажи свою через api_key_env).
