@@ -299,6 +299,9 @@ def _summarize_ceiling_reason(error_details: list[str]) -> str:
     return "slo violation"
 
 
+_AGENTIC_SATURATION_RATE = 0.95  # error_rate at/above which we lock the agentic sweep
+
+
 async def _run_all_phases(
     engine: BaseEngine,
     config: object,
@@ -319,10 +322,35 @@ async def _run_all_phases(
 
     error_rate_threshold = config.benchmark.phase_error_rate_threshold
 
+    # Once an agentic phase totally saturates (≈100% sessions timing out), every
+    # higher concurrency in the sweep will fail the same way — sessions are
+    # independent and the bottleneck is server capacity, not luck. Lock at the
+    # first such concurrency and skip the rest of the agentic ladder instead
+    # of burning ~60s × N more wasted phases per experiment.
+    agentic_ceiling_lock: int | None = None
+
     for phase_id, workload_id, concurrency, prompt_len, max_out in phases:
         is_warmup = workload_id == "warmup"
         is_agentic = workload_id == "agentic_long_context"
         duration = 10 if is_warmup else config.benchmark.duration_per_level_sec
+
+        if is_agentic and agentic_ceiling_lock is not None and concurrency >= agentic_ceiling_lock:
+            # Cheap skip: record a synthetic ceiling probe so the dashboard
+            # and analyzer can see the sweep ended deliberately, not silently.
+            logger.info(
+                "  Phase: %s [%s] (c=%d) — skipped, agentic ceiling locked at c=%d",
+                phase_id, workload_id, concurrency, agentic_ceiling_lock,
+            )
+            ceiling_probes.append(CeilingProbeInfo(
+                phase_id=phase_id,
+                workload_id=workload_id,
+                concurrency=concurrency,
+                prompt_length=prompt_len,
+                error_rate=1.0,
+                errors=concurrency,
+                reason=f"skipped: c={agentic_ceiling_lock} already saturated",
+            ))
+            continue
 
         if is_agentic:
             logger.info(
@@ -390,6 +418,25 @@ async def _run_all_phases(
                             errors=result.errors,
                             reason=reason,
                         ))
+                        # Saturation lock: once a ceiling probe approaches
+                        # 100% failure, every higher concurrency in this
+                        # agentic sweep will fail the same way. Set the lock
+                        # so subsequent agentic phases at >= this concurrency
+                        # short-circuit at the top of the loop.
+                        if (
+                            is_agentic
+                            and agentic_ceiling_lock is None
+                            and result.error_rate >= _AGENTIC_SATURATION_RATE
+                        ):
+                            agentic_ceiling_lock = concurrency
+                            logger.info(
+                                "  Agentic ceiling locked at c=%d "
+                                "(error_rate=%.1f%% >= %.0f%%); higher agentic "
+                                "phases will be skipped.",
+                                concurrency,
+                                result.error_rate * 100,
+                                _AGENTIC_SATURATION_RATE * 100,
+                            )
                     else:
                         logger.warning(
                             "  Phase %s error_rate=%.1f%% exceeds threshold %.1f%%, marking invalid",
