@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
-# stop-and-pull.sh — gracefully stop a running inference-agent + its benchmark
+# stop-and-pull.sh — stop the running inference-agent + its benchmark
 # containers, then pull the latest code while preserving local changes.
 #
 # Usage:
 #   ./scripts/stop-and-pull.sh           # stop agent + containers, git pull
-#   ./scripts/stop-and-pull.sh --restart # also relaunch via nohup after pull
+#   ./scripts/stop-and-pull.sh --restart # also relaunch via scripts/start.sh
 #
 # Behavior:
-#   1. SIGTERM all `inference-agent` processes; SIGKILL stragglers after 10s.
-#   2. `nerdctl kill` any `bench-vllm-*` / `bench-sglang-*` containers.
-#   3. If git working tree has local changes, stash them.
-#   4. `git pull --ff-only` (refuses to merge — we want fast-forward only).
-#   5. `git stash pop` (only if we actually stashed in step 3).
-#   6. Optional: relaunch agent under nohup with the project's config.yaml.
-#
-# Run from the repo root (or anywhere — the script cd's to its own repo root).
+#   1. Source .env so HTTP_PROXY and the API token are present for `git pull`
+#      (locked-down VMs need the proxy) and for the optional restart.
+#   2. SIGTERM all inference-agent processes via sudo (the agent runs as
+#      root under nerdctl); SIGKILL stragglers after 10s.
+#   3. `nerdctl kill` any bench-vllm-* / bench-sglang-* containers (also
+#      under sudo for the same reason).
+#   4. Stash local changes (if any).
+#   5. `git pull --ff-only` as the invoking user — git refuses to use ssh
+#      keys it can't read, and sudo would strip HTTP_PROXY anyway.
+#   6. Pop the stash.
+#   7. Optional: relaunch the agent via scripts/start.sh.
 
 set -euo pipefail
 
@@ -26,7 +29,7 @@ for arg in "$@"; do
     case "$arg" in
         --restart) RESTART=1 ;;
         -h|--help)
-            sed -n '2,18p' "$0"
+            sed -n '2,22p' "$0"
             exit 0
             ;;
         *)
@@ -38,30 +41,57 @@ done
 
 log() { printf '[stop-and-pull] %s\n' "$*"; }
 
+# sudo prefix — empty if we're already root, otherwise `sudo`. The agent
+# runs under root and we mustn't fail killing it from a non-root user.
+if [[ $EUID -eq 0 ]]; then
+    SUDO=""
+else
+    SUDO="sudo"
+fi
+
+# Load .env so the rest of the script has HTTP_PROXY (for git pull) and
+# the agent's secrets (for optional --restart). Missing .env is non-fatal
+# for stop+pull on a fully open network, but warn so it's not silent.
+if [[ -f .env ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    . .env
+    set +a
+else
+    log "WARNING: no .env in $REPO_ROOT — git pull may fail behind a proxy"
+fi
+
 # ── 1. Stop inference-agent processes ────────────────────────────────────
-# pgrep -f matches the full command line, catching `python ... inference-agent`
-# regardless of how the user launched it (entrypoint, module, nohup, etc.).
-mapfile -t AGENT_PIDS < <(pgrep -f 'inference-agent' || true)
-# Drop our own PID and any direct ancestor (this script's own grep won't match
-# pgrep -f, but be defensive in case the user names their shell session weirdly).
+# Match against the absolute path of the entrypoint binary, NOT the bare
+# string "inference-agent". Bare-string pgrep matches the script's own
+# command line and ends up killing the shell that's running this script.
+AGENT_PATTERN="/inference-agent\\b"
+
+mapfile -t AGENT_PIDS < <($SUDO pgrep -f "$AGENT_PATTERN" 2>/dev/null || true)
 SELF=$$
-AGENT_PIDS=("${AGENT_PIDS[@]/$SELF}")
-AGENT_PIDS=("${AGENT_PIDS[@]/$PPID}")
+# Defensive: drop our own PID + parent in case pgrep ever races against
+# our own bash process (it shouldn't with the path-anchored pattern, but
+# this costs nothing).
+FILTERED=()
+for pid in "${AGENT_PIDS[@]}"; do
+    [[ -z "$pid" || "$pid" == "$SELF" || "$pid" == "$PPID" ]] && continue
+    FILTERED+=("$pid")
+done
+AGENT_PIDS=("${FILTERED[@]}")
 
 if [[ ${#AGENT_PIDS[@]} -eq 0 ]]; then
     log "no inference-agent process running"
 else
     log "sending SIGTERM to inference-agent PIDs: ${AGENT_PIDS[*]}"
-    kill -TERM "${AGENT_PIDS[@]}" 2>/dev/null || true
+    $SUDO kill -TERM "${AGENT_PIDS[@]}" 2>/dev/null || true
 
-    # Give the agent up to 10s to finalize the current experiment, persist DB
-    # state, and shut down cleanly.
+    # Give the agent up to 10s to finalize the current experiment and shut
+    # down cleanly (closes the API session, flushes logs).
     for _ in $(seq 1 10); do
         sleep 1
         STILL_ALIVE=()
         for pid in "${AGENT_PIDS[@]}"; do
-            [[ -z "$pid" ]] && continue
-            if kill -0 "$pid" 2>/dev/null; then
+            if $SUDO kill -0 "$pid" 2>/dev/null; then
                 STILL_ALIVE+=("$pid")
             fi
         done
@@ -71,16 +101,13 @@ else
 
     if [[ ${#AGENT_PIDS[@]} -gt 0 ]]; then
         log "SIGKILL stragglers: ${AGENT_PIDS[*]}"
-        kill -KILL "${AGENT_PIDS[@]}" 2>/dev/null || true
+        $SUDO kill -KILL "${AGENT_PIDS[@]}" 2>/dev/null || true
     fi
 fi
 
 # ── 2. Kill benchmark containers ─────────────────────────────────────────
-# Names follow the `bench-<engine>-<experiment_id>` convention from
-# engines/base.py:container_name. Anything else (user's own containers,
-# unrelated services) is left alone.
 mapfile -t BENCH_CONTAINERS < <(
-    nerdctl ps --filter 'name=bench-vllm-' --filter 'name=bench-sglang-' \
+    $SUDO nerdctl ps --filter 'name=bench-vllm-' --filter 'name=bench-sglang-' \
         --format '{{.ID}} {{.Names}}' 2>/dev/null || true
 )
 if [[ ${#BENCH_CONTAINERS[@]} -eq 0 ]]; then
@@ -89,7 +116,7 @@ else
     for line in "${BENCH_CONTAINERS[@]}"; do
         log "nerdctl kill $line"
         cid="${line%% *}"
-        nerdctl kill "$cid" >/dev/null 2>&1 || true
+        $SUDO nerdctl kill "$cid" >/dev/null 2>&1 || true
     done
 fi
 
@@ -104,8 +131,16 @@ else
 fi
 
 # ── 4. Pull latest ───────────────────────────────────────────────────────
+# Run as the invoking user (not via $SUDO) so HTTP_PROXY from .env is
+# honored and the user's git credentials/ssh config are used. If you ran
+# `sudo ./scripts/stop-and-pull.sh`, $SUDO is empty above and this just
+# stays as root — make sure root has access to whatever git remote you use.
 log "git pull --ff-only"
-git pull --ff-only
+if ! git pull --ff-only; then
+    log "ERROR: git pull failed; check HTTP_PROXY in .env and ssh/credentials"
+    [[ $STASHED -eq 1 ]] && log "your changes are preserved in stash@{0}"
+    exit 1
+fi
 
 # ── 5. Restore stash ─────────────────────────────────────────────────────
 if [[ $STASHED -eq 1 ]]; then
@@ -119,22 +154,8 @@ fi
 
 # ── 6. Optional restart ──────────────────────────────────────────────────
 if [[ $RESTART -eq 1 ]]; then
-    if [[ ! -f config.yaml ]]; then
-        log "ERROR: --restart requested but config.yaml not found in $REPO_ROOT"
-        exit 1
-    fi
-    rm -f nohup.out
-    log "relaunching: nohup inference-agent -c config.yaml -v"
-    nohup inference-agent -c config.yaml -v >nohup.out 2>&1 &
-    NEW_PID=$!
-    disown "$NEW_PID" 2>/dev/null || true
-    sleep 1
-    if kill -0 "$NEW_PID" 2>/dev/null; then
-        log "agent started, PID=$NEW_PID, logs: tail -f $REPO_ROOT/nohup.out"
-    else
-        log "ERROR: agent died immediately — check nohup.out"
-        exit 1
-    fi
+    log "relaunching via scripts/start.sh"
+    bash "$REPO_ROOT/scripts/start.sh"
 fi
 
 log "done"

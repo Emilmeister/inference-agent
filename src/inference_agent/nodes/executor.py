@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import statistics
 import time
 
@@ -31,6 +32,7 @@ from inference_agent.models import (
 )
 from inference_agent.state import AgentState
 from inference_agent.utils.container import (
+    extract_error_excerpt,
     get_container_exit_code,
     get_container_logs,
     get_engine_version,
@@ -38,6 +40,7 @@ from inference_agent.utils.container import (
     image_exists_locally,
     pull_image,
     run_container,
+    scan_engine_logs,
     stop_container,
     wait_for_healthy,
 )
@@ -45,6 +48,51 @@ from inference_agent.utils.logging import clear_experiment_context, set_experime
 from inference_agent.utils.metrics import extract_kv_cache_metrics, fetch_prometheus_metrics
 
 logger = logging.getLogger(__name__)
+
+
+async def _capture_failure_logs(
+    engine: BaseEngine,
+    container_name: str,
+    experiment_id: str,
+) -> tuple[str, str | None, str | None]:
+    """Pull the full container log, persist it, scan it, return (excerpt, path, classification).
+
+    Engine boot failures often die inside multiproc worker processes whose
+    tracebacks land far above the wrapper's "Engine core initialization
+    failed" tail. A 100-line tail throws the root cause away. We instead
+    fetch the entire log, save it to `<storage.logs_dir>/<exp>-<engine>-
+    container.log` for post-mortem, and return an excerpt that focuses on
+    the first stack trace — small enough to attach to an ExperimentError
+    and ship into the analyzer prompt without blowing the context budget.
+
+    We also rescan the FULL log (not just the tail) for fatal patterns and
+    return that classification, so even a startup-stage error that died
+    inside a worker stderr still gets a precise root_cause instead of the
+    generic "startup_crash".
+    """
+    full_log = await get_container_logs(container_name, tail=0)
+    excerpt = extract_error_excerpt(full_log)
+    scan = scan_engine_logs(full_log)
+    scanned_class = scan.get("classification") if scan.get("state") == "fatal" else None
+    log_path: str | None = None
+    try:
+        logs_dir = engine.config.storage.logs_dir
+        os.makedirs(logs_dir, exist_ok=True)
+        # container_name is `bench-<engine>-<id>`; reuse its engine token so
+        # we never depend on isinstance plumbing.
+        parts = container_name.split("-")
+        engine_tag = parts[1] if len(parts) >= 3 else "engine"
+        log_path = os.path.join(
+            logs_dir, f"{experiment_id}-{engine_tag}-container.log"
+        )
+        with open(log_path, "w") as f:
+            f.write(full_log)
+    except Exception as e:
+        # Persistence is best-effort — never let a write failure mask the
+        # actual engine error we're trying to report.
+        logger.warning("Could not persist full container log: %s", e)
+        log_path = None
+    return excerpt, log_path, scanned_class
 
 
 def _get_engine(state: AgentState) -> BaseEngine:
@@ -105,7 +153,9 @@ async def _start_engine(
         container_id = await run_container(container_args, timeout=run_timeout)
         logger.info("Container started: %s", container_id[:12])
     except (RuntimeError, asyncio.TimeoutError) as e:
-        logs = await get_container_logs(container_name)
+        excerpt, log_path, scanned_class = await _capture_failure_logs(
+            engine, container_name, experiment_id
+        )
         if isinstance(e, asyncio.TimeoutError):
             message = (
                 f"Container start timed out after {run_timeout}s "
@@ -113,14 +163,19 @@ async def _start_engine(
                 f"NVIDIA runtime or partial image. Bump "
                 f"startup.container_run_timeout_sec)"
             )
-            classification = "startup_timeout"
+            fallback_class = "startup_timeout"
         else:
             message = f"Container start failed: {e}"
-            classification = "startup_error"
+            fallback_class = "startup_error"
+        # Prefer the scanned root cause over the generic wrapper-level class.
+        classification = scanned_class or fallback_class
+        details: dict = {"logs": excerpt, "classification": classification}
+        if log_path:
+            details["log_path"] = log_path
         errors.append(ExperimentError(
             stage="startup",
             message=message,
-            details={"logs": logs[:5000], "classification": classification},
+            details=details,
         ))
         return None, errors, time.time() - startup_start
 
@@ -136,9 +191,21 @@ async def _start_engine(
     time_to_healthy = time.time() - startup_start
 
     if not health_result["healthy"]:
-        logs = await get_container_logs(container_name)
+        excerpt, log_path, scanned_class = await _capture_failure_logs(
+            engine, container_name, experiment_id
+        )
         exit_code = await get_container_exit_code(container_name)
-        classification = health_result.get("classification") or "healthcheck_timeout"
+        # Order of preference for the failure classification:
+        #   1. scan of the FULL container log (catches root-cause patterns
+        #      that the in-flight 200-line tail scan missed),
+        #   2. classification picked up by wait_for_healthy's incremental
+        #      scanner during the wait,
+        #   3. generic "healthcheck_timeout" as a last resort.
+        classification = (
+            scanned_class
+            or health_result.get("classification")
+            or "healthcheck_timeout"
+        )
         marker = health_result.get("marker")
         message = (
             f"Engine did not become healthy "
@@ -146,19 +213,27 @@ async def _start_engine(
             + (f", marker='{marker}'" if marker else "")
             + f", elapsed={time_to_healthy:.0f}s)"
         )
+        details: dict = {
+            "logs": excerpt,
+            "exit_code": exit_code,
+            "time_elapsed_sec": time_to_healthy,
+            "reason": health_result["reason"],
+            "classification": classification,
+            "marker": marker,
+        }
+        if log_path:
+            details["log_path"] = log_path
         errors.append(ExperimentError(
             stage="healthcheck",
             message=message,
-            details={
-                "logs": logs[:5000],
-                "exit_code": exit_code,
-                "time_elapsed_sec": time_to_healthy,
-                "reason": health_result["reason"],
-                "classification": classification,
-                "marker": marker,
-            },
+            details=details,
         ))
-        logger.error("FAILED: %s\nLast logs:\n%s", message, logs[-500:])
+        # Show the focused excerpt in the agent log rather than the last 500
+        # bytes — for multiproc tracebacks the tail is the wrapper unwind, not
+        # the root cause. log_path lets the operator open the full log if the
+        # excerpt is still ambiguous.
+        location_hint = f" (full log: {log_path})" if log_path else ""
+        logger.error("FAILED: %s%s\n%s", message, location_hint, excerpt)
         await stop_container(container_name)
         return None, errors, time_to_healthy
 

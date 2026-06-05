@@ -132,6 +132,29 @@ _FATAL_LOG_PATTERNS: tuple[tuple[str, str], ...] = (
     ("gatedrepoerror", "model_gated"),
     ("no space left on device", "disk_full"),
     ("os error 28", "disk_full"),
+    # HF cache layout / weight resolution failures. Both engines emit one
+    # of these when host_cache_dir is misconfigured (the hub/ subdir trap)
+    # or when offline mode can't resolve a repo id to a snapshot.
+    ("cannot find any model weights", "weights_not_found"),
+    ("does not appear to have a file named", "weights_not_found"),
+    # Tokenizer load failures. Old transformers fall through to slow
+    # conversion (the `tekken.json` AttributeError); new transformers raise
+    # the "Couldn't instantiate the backend tokenizer" ValueError. Both
+    # mean the same thing from the planner's POV: a setup bug, not a
+    # hyperparameter to tune.
+    ("couldn't instantiate the backend tokenizer", "tokenizer_init_failed"),
+    ("vocab_file.endswith", "tokenizer_init_failed"),
+    ("can't load image processor", "tokenizer_init_failed"),
+    # vLLM v1 multiproc worker bootstrap — the wrapper traceback at the
+    # tail says "Engine core initialization failed" but the real cause is
+    # usually one of the patterns above, surfaced from a worker stderr.
+    # Catching this explicitly stops it from masquerading as "startup_crash"
+    # when no upper-stack marker matched.
+    ("workerproc initialization failed", "worker_init_failed"),
+    ("ranks did not initialize properly", "distributed_init_failed"),
+    # Engine-side feature rejections we've hit in the wild.
+    ("speculative decoding for", "speculative_incompatible"),
+    ("reasoning parser could not locate", "reasoning_parser_incompatible"),
 )
 
 # Markers indicating active loading progress. Any new marker resets the
@@ -321,17 +344,80 @@ async def wait_for_healthy(
 
 
 async def get_container_logs(name: str, tail: int = 100) -> str:
-    """Get the last N lines of container logs."""
+    """Get container logs. tail=0 returns the full log."""
+    cmd = ["nerdctl", "logs"]
+    if tail > 0:
+        cmd.extend(["--tail", str(tail)])
+    cmd.append(name)
     try:
         proc = await asyncio.create_subprocess_exec(
-            "nerdctl", "logs", "--tail", str(tail), name,
+            *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
-        return stdout.decode() + stderr.decode()
+        # Full-log fetch on a long-running engine can be tens of MB; bump the
+        # timeout proportionally rather than truncating, so we don't lose the
+        # actual root-cause traceback to a 10s I/O cap.
+        timeout = 30 if tail == 0 else 10
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        return stdout.decode(errors="replace") + stderr.decode(errors="replace")
     except Exception as e:
         return f"Failed to get logs: {e}"
+
+
+# Substrings that mark the start of an interesting stack on engine crashes.
+# Used by extract_error_excerpt to find the most diagnostic window of the
+# log when the full output is too large to attach to an ExperimentError.
+_ERROR_MARKERS: tuple[str, ...] = (
+    "Traceback (most recent call last)",
+    "ERROR",
+    "RuntimeError:",
+    "AssertionError:",
+    "ValueError:",
+    "TypeError:",
+    "AttributeError:",
+    "OSError:",
+    "Exception:",
+    "FATAL",
+    "raise ",
+    "assert ",
+    "torch.cuda.OutOfMemoryError",
+    "nccl",
+)
+
+
+def extract_error_excerpt(
+    full_log: str,
+    *,
+    max_lines: int = 200,
+    context_before: int = 20,
+) -> str:
+    """Return the most diagnostic slice of a container log.
+
+    On engine crashes we want the first stack trace (the multiproc worker
+    failure is usually the root cause; later tracebacks just unwind the
+    wrapper), with a bit of context before it. If we can't find any marker
+    we fall back to the last `max_lines` lines.
+
+    The full log (potentially tens of MB) is always persisted separately;
+    this excerpt is what we put into ExperimentError.details so it stays
+    LLM-prompt-sized.
+    """
+    if not full_log:
+        return ""
+    lines = full_log.splitlines()
+    first_match = -1
+    for i, line in enumerate(lines):
+        if any(m in line for m in _ERROR_MARKERS):
+            first_match = i
+            break
+    if first_match < 0:
+        return "\n".join(lines[-max_lines:])
+    start = max(0, first_match - context_before)
+    end = min(len(lines), start + max_lines)
+    excerpt_lines = lines[start:end]
+    prefix = f"[excerpt: lines {start + 1}-{end} of {len(lines)}]\n"
+    return prefix + "\n".join(excerpt_lines)
 
 
 async def get_image_digest(image: str) -> str:

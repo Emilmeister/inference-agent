@@ -312,6 +312,32 @@ async def analyzer_node(state: AgentState) -> dict:
         hard_stop = True
         stop_reason = f"Budget exhausted ({exp_count}/{config.experiments.max_experiments})"
 
+    # Setup-bug guard: if the last 3 experiments all failed with the same
+    # failure_classification, this is almost certainly a configuration or
+    # environment problem (HF cache layout, missing image, wrong tokenizer,
+    # bad weights path) — not a hyperparameter the planner can tune. Stop
+    # the loop early instead of burning the rest of the experiment budget
+    # producing identical crashes that the LLM will keep guessing about.
+    if not hard_stop:
+        tail = session_with_current[-3:]
+        if len(tail) == 3 and all(h.status != ExperimentStatus.SUCCESS for h in tail):
+            tail_classes = {h.failure_classification for h in tail}
+            if len(tail_classes) == 1 and None not in tail_classes:
+                rc = tail_classes.pop()
+                # Generic "startup_crash" is NOT specific enough to stop on —
+                # that's the catch-all when no fatal pattern matched. Only
+                # trip the guard on a concrete classification (oom,
+                # weights_not_found, tokenizer_init_failed, …).
+                if rc not in {"startup_crash", "healthcheck_timeout"}:
+                    hard_stop = True
+                    stop_reason = (
+                        f"3 consecutive failures with identical "
+                        f"root_cause='{rc}'. This is a setup problem, not "
+                        f"a hyperparameter problem — fix it and re-run. "
+                        f"Inspect storage.logs_dir for the full container "
+                        f"logs of each attempt."
+                    )
+
     # Plateau uses ONLY the current session — loaded tops would make plateau
     # trip on iteration 1 (newcomers struggle to beat historical bests).
     # Pass the PRE-update bests; see _check_plateau docstring for rationale.

@@ -26,7 +26,10 @@ container:
   sglang_image: "lmsysorg/sglang:latest"
   network: "host"
   shm_size: "16g"
-  model_cache_dir: "/root/.cache/huggingface"
+  # MUST point at the hub/ subdir — HF_HUB_CACHE inside the container
+  # defaults to /root/.cache/huggingface/hub. Putting models at the cache
+  # root instead means engines look in hub/ and don't see anything.
+  model_cache_dir: "/root/.cache/huggingface/hub"
 
   # Фиксированные аргументы, которые всегда добавляются к nerdctl run
   # (не перебираются LLM, передаются как есть)

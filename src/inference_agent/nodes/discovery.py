@@ -203,6 +203,37 @@ def prefetch_and_normalize_model(
         )
         return None
 
+    # Sanity check: prefetched files must land at <cache_dir>/models--*/snapshots/<sha>/
+    # so engines mounting `<cache_dir>` as their hub/ see them. If the operator
+    # pointed host_cache_dir at the HF cache ROOT instead of its hub/ subdir,
+    # snapshot_download writes the files but no engine ever finds them — we'd
+    # burn an entire benchmark sweep on opaque "Cannot find any model weights"
+    # crashes (this bit us once, hence the explicit guard).
+    expected_prefix = os.path.realpath(cache_dir)
+    actual_prefix = os.path.realpath(path)
+    if not actual_prefix.startswith(expected_prefix + os.sep):
+        msg = (
+            f"HF cache layout mismatch: snapshot landed at {actual_prefix} "
+            f"but cache_dir is {expected_prefix}. snapshot_download wrote the "
+            f"model somewhere engines won't look. Set container.host_cache_dir "
+            f"to ~/.cache/huggingface/hub (the hub/ subdir, not the cache root)."
+        )
+        if raise_on_failure:
+            raise RuntimeError(msg)
+        logger.error(msg)
+        return None
+    if not os.path.exists(os.path.join(path, "config.json")):
+        msg = (
+            f"Prefetched snapshot at {path} is missing config.json. "
+            f"This usually means snapshot_download wrote into the wrong place "
+            f"because container.host_cache_dir points at an HF cache root "
+            f"instead of its hub/ subdir."
+        )
+        if raise_on_failure:
+            raise RuntimeError(msg)
+        logger.error(msg)
+        return None
+
     _normalize_cached_config(path)
     return path
 

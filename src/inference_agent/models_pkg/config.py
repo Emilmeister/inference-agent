@@ -53,15 +53,24 @@ class ContainerConfig(BaseModel):
 
     # HuggingFace cache paths.
     #   host_cache_dir: where the AGENT writes prefetched weights on the host.
-    #     Defaults to the current user's HF cache so the agent works without
-    #     root. Override if you have a shared cache on a separate volume.
+    #     MUST point at the `hub/` subdir of an HF cache root — that is what
+    #     vLLM / SGLang / transformers all resolve to (HF_HUB_CACHE defaults
+    #     to $HF_HOME/hub). If you point this at the cache root itself,
+    #     snapshot_download writes to `<root>/models--*` while engines look in
+    #     `<root>/hub/models--*`, the files exist on disk but no engine sees
+    #     them, and every experiment fails with `Cannot find any model
+    #     weights` or `Couldn't instantiate the backend tokenizer` until
+    #     someone hand-edits a symlink. Don't relearn that lesson.
     #   model_cache_dir: where the cache is mounted INSIDE the container. The
-    #     stock vLLM / SGLang images run as root and look at /root/.cache.
-    # The bind mount becomes `-v host_cache_dir:model_cache_dir`.
+    #     stock vLLM / SGLang images run as root and HF_HUB_CACHE defaults to
+    #     /root/.cache/huggingface/hub — point this at THAT subdir, not at
+    #     the cache root, for the same reason as host_cache_dir.
+    # The bind mount becomes `-v host_cache_dir:model_cache_dir`, mapping the
+    # host's hub subdir to the container's hub subdir.
     host_cache_dir: str = Field(
-        default_factory=lambda: os.path.expanduser("~/.cache/huggingface")
+        default_factory=lambda: os.path.expanduser("~/.cache/huggingface/hub")
     )
-    model_cache_dir: str = "/root/.cache/huggingface"
+    model_cache_dir: str = "/root/.cache/huggingface/hub"
 
     # Fixed engine flags (not varied by LLM, always applied)
     vllm_extra_args: list[str] = Field(default_factory=list)
