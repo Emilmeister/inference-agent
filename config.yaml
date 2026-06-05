@@ -1,5 +1,5 @@
 # Модель для бенчмарка
-model_name: "Qwen/Qwen3.5-397B-A17B-FP8"
+model_name: "zai-org/GLM-4.7-FP8"
 model_revision: null
 
 # Квантизация фиксируется на уровне всего прогона: один и тот же режим
@@ -22,8 +22,8 @@ agent_llm:
 
 # Container runtime (nerdctl + containerd)
 container:
-  vllm_image: "vllm/vllm-openai:v0.21.0"
-  sglang_image: "lmsysorg/sglang:v0.5.12"
+  vllm_image: "vllm/vllm-openai:latest"
+  sglang_image: "lmsysorg/sglang:latest"
   network: "host"
   shm_size: "16g"
   model_cache_dir: "/root/.cache/huggingface"
@@ -33,14 +33,14 @@ container:
   vllm_extra_args:
     - "--enable-auto-tool-choice"
     - "--reasoning-parser"
-    - "qwen3"
+    - "glm45"
     - "--tool-call-parser"
-    - "qwen3_coder"
+    - "glm47"
   sglang_extra_args:
     - "--reasoning-parser"
-    - "qwen3"
+    - "glm45"
     - "--tool-call-parser"
-    - "qwen3_coder"
+    - "glm47"
 
 # Поведение при старте движка (healthcheck, pull образа).
 # Бюджет ожидания ограничен двумя часами:
@@ -134,34 +134,29 @@ api:
 # что пропустить и т.д.
 planner_instructions: |
   Отталкивайся в vllm от baseline (нельзя делать модель text-only):
-  vllm serve /models/Qwen/Qwen3.5-397B-A17B-FP8 \
-            --served-model-name Qwen/Qwen3.5-397B-A17B \
+  vllm serve /models/zai-org/GLM-4.7-FP8 \
+            --served-model-name zai-org/GLM-4.7 \
+            --host 0.0.0.0 \
+            --port 8080 \
             --stream-interval 2 \
             --async-scheduling \
-            --performance-mode throughput \
+            --trust-remote-code \
             --scheduling-policy fcfs \
-            --max-model-len 262144 \
+            --max-model-len 202752 \
             --max-num-batched-tokens 16384 \
             --gpu-memory-utilization 0.88 \
             --enable-expert-parallel \
             --tensor-parallel-size 8 \
-            --quantization fp8 \
-            --max-num-seqs 64 \
-            --seed 1024 \
             --kv-cache-dtype fp8_e4m3 \
-            --attention-config.flash_attn_version=3 \
-            --mm-encoder-tp-mode data \
-            --mm-processor-cache-type shm \
-            --mm-processor-cache-gb 8 \
-            --limit-mm-per-prompt '{"image":5,"video":0}' \
-            --mm-processor-kwargs '{"max_pixels":2073600}' \
+            --max-num-seqs 48 \
             --optimization-level 3 \
             --enable-prefix-caching \
             --enable-chunked-prefill \
-            --speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":1}' \
             --enable-prompt-tokens-details \
             --enable-force-include-usage \
-            --reasoning-parser qwen3 \
-            --tool-call-parser qwen3_coder --enable-auto-tool-choice \
+            --speculative-config.method mtp \
+            --speculative-config.num_speculative_tokens 1 \
+            --reasoning-parser glm45 \
+            --tool-call-parser glm47 --enable-auto-tool-choice \
             --override-generation-config '{"max_new_tokens": 65536}'
 
