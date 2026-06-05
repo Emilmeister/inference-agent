@@ -32,14 +32,32 @@ if [[ ! -f "$CONFIG" ]]; then
     exit 2
 fi
 
-# Load .env into the current shell so `sudo -E` can forward it.
-if [[ -f .env ]]; then
-    set -a
-    # shellcheck disable=SC1091
-    . .env
-    set +a
+# Load .env into the current shell so `sudo -E` can forward it. We accept
+# either ./.env in the repo root or ../.env one level up — common when the
+# operator keeps the secrets next to the project rather than inside the
+# (potentially git-tracked) repo. Explicit ENV_FILE wins over both.
+ENV_CANDIDATES=()
+if [[ -n "${ENV_FILE:-}" ]]; then
+    ENV_CANDIDATES+=("$ENV_FILE")
+fi
+ENV_CANDIDATES+=("$REPO_ROOT/.env" "$REPO_ROOT/../.env")
+
+LOADED_ENV=""
+for candidate in "${ENV_CANDIDATES[@]}"; do
+    if [[ -f "$candidate" ]]; then
+        set -a
+        # shellcheck disable=SC1090
+        . "$candidate"
+        set +a
+        LOADED_ENV="$candidate"
+        break
+    fi
+done
+
+if [[ -z "$LOADED_ENV" ]]; then
+    echo "start.sh: WARNING — no .env found at any of: ${ENV_CANDIDATES[*]}; relying on inherited env" >&2
 else
-    echo "start.sh: WARNING — no .env in $REPO_ROOT; relying on inherited env" >&2
+    echo "start.sh: loaded env from $LOADED_ENV"
 fi
 
 # Fail fast on missing required vars — better than dying inside a python

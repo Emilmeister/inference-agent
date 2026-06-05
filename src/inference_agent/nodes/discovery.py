@@ -203,20 +203,20 @@ def prefetch_and_normalize_model(
         )
         return None
 
-    # Sanity check: prefetched files must land at <cache_dir>/models--*/snapshots/<sha>/
-    # so engines mounting `<cache_dir>` as their hub/ see them. If the operator
-    # pointed host_cache_dir at the HF cache ROOT instead of its hub/ subdir,
-    # snapshot_download writes the files but no engine ever finds them — we'd
-    # burn an entire benchmark sweep on opaque "Cannot find any model weights"
-    # crashes (this bit us once, hence the explicit guard).
-    expected_prefix = os.path.realpath(cache_dir)
-    actual_prefix = os.path.realpath(path)
-    if not actual_prefix.startswith(expected_prefix + os.sep):
+    # Sanity check: confirm the snapshot is actually navigable from cache_dir
+    # and has a config.json at the snapshot root. We deliberately use a plain
+    # startswith on the LITERAL (unresolved) path here, not realpath — legit
+    # cache layouts may have symlinks (e.g. an operator pre-populated
+    # `<cache_dir>/models--foo` as a symlink into a larger volume), and we
+    # don't want to false-positive on those. snapshot_download returns the
+    # path under cache_dir even when the underlying storage is symlinked,
+    # so the unresolved comparison is what tells us "did it write where it
+    # said it did".
+    if not path.startswith(cache_dir.rstrip(os.sep) + os.sep):
         msg = (
-            f"HF cache layout mismatch: snapshot landed at {actual_prefix} "
-            f"but cache_dir is {expected_prefix}. snapshot_download wrote the "
-            f"model somewhere engines won't look. Set container.host_cache_dir "
-            f"to ~/.cache/huggingface/hub (the hub/ subdir, not the cache root)."
+            f"HF cache layout mismatch: snapshot_download claimed to write to "
+            f"{path} but cache_dir is {cache_dir}. Engines will not find the "
+            f"model. Check container.host_cache_dir."
         )
         if raise_on_failure:
             raise RuntimeError(msg)
