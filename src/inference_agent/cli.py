@@ -104,6 +104,12 @@ async def _run(config: AgentConfig) -> None:
             "experiment_history": [],
             "loaded_top_history": [],
             "experiments_count": 0,
+            # Agentic-first bests (primary leaderboard).
+            "best_agentic_max_viable_c": 0,
+            "best_agentic_config_id": "",
+            "best_agentic_tpot_p95": float("inf"),
+            "best_agentic_throughput": 0.0,
+            # Throughput/latency/balanced tracked for backward compatibility.
             "best_throughput": 0.0,
             "best_throughput_config_id": "",
             "best_latency_ttft_p95": float("inf"),
@@ -112,7 +118,12 @@ async def _run(config: AgentConfig) -> None:
             "best_balanced_throughput": 0.0,
             "best_balanced_latency": float("inf"),
             "pareto_front": [],
-            "next_optimization_goal": OptimizationGoal.EXPLORE,
+            "agentic_pareto_front": [],
+            # Start with the agentic goal so the FIRST experiment goes through
+            # the validator's agentic gates (prefix-cache mandatory, sane
+            # max_model_len). Without this, exp #1 lands under explore and
+            # the planner is free to pick a throughput-shaped config.
+            "next_optimization_goal": OptimizationGoal.AGENTIC,
             "status": "running",
             "stop_reason": None,
             "current_config": None,

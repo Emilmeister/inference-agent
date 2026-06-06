@@ -124,7 +124,12 @@ not apply here.
 5. If goal is "optimize_balanced": find configs where TTFT p95 < {latency_threshold} ms \
 AND max_viable_agentic_concurrency is maximized. NOT raw throughput.
 6. If goal is "explore": try something new — speculative decoding, different \
-max_model_len, attention backends. Still respect Rule 3a.
+max_model_len, attention backends. Still respect Rule 3a (prefix caching on; \
+max_model_len ≤ ~2× agentic workload budget). Explore is an axis SEARCH, \
+not a license to revert to throughput-shaped configs (`max_num_seqs`/ \
+`max_running_requests` ≥ 256, `max_model_len` ≥ 131072 with no agentic \
+justification). The validator will reject those under optimize_agentic; \
+under explore they still waste a slot.
 7. SPECULATIVE DECODING is a first-class lever — actively probe it once a stable baseline exists, \
 do NOT treat it as a last resort. Sweep across algorithms (vLLM: ngram, eagle, eagle3, medusa, mlp_speculator; \
 SGLang: NEXTN, EAGLE, EAGLE3) AND across `speculative_num_steps` (try at least 3, 5, 8) AND across \
