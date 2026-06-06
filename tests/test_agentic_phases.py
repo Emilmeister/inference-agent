@@ -1,4 +1,9 @@
-"""Tests for agentic_long_context phase building in get_benchmark_phases."""
+"""Tests for agentic_long_context phase building in get_benchmark_phases.
+
+The workload is shaped as `shared_prefix + unique_per_session + turns × (max_out + tool_result_max)`.
+Phases are emitted at each configured agentic concurrency, with `prompt_length`
+set to `shared + unique` (the total first-turn user message size).
+"""
 
 from inference_agent.benchmark.runner import get_benchmark_phases
 from inference_agent.models import BenchmarkConfig
@@ -16,44 +21,46 @@ class TestAgenticPhasesEnabled:
         assert agentic == []
 
     def test_added_when_enabled_and_context_fits(self):
-        """3 concurrency levels → 3 agentic phases at the configured prefix length."""
+        """3 concurrency levels → 3 agentic phases at shared+unique prompt size."""
         cfg = BenchmarkConfig(
             concurrency_levels=[1],
             prompt_lengths=[512],
             enable_agentic_long_context=True,
-            agentic_prefix_tokens=64_000,
-            agentic_max_output_tokens=16_384,
-            agentic_tool_result_max_tokens=5_120,
+            agentic_shared_prefix_tokens=16_000,
+            agentic_unique_prompt_tokens=8_000,
+            agentic_max_output_tokens=2_400,
+            agentic_tool_result_max_tokens=1_536,
             agentic_turns_per_session=4,
             agentic_concurrency_levels=[4, 8, 16],
         )
-        # Required: 64k + 4 * (16k + 5k) ≈ 148k. Use 200k to be safe.
+        # Required: 24k + 4 * (2.4k + 1.5k) ≈ 40k. 64k headroom is fine.
         phases = get_benchmark_phases(
-            model_max_context=200_000, benchmark_config=cfg,
+            model_max_context=64_000, benchmark_config=cfg,
         )
         agentic = [p for p in phases if p[1] == "agentic_long_context"]
         assert len(agentic) == 3
         concurrencies = sorted(p[2] for p in agentic)
         assert concurrencies == [4, 8, 16]
-        # All agentic phases use prefix_tokens as prompt_length and the configured max_out.
-        assert all(p[3] == 64_000 for p in agentic)
-        assert all(p[4] == 16_384 for p in agentic)
+        # prompt_length is the SUM of shared + unique (= total first-turn user text).
+        assert all(p[3] == 24_000 for p in agentic)
+        assert all(p[4] == 2_400 for p in agentic)
 
     def test_skipped_when_context_too_small(self):
-        """If max context can't hold prefix + turns × (out + tool), skip agentic."""
+        """If max context can't hold shared+unique + turns × (out + tool), skip agentic."""
         cfg = BenchmarkConfig(
             concurrency_levels=[1],
             prompt_lengths=[512],
             enable_agentic_long_context=True,
-            agentic_prefix_tokens=64_000,
-            agentic_max_output_tokens=16_384,
+            agentic_shared_prefix_tokens=16_000,
+            agentic_unique_prompt_tokens=8_000,
+            agentic_max_output_tokens=8_192,
             agentic_tool_result_max_tokens=5_120,
             agentic_turns_per_session=4,
             agentic_concurrency_levels=[4, 8, 16],
         )
-        # 64k context — way less than 148k required for one full agentic session.
+        # Required: 24k + 4 * (8k + 5k) ≈ 76k — way more than 32k context.
         phases = get_benchmark_phases(
-            model_max_context=64_000, benchmark_config=cfg,
+            model_max_context=32_000, benchmark_config=cfg,
         )
         agentic = [p for p in phases if p[1] == "agentic_long_context"]
         assert agentic == []
@@ -64,7 +71,8 @@ class TestAgenticPhasesEnabled:
             prompt_lengths=[512],
             enable_agentic_long_context=True,
             agentic_concurrency_levels=[4, 8],
-            agentic_prefix_tokens=8_000,
+            agentic_shared_prefix_tokens=6_000,
+            agentic_unique_prompt_tokens=2_000,
             agentic_max_output_tokens=512,
             agentic_tool_result_max_tokens=512,
             agentic_turns_per_session=2,
@@ -74,6 +82,7 @@ class TestAgenticPhasesEnabled:
         )
         agentic = [p for p in phases if p[1] == "agentic_long_context"]
         ids = [p[0] for p in agentic]
+        # phase_id encodes shared+unique as the prompt length.
         assert ids == ["agentic_c4_p8000", "agentic_c8_p8000"]
 
     def test_max_model_len_overrides_context(self):
@@ -82,10 +91,16 @@ class TestAgenticPhasesEnabled:
             concurrency_levels=[1],
             prompt_lengths=[512],
             enable_agentic_long_context=True,
+            agentic_shared_prefix_tokens=16_000,
+            agentic_unique_prompt_tokens=8_000,
+            agentic_max_output_tokens=8_192,
+            agentic_tool_result_max_tokens=5_120,
+            agentic_turns_per_session=4,
+            agentic_concurrency_levels=[4, 8, 16],
         )
         phases = get_benchmark_phases(
             model_max_context=200_000,
-            max_model_len=64_000,
+            max_model_len=32_000,  # below the 76k agentic budget
             benchmark_config=cfg,
         )
         agentic = [p for p in phases if p[1] == "agentic_long_context"]

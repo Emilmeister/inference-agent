@@ -12,7 +12,7 @@ class PlannerOutput(BaseModel):
     tensor_parallel_size: int = Field(default=1, description="Tensor parallelism size")
     pipeline_parallel_size: int = Field(default=1, description="Pipeline parallelism size")
     data_parallel_size: int = Field(default=1, description="Data parallelism size")
-    max_model_len: int = Field(description="Max context length / KV-cache window. Choose ONE of {16384, 32768, 65536, 131072, 262144}, capped at the model's max_context. The OBJECTIVE is to find the LARGEST power-of-2 context that fits VRAM and still benchmarks well — do NOT anchor at 32768 by default. Pick the largest plausibly-fitting value first; halve only after a confirmed OOM.")
+    max_model_len: int = Field(description="Max context length / KV-cache window. Choose ONE of {16384, 32768, 65536, 131072, 262144}, capped at the model's max_context. Under the AGENTIC goal: pick the SMALLEST bucket that fits the agentic workload (shared_prefix + unique + turns × (out + tool)) — extra context just wastes KV budget that could host more parallel sessions. Under throughput/explore goals: prefer LARGER values to test long-context capability.")
     gpu_memory_utilization: float = Field(default=0.9, description="GPU memory fraction (vLLM)")
     mem_fraction_static: float | None = Field(default=None, description="Static memory fraction (SGLang)")
     max_num_seqs: int | None = Field(default=None, description="Max concurrent sequences (vLLM)")
@@ -24,7 +24,7 @@ class PlannerOutput(BaseModel):
     kv_cache_dtype: str = Field(default="auto", description="KV cache dtype")
     enable_chunked_prefill: bool = Field(default=False, description="Enable chunked prefill")
     chunked_prefill_size: int | None = Field(default=None, description="Chunked prefill size (SGLang)")
-    enable_prefix_caching: bool = Field(default=False, description="Enable prefix caching")
+    enable_prefix_caching: bool = Field(default=True, description="Enable prefix caching. MANDATORY under the agentic goal — the benchmark builds a shared prefix across all parallel sessions and depends on KV reuse for realistic concurrency. The validator REJECTS configs that set this to false under optimize_agentic. Default true is harmless for other goals.")
     enforce_eager: bool = Field(default=False, description="Disable CUDA graphs (vLLM)")
     attention_backend: str | None = Field(
         default=None,
@@ -55,9 +55,9 @@ class PlannerOutput(BaseModel):
 class AnalyzerOutput(BaseModel):
     """Schema for the Analyzer LLM response."""
 
-    commentary: str = Field(description="2-4 sentence analysis of the experiment across all 3 goals")
-    classification: str = Field(description="One of: best_throughput, best_latency, best_balanced, none")
+    commentary: str = Field(description="2-4 sentence analysis of the experiment across the 3 active goals (agentic, latency, balanced)")
+    classification: str = Field(description="One of: best_agentic, best_latency, best_balanced, none")
     decision: str = Field(description="One of: continue, stop")
     stop_reason: str | None = Field(default=None, description="Reason for stopping, if decision=stop")
-    next_goal: str = Field(description="One of: optimize_throughput, optimize_latency, optimize_balanced, explore")
+    next_goal: str = Field(description="One of: optimize_agentic, optimize_latency, optimize_balanced, explore")
     planner_hint: str = Field(default="", description="Hint for the planner on what to try next")

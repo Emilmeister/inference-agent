@@ -46,7 +46,17 @@ class AgentState(TypedDict, total=False):
     # plateau detection (otherwise plateau triggers immediately on prior tops).
     loaded_top_history: Annotated[list[ExperimentSummary], _replace]
 
-    # Leaderboards — throughput
+    # Leaderboards — agentic (primary goal). Tracks the max parallel-agent
+    # concurrency observed at SLO, plus the tpot at that point so analyzer
+    # can tie-break.
+    best_agentic_max_viable_c: Annotated[int, _replace]
+    best_agentic_config_id: Annotated[str, _replace]
+    best_agentic_tpot_p95: Annotated[float, _replace]
+    best_agentic_throughput: Annotated[float, _replace]
+
+    # Leaderboards — throughput (kept for backward compat with old DB rows and
+    # for the dashboard "raw throughput" panel — NOT used by analyzer for
+    # leaderboards/Pareto/stop decisions anymore).
     best_throughput: Annotated[float, _replace]
     best_throughput_config_id: Annotated[str, _replace]
 
@@ -59,8 +69,11 @@ class AgentState(TypedDict, total=False):
     best_balanced_throughput: Annotated[float, _replace]
     best_balanced_latency: Annotated[float, _replace]
 
-    # Pareto front
+    # Pareto front — throughput vs TTFT (kept for dashboard / historical).
     pareto_front: Annotated[list[ParetoPoint], _replace]
+    # Pareto front — agentic axis (max_viable_c ↑, tpot_p95 ↓). Primary front
+    # for the agentic-first goal.
+    agentic_pareto_front: Annotated[list[ParetoPoint], _replace]
 
     # Next optimization direction
     next_optimization_goal: Annotated[OptimizationGoal, _replace]

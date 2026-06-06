@@ -10,6 +10,7 @@ import time
 
 from inference_agent.benchmark.gpu_monitor import GPUMonitor
 from inference_agent.benchmark.runner import (
+    AgenticSLO,
     _is_connection_failure,
     get_benchmark_phases,
     run_agentic_long_context_phase,
@@ -302,6 +303,11 @@ def _summarize_ceiling_reason(error_details: list[str]) -> str:
 
 _AGENTIC_SATURATION_RATE = 0.95  # error_rate at/above which we lock the agentic sweep
 
+# After this many consecutive agentic phases miss SLO (full duration, full
+# metrics — NOT a short probe), stop the agentic sweep. One non-viable phase
+# can be transient; two in a row at increasing concurrency is a real ceiling.
+_MAX_CONSECUTIVE_NON_VIABLE_AGENTIC = 2
+
 # Experiment-level watchdog: after this many consecutive phases die with
 # socket-level errors, we stop the sweep entirely. The engine is gone and
 # every remaining phase will just produce another batch of unhelpful
@@ -349,13 +355,15 @@ async def _run_all_phases(
     )
 
     error_rate_threshold = config.benchmark.phase_error_rate_threshold
+    agentic_slo = AgenticSLO.from_config(config.benchmark)
 
-    # Once an agentic phase totally saturates (≈100% sessions timing out), every
-    # higher concurrency in the sweep will fail the same way — sessions are
-    # independent and the bottleneck is server capacity, not luck. Lock at the
-    # first such concurrency and skip the rest of the agentic ladder instead
-    # of burning ~60s × N more wasted phases per experiment.
+    # Agentic sweep stops after two consecutive not-viable phases (SLO miss).
+    # A single bad phase can be transient — backpressure under burst, garbage
+    # collection, network — but two in a row at increasing concurrency is the
+    # ceiling. Remaining higher concurrencies are recorded as `skipped`
+    # ceiling probes so the dashboard shows the sweep ended deliberately.
     agentic_ceiling_lock: int | None = None
+    consecutive_non_viable_agentic = 0
 
     # Experiment-level watchdog: count consecutive phases that came back with
     # socket-shaped 100% failure (engine crashed mid-sweep). After the second,
@@ -382,15 +390,18 @@ async def _run_all_phases(
                 prompt_length=prompt_len,
                 error_rate=1.0,
                 errors=concurrency,
-                reason=f"skipped: c={agentic_ceiling_lock} already saturated",
+                reason=f"skipped: c={agentic_ceiling_lock} already past SLO",
             ))
             continue
 
         if is_agentic:
             logger.info(
-                "  Phase: %s [%s] (c=%d, prefix=%d, max_out=%d, turns=%d)",
+                "  Phase: %s [%s] (c=%d, prompt=%d, max_out=%d, turns=%d) "
+                "SLO ttft_p95≤%.0fms tpot_p95≤%.0fms errors≤%.0f%%",
                 phase_id, workload_id, concurrency, prompt_len, max_out,
                 config.benchmark.agentic_turns_per_session,
+                agentic_slo.ttft_p95_ms, agentic_slo.tpot_p95_ms,
+                agentic_slo.session_error_rate * 100,
             )
         else:
             logger.info(
@@ -404,7 +415,8 @@ async def _run_all_phases(
                     api_base_url=engine.api_base_url(),
                     model_name=config.model_name,
                     concurrency=concurrency,
-                    prefix_tokens=prompt_len,
+                    shared_prefix_tokens=config.benchmark.agentic_shared_prefix_tokens,
+                    unique_prompt_tokens=config.benchmark.agentic_unique_prompt_tokens,
                     max_output_tokens=max_out,
                     turns=config.benchmark.agentic_turns_per_session,
                     tool_result_min=config.benchmark.agentic_tool_result_min_tokens,
@@ -414,6 +426,7 @@ async def _run_all_phases(
                     seed=seed,
                     workload_id=workload_id,
                     phase_id=phase_id,
+                    slo=agentic_slo,
                 )
             else:
                 result = await run_benchmark_phase(
@@ -429,20 +442,57 @@ async def _run_all_phases(
                     phase_id=phase_id,
                 )
             if not is_warmup:
-                # Error-rate gate: discard phases with too many errors,
-                # routing agentic ceiling probes (SLO-shaped timeouts) to
-                # ceiling_probes and real malfunctions to phase_errors.
-                if result.error_rate > error_rate_threshold:
+                # Agentic phases are gated by full SLO (TTFT + tpot + error
+                # rate + e2e), evaluated by the runner. A non-viable phase is
+                # routed to ceiling_probes regardless of how clean the error
+                # rate looks — meeting throughput at terrible TTFT is not
+                # serving real agent traffic.
+                if is_agentic and not result.viable:
+                    reason = (
+                        "; ".join(result.slo_violations)
+                        if result.slo_violations
+                        else _summarize_ceiling_reason(list(result.error_details))
+                    )
+                    logger.info(
+                        "  Phase %s NOT VIABLE at c=%d (%s) — recording as "
+                        "ceiling probe, not a malfunction",
+                        phase_id, concurrency, reason,
+                    )
+                    ceiling_probes.append(CeilingProbeInfo(
+                        phase_id=phase_id,
+                        workload_id=workload_id,
+                        concurrency=concurrency,
+                        prompt_length=prompt_len,
+                        error_rate=result.error_rate,
+                        errors=result.errors,
+                        reason=reason,
+                    ))
+                    consecutive_non_viable_agentic += 1
+                    if (
+                        agentic_ceiling_lock is None
+                        and consecutive_non_viable_agentic
+                        >= _MAX_CONSECUTIVE_NON_VIABLE_AGENTIC
+                    ):
+                        agentic_ceiling_lock = concurrency
+                        logger.info(
+                            "  Agentic ceiling locked at c=%d "
+                            "(%d consecutive non-viable phases); higher "
+                            "agentic levels will be skipped as %d-th SLO miss "
+                            "in a row is a real ceiling.",
+                            concurrency, consecutive_non_viable_agentic,
+                            _MAX_CONSECUTIVE_NON_VIABLE_AGENTIC,
+                        )
+                # Error-rate gate for non-agentic workloads (and agentic
+                # phases that passed SLO but somehow tripped the error gate
+                # — currently impossible since session_error_rate ≤ phase
+                # threshold, but guard kept for safety). Real malfunctions
+                # land in phase_errors so the LLM sees them.
+                elif result.error_rate > error_rate_threshold:
                     outcome = _classify_phase_outcome(
                         workload_id, list(result.error_details)
                     )
                     if outcome == "ceiling_probe":
                         reason = _summarize_ceiling_reason(list(result.error_details))
-                        logger.info(
-                            "  Phase %s hit agentic ceiling at c=%d "
-                            "(error_rate=%.1f%%, reason=%s) — not a malfunction",
-                            phase_id, concurrency, result.error_rate * 100, reason,
-                        )
                         ceiling_probes.append(CeilingProbeInfo(
                             phase_id=phase_id,
                             workload_id=workload_id,
@@ -452,25 +502,6 @@ async def _run_all_phases(
                             errors=result.errors,
                             reason=reason,
                         ))
-                        # Saturation lock: once a ceiling probe approaches
-                        # 100% failure, every higher concurrency in this
-                        # agentic sweep will fail the same way. Set the lock
-                        # so subsequent agentic phases at >= this concurrency
-                        # short-circuit at the top of the loop.
-                        if (
-                            is_agentic
-                            and agentic_ceiling_lock is None
-                            and result.error_rate >= _AGENTIC_SATURATION_RATE
-                        ):
-                            agentic_ceiling_lock = concurrency
-                            logger.info(
-                                "  Agentic ceiling locked at c=%d "
-                                "(error_rate=%.1f%% >= %.0f%%); higher agentic "
-                                "phases will be skipped.",
-                                concurrency,
-                                result.error_rate * 100,
-                                _AGENTIC_SATURATION_RATE * 100,
-                            )
                     else:
                         logger.warning(
                             "  Phase %s error_rate=%.1f%% exceeds threshold %.1f%%, marking invalid",
@@ -495,13 +526,14 @@ async def _run_all_phases(
                                 "error_rate": result.error_rate,
                                 "errors": result.errors,
                                 "threshold": error_rate_threshold,
-                                # First 3 actual error strings (timeouts, HTTP 5xx, etc.)
-                                # propagate from runner so the LLM sees WHAT broke, not
-                                # just that "error_rate exceeded".
                                 "error_samples": list(result.error_details[:3]),
                             },
                         ))
                 else:
+                    # Viable agentic phase resets the consecutive counter —
+                    # we may yet test higher c successfully.
+                    if is_agentic:
+                        consecutive_non_viable_agentic = 0
                     concurrency_results.append(result)
 
             # Update the dead-engine watchdog regardless of which branch above
@@ -995,6 +1027,8 @@ def _aggregate_benchmark(
         agentic_concurrency_ceiling_hit=agentic_metrics["ceiling_hit"],
         agentic_saturation_concurrency=agentic_metrics["saturation"],
         agentic_peak_output_tokens_per_sec=agentic_metrics["peak_throughput"],
+        agentic_tpot_p95_ms=agentic_metrics["tpot_p95"],
+        agentic_ttft_p95_ms=agentic_metrics["ttft_p95"],
     )
 
 
@@ -1003,48 +1037,34 @@ def _compute_agentic_metrics(
     benchmark_config,
     ceiling_probes: list[CeilingProbeInfo] | None = None,
 ) -> dict:
-    """Derive max_viable_agentic_concurrency и сопутствующие метрики.
+    """Derive headline agentic metrics from per-phase results.
 
-    Возвращает dict: max_viable, ceiling_hit, saturation, peak_throughput.
-    Если agentic-фаз не было или benchmark_config=None → все нули/False.
+    Returns dict keys: max_viable, ceiling_hit, saturation, peak_throughput,
+    tpot_p95, ttft_p95. Empty/zero when no agentic phases ran.
 
-    Гейты для "viable":
-      1) error_rate ≤ phase_error_rate_threshold
-      2) ttft_ms.p95 ≤ agentic_ttft_p95_slo_ms
-      3) e2e_latency_ms.p95 ≤ agentic_e2e_p95_slo_ms (0 → авто-вычисление)
-
-    `ceiling_probes` несёт concurrencies, которые были пробованы но не вошли
-    в SLO (таймауты на высоких c). Они учитываются для определения sweep_max
-    и, соответственно, ceiling_hit: если максимально viable < максимального
-    пробованного — реальный потолок найден внутри sweep'а, ceiling_hit=False.
+    `viable` is now decided by the runner (AgenticSLO) — `result.viable` is
+    the canonical signal. We only re-derive the geometry of the sweep here
+    (max viable concurrency, where peak throughput sat, and the tpot/ttft
+    at the max-viable phase so the analyzer can tie-break two configs with
+    the same max_viable_c).
     """
     agentic_results = [r for r in results if r.workload_id == "agentic_long_context"]
     ceiling_probes = ceiling_probes or []
-    if (not agentic_results and not ceiling_probes) or benchmark_config is None:
+    if not agentic_results and not ceiling_probes:
         return {
             "max_viable": 0,
             "ceiling_hit": False,
             "saturation": 0,
             "peak_throughput": 0.0,
+            "tpot_p95": 0.0,
+            "ttft_p95": 0.0,
         }
 
-    error_rate_threshold = benchmark_config.phase_error_rate_threshold
-    ttft_slo = benchmark_config.agentic_ttft_p95_slo_ms
-    e2e_slo = benchmark_config.agentic_e2e_p95_slo_ms
-    if e2e_slo <= 0:
-        # Auto: 80% of session timeout (sec → ms)
-        e2e_slo = benchmark_config.agentic_session_timeout_sec * 1000.0 * 0.8
-
-    viable_concurrencies = [
-        r.concurrency for r in agentic_results
-        if r.error_rate <= error_rate_threshold
-        and 0 < r.ttft_ms.p95 <= ttft_slo
-        and 0 < r.e2e_latency_ms.p95 <= e2e_slo
-    ]
-    max_viable = max(viable_concurrencies) if viable_concurrencies else 0
+    viable_results = [r for r in agentic_results if r.viable]
+    max_viable = max((r.concurrency for r in viable_results), default=0)
 
     # sweep_max должен включать и ceiling-probe'ы, иначе при «c=8 прошло,
-    # c=16/32/64/128 ceiling-probe» мы бы получили sweep_max=8, max_viable=8,
+    # c=16/32/64 ceiling-probe» мы бы получили sweep_max=8, max_viable=8,
     # ceiling_hit=True — ложно («потолок не найден»). Правильно — False.
     sweep_candidates = (
         [r.concurrency for r in agentic_results]
@@ -1053,20 +1073,33 @@ def _compute_agentic_metrics(
     sweep_max = max(sweep_candidates) if sweep_candidates else 0
     ceiling_hit = max_viable > 0 and max_viable == sweep_max
 
-    if agentic_results:
-        peak_result = max(agentic_results, key=lambda r: r.output_tokens_per_sec)
+    # Peak throughput across VIABLE agentic phases (a non-viable phase
+    # technically generated tokens but at terrible latency — we don't want
+    # to credit it).
+    if viable_results:
+        peak_result = max(viable_results, key=lambda r: r.output_tokens_per_sec)
         saturation = peak_result.concurrency
         peak_throughput = peak_result.output_tokens_per_sec
     else:
-        # Every agentic phase was a ceiling probe — no throughput datapoint
-        # to report. max_viable=0 above already reflects "ceiling below the
-        # lowest probed concurrency".
         saturation = 0
         peak_throughput = 0.0
+
+    # tpot/ttft at the max-viable phase — tells the analyzer how snappy
+    # responses were at the headline concurrency. If max_viable == 0,
+    # leave both at 0.
+    tpot_p95 = 0.0
+    ttft_p95 = 0.0
+    if max_viable > 0:
+        anchor = next((r for r in viable_results if r.concurrency == max_viable), None)
+        if anchor is not None:
+            tpot_p95 = anchor.tpot_ms.p95
+            ttft_p95 = anchor.ttft_ms.p95
 
     return {
         "max_viable": max_viable,
         "ceiling_hit": ceiling_hit,
         "saturation": saturation,
         "peak_throughput": peak_throughput,
+        "tpot_p95": tpot_p95,
+        "ttft_p95": ttft_p95,
     }

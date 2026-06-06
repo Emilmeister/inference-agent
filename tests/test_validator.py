@@ -212,3 +212,102 @@ class TestValidateExperiment:
         )
         errors = validate_experiment(exp, hw)
         assert any("TP*PP*DP=8 exceeds" in e for e in errors)
+
+
+# ─── Agentic-goal gates ───────────────────────────────────────────────────
+
+from inference_agent.models import AgentConfig, OptimizationGoal
+
+
+class TestAgenticGoalGates:
+    """When goal == OptimizationGoal.AGENTIC, two extra gates fire:
+      1. enable_prefix_caching MUST be true (shared-prefix workload).
+      2. max_model_len ≤ 2× the agentic workload budget.
+    Other goals are unaffected (regression check)."""
+
+    def _agent_config(self, **bench_overrides) -> AgentConfig:
+        ac = AgentConfig()
+        ac.benchmark.enable_agentic_long_context = True
+        ac.benchmark.agentic_shared_prefix_tokens = 16_000
+        ac.benchmark.agentic_unique_prompt_tokens = 8_000
+        ac.benchmark.agentic_max_output_tokens = 2_400
+        ac.benchmark.agentic_tool_result_max_tokens = 1_536
+        ac.benchmark.agentic_turns_per_session = 4
+        for k, v in bench_overrides.items():
+            setattr(ac.benchmark, k, v)
+        return ac
+
+    def test_prefix_caching_required_under_agentic(self):
+        hw = _make_hardware(model_max_context=131_072)
+        exp = _make_experiment(
+            max_model_len=32_768,
+            enable_prefix_caching=False,
+        )
+        errors = validate_experiment(
+            exp, hw, self._agent_config(), OptimizationGoal.AGENTIC,
+        )
+        assert any("enable_prefix_caching" in e for e in errors)
+
+    def test_prefix_caching_required_only_under_agentic(self):
+        """The same config passes when the goal is throughput/latency."""
+        hw = _make_hardware(model_max_context=131_072)
+        exp = _make_experiment(
+            max_model_len=32_768,
+            enable_prefix_caching=False,
+        )
+        errors = validate_experiment(
+            exp, hw, self._agent_config(), OptimizationGoal.LATENCY,
+        )
+        assert errors == []
+
+    def test_oversize_max_model_len_rejected_under_agentic(self):
+        """Budget = 16k + 8k + 4*(2.4k + 1.5k) ≈ 40k. 131_072 > 2×40k=80k → reject."""
+        hw = _make_hardware(model_max_context=262_144)
+        exp = _make_experiment(
+            max_model_len=131_072,
+            enable_prefix_caching=True,
+        )
+        errors = validate_experiment(
+            exp, hw, self._agent_config(), OptimizationGoal.AGENTIC,
+        )
+        assert any(
+            "max_model_len" in e and "agentic workload budget" in e
+            for e in errors
+        )
+
+    def test_tight_max_model_len_accepted_under_agentic(self):
+        """65_536 sits below the 2×budget threshold and works for the workload."""
+        hw = _make_hardware(model_max_context=131_072)
+        exp = _make_experiment(
+            max_model_len=65_536,
+            enable_prefix_caching=True,
+        )
+        errors = validate_experiment(
+            exp, hw, self._agent_config(), OptimizationGoal.AGENTIC,
+        )
+        assert errors == []
+
+    def test_oversize_max_model_len_passes_under_other_goals(self):
+        hw = _make_hardware(model_max_context=262_144)
+        exp = _make_experiment(
+            max_model_len=131_072,
+            enable_prefix_caching=True,
+        )
+        errors = validate_experiment(
+            exp, hw, self._agent_config(), OptimizationGoal.THROUGHPUT,
+        )
+        assert errors == []
+
+    def test_legacy_no_goal_keeps_old_behavior(self):
+        """validate_experiment(exp, hw) without goal/agent_config still works
+        (e.g. ad-hoc callers in tests / other modules)."""
+        hw = _make_hardware(model_max_context=131_072)
+        exp = _make_experiment(
+            max_model_len=131_072,
+            enable_prefix_caching=False,
+        )
+        errors = validate_experiment(exp, hw)
+        # Prefix-cache gate doesn't fire without goal=AGENTIC, oversize gate
+        # doesn't fire without agent_config — legacy ad-hoc validation stays
+        # permissive about the agentic-specific checks.
+        assert errors == []

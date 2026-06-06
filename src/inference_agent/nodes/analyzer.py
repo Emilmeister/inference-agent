@@ -25,10 +25,21 @@ You are an expert LLM inference performance analyst. Analyze the latest experime
 and all historical results to:
 
 1. Write a commentary (2-4 sentences) about the latest experiment — evaluate it against \
-all 3 optimization goals (throughput, latency, balanced).
-2. Classify this experiment: "best_throughput", "best_latency", "best_balanced", or "none".
+the 3 ACTIVE goals: AGENTIC (primary), LATENCY, BALANCED. Pure synthetic-throughput \
+peaks are informational only — do NOT use them to declare leadership.
+2. Classify this experiment: "best_agentic", "best_latency", "best_balanced", or "none". \
+DO NOT emit "best_throughput" — that classification is retired; configurations that \
+shine at c=256, p=512 but cannot serve agentic traffic under SLO are NOT winners.
 3. Decide whether to continue or stop.
 4. If continuing, choose the next optimization goal and provide a hint for the planner.
+
+## The agentic SLO contract
+A phase is `viable` only when ALL of these hold simultaneously: TTFT p95 ≤ \
+agentic SLO, tpot p95 ≤ agentic SLO, session error_rate ≤ agentic SLO. \
+`max_viable_agentic_concurrency` (called `agentic.max_viable_concurrency` in \
+the payload) is the largest c that passed. **This is the headline metric** \
+for the agentic-first ranking — higher beats lower; tie-breaks go to lower \
+`agentic_tpot_p95`, then higher `agentic_peak_throughput`.
 
 ## Noise (cv = coefficient of variation, stdev/mean) — read this before ranking
 Each leaderboard row carries a `cv` next to its headline metric. cv reflects \
@@ -75,16 +86,19 @@ failures — they tell you where the config ran out of room. Rules:
 {latest_json}
 
 ## Leaderboards
-### Top 5 by Throughput
-{top_throughput}
+### Top 5 by Max Viable Agentic Concurrency (primary)
+{top_agentic}
 
 ### Top 5 by Latency (lowest TTFT p95)
 {top_latency}
 
-### Top 5 Balanced (best throughput with TTFT p95 < {latency_threshold} ms)
+### Top 5 Balanced (best agentic concurrency with TTFT p95 < {latency_threshold} ms)
 {top_balanced}
 
-## Pareto Front
+## Agentic Pareto Front (max_viable_c ↑ vs agentic_tpot_p95 ↓)
+{agentic_pareto_front}
+
+## Throughput vs TTFT Pareto Front (informational)
 {pareto_front}
 
 ## Budget
@@ -99,17 +113,17 @@ by more than {plateau_threshold}%
 Respond with JSON:
 {{
   "commentary": "...",
-  "classification": "best_throughput|best_latency|best_balanced|none",
+  "classification": "best_agentic|best_latency|best_balanced|none",
   "decision": "continue|stop",
   "stop_reason": "..." or null,
-  "next_goal": "optimize_throughput|optimize_latency|optimize_balanced|explore",
+  "next_goal": "optimize_agentic|optimize_latency|optimize_balanced|explore",
   "planner_hint": "..."
 }}
 """
 
 
 def _is_eligible(h: ExperimentSummary) -> bool:
-    """Check if an experiment is eligible for performance leaderboards.
+    """Check if an experiment is eligible for the throughput/latency boards.
 
     Eligibility requires:
     - Experiment succeeded (status=success)
@@ -124,25 +138,38 @@ def _is_eligible(h: ExperimentSummary) -> bool:
     )
 
 
+def _is_agentic_eligible(h: ExperimentSummary) -> bool:
+    """Eligibility for the agentic leaderboard / Pareto front.
+
+    Looser than `_is_eligible`: a config that crashed correctness or had
+    zero synthetic throughput can still be a non-starter for the agentic
+    rank. We only need: status=success, correctness gate passed, and an
+    actual non-zero max_viable_agentic_concurrency.
+    """
+    return (
+        h.status.value == "success"
+        and h.correctness_gate_passed
+        and h.agentic_max_viable_concurrency > 0
+    )
+
+
 def _compute_pareto_front(
     history: list[ExperimentSummary],
 ) -> list[ParetoPoint]:
-    """Compute Pareto front in (throughput↑, latency↓) space."""
-    # Only consider eligible experiments (correctness gate + success + valid metrics)
-    candidates = [h for h in history if _is_eligible(h)]
+    """Compute Pareto front in (throughput↑, latency↓) space.
 
+    Informational / dashboard-only. The primary front for the agentic-first
+    goal is `_compute_agentic_pareto_front`.
+    """
+    candidates = [h for h in history if _is_eligible(h)]
     if not candidates:
         return []
 
-    # Sort by throughput descending
     candidates.sort(key=lambda h: h.peak_throughput, reverse=True)
 
     pareto: list[ParetoPoint] = []
     best_latency = float("inf")
-
     for h in candidates:
-        # A point is Pareto-optimal if no other point has both
-        # higher throughput AND lower latency
         if h.low_concurrency_ttft_p95 < best_latency:
             pareto.append(ParetoPoint(
                 config_id=h.experiment_id,
@@ -151,54 +178,89 @@ def _compute_pareto_front(
                 ttft_p95=h.low_concurrency_ttft_p95,
             ))
             best_latency = h.low_concurrency_ttft_p95
+    return pareto
 
+
+def _compute_agentic_pareto_front(
+    history: list[ExperimentSummary],
+) -> list[ParetoPoint]:
+    """Pareto front in (max_viable_agentic_c ↑, agentic_tpot_p95 ↓) space.
+
+    Primary front for the agentic-first goal — points on it represent
+    configurations that no other config dominates on both axes (more
+    parallel agents AND snappier per-token latency).
+    """
+    candidates = [h for h in history if _is_agentic_eligible(h)]
+    if not candidates:
+        return []
+
+    # Sort by max viable concurrency DESC, so we sweep from "most agents"
+    # downward and keep points that improve on tpot.
+    candidates.sort(key=lambda h: h.agentic_max_viable_concurrency, reverse=True)
+
+    pareto: list[ParetoPoint] = []
+    best_tpot = float("inf")
+    for h in candidates:
+        tpot = h.agentic_tpot_p95 if h.agentic_tpot_p95 > 0 else float("inf")
+        if tpot < best_tpot:
+            pareto.append(ParetoPoint(
+                config_id=h.experiment_id,
+                engine=h.engine,
+                agentic_max_viable_c=h.agentic_max_viable_concurrency,
+                agentic_tpot_p95=h.agentic_tpot_p95,
+            ))
+            best_tpot = tpot
     return pareto
 
 
 def _check_plateau(
     history: list[ExperimentSummary],
-    best_throughput: float,
+    best_agentic_c: int,
     best_latency: float,
     window: int,
     threshold: float,
 ) -> bool:
     """Check if the last `window` experiments improved on the prior best.
 
-    `best_throughput` / `best_latency` MUST be the bests from BEFORE the latest
-    experiment was folded in — otherwise the just-set new best can never be
-    beaten by itself, and a record-breaking run trips plateau (the bug we
-    were hitting). The caller is responsible for passing the pre-update bests.
+    Plateau triggers only when NEITHER the agentic concurrency NOR the cold-
+    start latency moved meaningfully. We do NOT consider raw throughput for
+    plateau anymore — c=256, p=512 wins are not what we're optimizing for.
+
+    `best_agentic_c` / `best_latency` MUST be the bests from BEFORE the
+    latest experiment was folded in — otherwise the just-set new best can
+    never be beaten by itself. Caller is responsible for passing pre-update
+    bests.
 
     "Improvement" is strict and threshold-bounded:
-      - throughput improves iff peak >= best * (1 + threshold)
+      - agentic_c improves iff new > floor(best * (1 + threshold)) AND new > best
       - latency improves iff ttft <= best * (1 - threshold)
     """
-    # Treat any run with non-zero metrics as countable (partials still inform us).
     countable = [
         h for h in history
-        if h.peak_throughput > 0 or h.low_concurrency_ttft_p95 > 0
+        if h.agentic_max_viable_concurrency > 0 or h.low_concurrency_ttft_p95 > 0
     ]
     if len(countable) < window:
         return False
 
     recent = countable[-window:]
 
-    throughput_improved = any(
-        h.peak_throughput > 0
-        and h.peak_throughput >= max(best_throughput, 0.0) * (1 + threshold)
-        and h.peak_throughput > best_throughput
+    # For an integer metric (concurrency) the multiplicative threshold can
+    # round down to zero on small bests — guard with a strict ">" so a
+    # first-ever non-zero value always counts as improvement.
+    agentic_improved = any(
+        h.agentic_max_viable_concurrency > 0
+        and h.agentic_max_viable_concurrency
+        > max(best_agentic_c, 0) * (1 + threshold)
+        and h.agentic_max_viable_concurrency > best_agentic_c
         for h in recent
     )
 
-    # `best_latency` defaults to +inf when no prior best exists; in that case
-    # the multiplication below yields +inf and any positive ttft "improves",
-    # which is the correct behavior on first eligible run.
     latency_improved = any(
         0 < h.low_concurrency_ttft_p95 <= best_latency * (1 - threshold)
         for h in recent
     )
 
-    return not (throughput_improved or latency_improved)
+    return not (agentic_improved or latency_improved)
 
 
 # Soft noise penalty applied to throughput_score / latency_score. Capped so
@@ -219,38 +281,54 @@ def _noise_factor(cv: float) -> float:
 
 def _compute_scores(
     result: ExperimentResult,
+    best_agentic_c: int,
     best_throughput: float,
     best_latency: float,
     pareto: list[ParetoPoint],
+    agentic_pareto: list[ParetoPoint],
 ) -> ExperimentScores:
     """Compute normalized scores for the experiment.
 
-    Throughput and latency scores are derated by a soft noise factor based on
-    the per-request dispersion (cv) at the phases that produced the headline
-    metrics. The Pareto-optimal flag is intentionally not derated — a config
-    that dominates on raw numbers stays on the front; the score is what
-    influences ranking and tie-breaking.
+    `agentic_score` is the primary axis — it's just max_viable_c normalized
+    against the best known so far, no noise derate (concurrency is an
+    integer, the runner-side SLO gate already excluded noisy phases). Then
+    throughput/latency/balanced scores remain for backward compat and the
+    dashboard but DO NOT drive leaderboards anymore.
     """
-    tp = result.benchmark.peak_output_tokens_per_sec
-    lat = result.benchmark.low_concurrency_ttft_p95_ms
+    bench = result.benchmark
+
+    agentic_c = bench.max_viable_agentic_concurrency
+    agentic_score = agentic_c / best_agentic_c if best_agentic_c > 0 else 0.0
+
+    tp = bench.peak_output_tokens_per_sec
+    lat = bench.low_concurrency_ttft_p95_ms
 
     tp_score = tp / best_throughput if best_throughput > 0 else 0.0
     lat_score = best_latency / lat if lat > 0 else 0.0
 
-    tp_score *= _noise_factor(result.benchmark.peak_throughput_e2e_cv)
-    lat_score *= _noise_factor(result.benchmark.low_concurrency_ttft_cv)
+    tp_score *= _noise_factor(bench.peak_throughput_e2e_cv)
+    lat_score *= _noise_factor(bench.low_concurrency_ttft_cv)
 
-    # Balanced score: geometric mean of throughput and latency scores
-    balanced = (tp_score * lat_score) ** 0.5 if tp_score > 0 and lat_score > 0 else 0.0
+    # Balanced score: geometric mean of agentic_score and latency_score —
+    # because the active "balanced" goal is "maximize agentic c while keeping
+    # cold-start latency low", not "maximize raw throughput while keeping
+    # latency low".
+    balanced = (
+        (agentic_score * lat_score) ** 0.5
+        if agentic_score > 0 and lat_score > 0
+        else 0.0
+    )
 
-    # Check if Pareto-optimal
     is_pareto = any(p.config_id == result.experiment_id for p in pareto)
+    is_agentic_pareto = any(p.config_id == result.experiment_id for p in agentic_pareto)
 
     return ExperimentScores(
+        agentic_score=min(agentic_score, 1.0),
         throughput_score=min(tp_score, 1.0),
         latency_score=min(lat_score, 1.0),
         balanced_score=min(balanced, 1.0),
         is_pareto_optimal=is_pareto,
+        is_agentic_pareto_optimal=is_agentic_pareto,
     )
 
 
@@ -275,6 +353,10 @@ async def analyzer_node(state: AgentState) -> dict:
     # plateau check below must compare the window against the *prior* best,
     # otherwise a record-breaking run sets best_*=its_own_value and then
     # trivially fails to beat itself, falsely tripping plateau.
+    best_agentic_c = state.get("best_agentic_max_viable_c", 0)
+    best_agentic_id = state.get("best_agentic_config_id", "")
+    best_agentic_tpot = state.get("best_agentic_tpot_p95", float("inf"))
+    best_agentic_tp = state.get("best_agentic_throughput", 0.0)
     best_throughput = state.get("best_throughput", 0.0)
     best_throughput_id = state.get("best_throughput_config_id", "")
     best_latency = state.get("best_latency_ttft_p95", float("inf"))
@@ -283,26 +365,37 @@ async def analyzer_node(state: AgentState) -> dict:
     best_balanced_tp = state.get("best_balanced_throughput", 0.0)
     best_balanced_lat = state.get("best_balanced_latency", float("inf"))
 
+    agentic_c_now = result.benchmark.max_viable_agentic_concurrency
+    agentic_tpot_now = result.benchmark.agentic_tpot_p95_ms
+    agentic_peak_now = result.benchmark.agentic_peak_output_tokens_per_sec
     tp = result.benchmark.peak_output_tokens_per_sec
     lat = result.benchmark.low_concurrency_ttft_p95_ms
 
-    # Pareto front and scoring use the union (loaded tops + session). This way
-    # the planner sees the global picture and `is_pareto_optimal` reflects
-    # cross-run optimality. Plateau detection below uses session-only.
+    # Two Pareto fronts: agentic (primary) and throughput-vs-latency
+    # (informational / backward-compat).
     pareto = _compute_pareto_front(union_history)
+    agentic_pareto = _compute_agentic_pareto_front(union_history)
 
-    # For scoring use cross-run bests (so the current experiment is normalized
-    # against the strongest configs seen anywhere, not just this session).
-    eligible_union = [h for h in union_history if _is_eligible(h)]
+    # Scoring uses cross-run bests so a current experiment is normalized
+    # against the strongest configs seen anywhere (not just this session).
+    eligible_throughput_union = [h for h in union_history if _is_eligible(h)]
+    eligible_agentic_union = [h for h in union_history if _is_agentic_eligible(h)]
     union_best_tp = max(
-        (h.peak_throughput for h in eligible_union),
+        (h.peak_throughput for h in eligible_throughput_union),
         default=best_throughput,
     )
     union_best_lat = min(
-        (h.low_concurrency_ttft_p95 for h in eligible_union),
+        (h.low_concurrency_ttft_p95 for h in eligible_throughput_union),
         default=best_latency,
     )
-    scores = _compute_scores(result, union_best_tp, union_best_lat, pareto)
+    union_best_agentic = max(
+        (h.agentic_max_viable_concurrency for h in eligible_agentic_union),
+        default=best_agentic_c,
+    )
+    scores = _compute_scores(
+        result, union_best_agentic, union_best_tp, union_best_lat,
+        pareto, agentic_pareto,
+    )
 
     # Check hard stop conditions
     hard_stop = False
@@ -343,7 +436,7 @@ async def analyzer_node(state: AgentState) -> dict:
     # Pass the PRE-update bests; see _check_plateau docstring for rationale.
     if not hard_stop and _check_plateau(
         session_with_current,
-        best_throughput,
+        best_agentic_c,
         best_latency,
         config.experiments.plateau_window,
         config.experiments.plateau_threshold,
@@ -353,40 +446,97 @@ async def analyzer_node(state: AgentState) -> dict:
 
     # Now fold the current experiment into the session leaderboards.
     latency_threshold = config.benchmark.latency_threshold_ms
-    is_eligible_result = (
+    is_eligible_throughput = (
         result.status == ExperimentStatus.SUCCESS
         and result.correctness_gate_passed
         and tp > 0 and lat > 0
     )
+    is_eligible_agentic = (
+        result.status == ExperimentStatus.SUCCESS
+        and result.correctness_gate_passed
+        and agentic_c_now > 0
+    )
 
-    if is_eligible_result and tp > best_throughput:
+    # best_agentic — higher concurrency wins; ties broken by lower tpot p95.
+    if is_eligible_agentic:
+        better = agentic_c_now > best_agentic_c or (
+            agentic_c_now == best_agentic_c
+            and 0 < agentic_tpot_now < best_agentic_tpot
+        )
+        if better:
+            best_agentic_c = agentic_c_now
+            best_agentic_id = result.experiment_id
+            best_agentic_tpot = agentic_tpot_now or float("inf")
+            best_agentic_tp = agentic_peak_now
+
+    # best_throughput stays tracked for historical/dashboard use even though
+    # it does not drive leaderboards or stop decisions anymore.
+    if is_eligible_throughput and tp > best_throughput:
         best_throughput = tp
         best_throughput_id = result.experiment_id
 
-    if is_eligible_result and 0 < lat < best_latency:
+    if is_eligible_throughput and 0 < lat < best_latency:
         best_latency = lat
         best_latency_id = result.experiment_id
 
-    if is_eligible_result and lat < latency_threshold and tp > best_balanced_tp:
-        best_balanced_tp = tp
+    # best_balanced: best agentic concurrency under TTFT-threshold gate.
+    if (
+        is_eligible_agentic
+        and 0 < lat < latency_threshold
+        and agentic_c_now > best_balanced_tp
+    ):
+        best_balanced_tp = agentic_c_now  # field name kept for compat; semantics: best agentic c under SLO
         best_balanced_lat = lat
         best_balanced_id = result.experiment_id
 
-    # Ask LLM for analysis using claude
+    # Ask LLM for analysis using the agentic-first leaderboard.
 
-    # Prepare leaderboard data (only eligible experiments) — uses the union
-    # so the LLM sees prior-run tops alongside current session.
-    eligible = [h for h in union_history if _is_eligible(h)]
-    sorted_by_tp = sorted(eligible, key=lambda h: h.peak_throughput, reverse=True)[:5]
+    # Prepare leaderboard data — uses the union so the LLM sees prior-run
+    # tops alongside the current session.
+    eligible_agentic = [h for h in union_history if _is_agentic_eligible(h)]
+    eligible_throughput = [h for h in union_history if _is_eligible(h)]
+
+    # Primary: max viable agentic c DESC, then agentic_tpot ASC, then
+    # agentic_peak_throughput DESC.
+    sorted_by_agentic = sorted(
+        eligible_agentic,
+        key=lambda h: (
+            -h.agentic_max_viable_concurrency,
+            h.agentic_tpot_p95 or float("inf"),
+            -h.agentic_peak_throughput,
+        ),
+    )[:5]
+
     sorted_by_lat = sorted(
-        eligible,
+        eligible_throughput,
         key=lambda h: h.low_concurrency_ttft_p95,
     )[:5]
+
+    # Balanced: agentic concurrency wins UNDER a TTFT-threshold gate.
     balanced_candidates = [
-        h for h in eligible
-        if h.low_concurrency_ttft_p95 < latency_threshold
+        h for h in eligible_agentic
+        if 0 < h.low_concurrency_ttft_p95 < latency_threshold
     ]
-    sorted_balanced = sorted(balanced_candidates, key=lambda h: h.peak_throughput, reverse=True)[:5]
+    sorted_balanced = sorted(
+        balanced_candidates,
+        key=lambda h: h.agentic_max_viable_concurrency,
+        reverse=True,
+    )[:5]
+
+    def _format_agentic_leaderboard(items: list[ExperimentSummary]) -> str:
+        if not items:
+            return "None yet"
+        lines = []
+        for h in items:
+            lines.append(
+                f"  {h.experiment_id} ({h.engine.value}): "
+                f"max_viable_agents={h.agentic_max_viable_concurrency}, "
+                f"agentic_tpot_p95={h.agentic_tpot_p95:.1f}ms, "
+                f"agentic_ttft_p95={h.agentic_ttft_p95:.0f}ms, "
+                f"agentic_throughput={h.agentic_peak_throughput:.1f} tok/s, "
+                f"config={json.dumps(h.config_digest)}"
+            )
+        return "\n".join(lines)
 
     def _format_leaderboard(items: list[ExperimentSummary]) -> str:
         if not items:
@@ -456,10 +606,13 @@ async def analyzer_node(state: AgentState) -> dict:
 
     prompt = ANALYZER_SYSTEM_PROMPT.format(
         latest_json=json.dumps(latest_payload, indent=2, default=str),
-        top_throughput=_format_leaderboard(sorted_by_tp),
+        top_agentic=_format_agentic_leaderboard(sorted_by_agentic),
         top_latency=_format_leaderboard(sorted_by_lat),
-        top_balanced=_format_leaderboard(sorted_balanced),
+        top_balanced=_format_agentic_leaderboard(sorted_balanced),
         latency_threshold=latency_threshold,
+        agentic_pareto_front=json.dumps(
+            [p.model_dump() for p in agentic_pareto], indent=2, default=str,
+        ),
         pareto_front=json.dumps([p.model_dump() for p in pareto], indent=2, default=str),
         exp_count=exp_count,
         max_experiments=config.experiments.max_experiments,
@@ -549,6 +702,10 @@ async def analyzer_node(state: AgentState) -> dict:
     return {
         "experiment_history": [summary],
         "experiments_count": exp_count,
+        "best_agentic_max_viable_c": best_agentic_c,
+        "best_agentic_config_id": best_agentic_id,
+        "best_agentic_tpot_p95": best_agentic_tpot,
+        "best_agentic_throughput": best_agentic_tp,
         "best_throughput": best_throughput,
         "best_throughput_config_id": best_throughput_id,
         "best_latency_ttft_p95": best_latency,
@@ -557,6 +714,7 @@ async def analyzer_node(state: AgentState) -> dict:
         "best_balanced_throughput": best_balanced_tp,
         "best_balanced_latency": best_balanced_lat,
         "pareto_front": pareto,
+        "agentic_pareto_front": agentic_pareto,
         "next_optimization_goal": next_goal,
         "status": status,
         "stop_reason": stop_reason,

@@ -143,27 +143,48 @@ class BenchmarkConfig(BaseModel):
     phase_error_rate_threshold: float = 0.1  # phases with error_rate above this are invalid
     seed: int | None = None  # seed for reproducible prompt generation
 
-    # ── Agentic long-context workload ──────────────────────────────────────
-    # Имитация code-агента: фиксированный префикс + многоходовая беседа, где
-    # после каждого ответа модели в историю докидывается синтетический
-    # tool-result. Контекст растёт от хода к ходу. Главная производная
-    # метрика — max_viable_agentic_concurrency (см. BenchmarkResult).
+    # ── Agentic long-context workload — primary optimization target ────────
+    # Real code-agent traffic shape: a shared system+tools prefix (REUSED
+    # across all parallel sessions via prefix caching) + a small unique user
+    # block per session + N multi-turn rounds where each turn appends a
+    # synthetic tool_result. Context grows per turn but the bulk of the
+    # prompt KV is shared, so the engine can pack many sessions in parallel.
+    #
+    # The derived headline metric — max_viable_agentic_concurrency — is the
+    # largest concurrency at which a phase met ALL of the SLOs below.
     enable_agentic_long_context: bool = False
-    agentic_prefix_tokens: int = 64_000
-    agentic_max_output_tokens: int = 16_384  # потолок per turn (модель может сгенерить меньше)
-    agentic_tool_result_min_tokens: int = 1024
-    agentic_tool_result_max_tokens: int = 5120
-    agentic_turns_per_session: int = 4
-    agentic_concurrency_levels: list[int] = Field(
-        default_factory=lambda: [4, 8, 16]
-    )
-    agentic_session_timeout_sec: int = 1800   # 30 min per session
-    agentic_per_turn_timeout_sec: int = 600   # один HTTP request максимум 10 мин
 
-    # SLO для производной метрики "max viable parallel agents"
-    agentic_ttft_p95_slo_ms: float = 10_000.0  # turn-level (turn-1 prefill 64k объективно медленный)
-    agentic_e2e_p95_slo_ms: float = 0.0        # 0 → авто = 0.8 * session_timeout * 1000
-    agentic_concurrency_ceiling_search: bool = False  # если все уровни прошли — добавить 2x фазу
+    # Prompt split — shared prefix is built ONCE per phase with deterministic
+    # seed so every session sees the SAME tokens (→ prefix-cache reuse).
+    # Unique part is per-session.
+    agentic_shared_prefix_tokens: int = 16_000
+    agentic_unique_prompt_tokens: int = 8_000
+
+    agentic_max_output_tokens: int = 2_400    # cap per turn; engine usually returns less
+    agentic_tool_result_min_tokens: int = 1024
+    agentic_tool_result_max_tokens: int = 1536
+    agentic_turns_per_session: int = 4
+
+    # Full sweep, no ceiling shortcut: executor walks these in order and stops
+    # after two consecutive non-viable phases. Tight grid around H100×8/122B
+    # FP8 expectations; bump on bigger hardware.
+    agentic_concurrency_levels: list[int] = Field(
+        default_factory=lambda: [8, 12, 16, 20, 24, 32, 48]
+    )
+    agentic_session_timeout_sec: int = 600   # 10 min per session ceiling
+    agentic_per_turn_timeout_sec: int = 90   # one HTTP turn budget (was 60s — too tight under prefill burst)
+
+    # SLO gate — phase is `viable` iff ALL of these hold. Tight defaults that
+    # match production agent UX: ~3s before first token, ~16 tok/s sustained,
+    # <5% session failures. Override per-config when the product SLO differs.
+    agentic_ttft_p95_slo_ms: float = 3_000.0
+    agentic_tpot_p95_slo_ms: float = 60.0
+    agentic_session_error_rate_slo: float = 0.05
+    agentic_e2e_p95_slo_ms: float = 0.0       # 0 → auto = 0.8 * session_timeout * 1000
+
+    # Legacy ceiling-search escape hatch — kept for parity, no-op in the new
+    # sweep logic (executor walks the configured levels and stops on SLO).
+    agentic_concurrency_ceiling_search: bool = False
 
 
 class ExperimentsConfig(BaseModel):

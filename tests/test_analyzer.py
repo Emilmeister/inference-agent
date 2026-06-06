@@ -31,6 +31,8 @@ def _make_summary(
     exp_id: str,
     throughput: float = 100.0,
     ttft_p95: float = 50.0,
+    agentic_c: int = 0,
+    agentic_tpot: float = 0.0,
     status: ExperimentStatus = ExperimentStatus.SUCCESS,
     engine: EngineType = EngineType.VLLM,
     correctness_gate_passed: bool = True,
@@ -42,6 +44,8 @@ def _make_summary(
         peak_throughput=throughput,
         low_concurrency_ttft_p95=ttft_p95,
         correctness_gate_passed=correctness_gate_passed,
+        agentic_max_viable_concurrency=agentic_c,
+        agentic_tpot_p95=agentic_tpot,
     )
 
 
@@ -103,59 +107,51 @@ class TestComputeParetoFront:
 
 
 class TestCheckPlateau:
+    """Plateau detection now keys on max_viable_agentic_c (primary axis) and
+    cold-start latency. Synthetic peak_throughput no longer drives the
+    decision."""
+
     def test_not_enough_history(self):
-        history = [_make_summary("a"), _make_summary("b")]
-        assert _check_plateau(history, 100, 50, window=5, threshold=0.02) is False
+        history = [_make_summary("a", agentic_c=8), _make_summary("b", agentic_c=8)]
+        assert _check_plateau(history, 8, 50, window=5, threshold=0.02) is False
 
     def test_no_plateau_with_improvement(self):
-        # The plateau check compares recent experiments against the *best* values.
-        # For this test: best_throughput=140, and exp_4 has throughput=140 which
-        # matches best but doesn't EXCEED it, so no throughput improvement.
-        # We need an experiment that actually beats the best.
         history = [
-            _make_summary(f"exp_{i}", throughput=100 + i * 10) for i in range(5)
+            _make_summary(f"exp_{i}", agentic_c=8 + i) for i in range(5)
         ]
-        # Set best_throughput to 130, so exp_4 (140) is an improvement
-        assert _check_plateau(history, 130, 50, window=5, threshold=0.02) is False
+        # Pre-update best is 11; exp_4 has agentic_c=12 — strict improvement.
+        assert _check_plateau(history, 11, 50, window=5, threshold=0.02) is False
 
     def test_plateau_detected(self):
-        # All experiments have same throughput and latency — no improvement
-        history = [_make_summary(f"exp_{i}", throughput=100, ttft_p95=50) for i in range(5)]
-        assert _check_plateau(history, 200, 30, window=5, threshold=0.02) is True
+        # All experiments have same agentic_c and latency — no improvement.
+        history = [_make_summary(f"exp_{i}", agentic_c=8, ttft_p95=50) for i in range(5)]
+        assert _check_plateau(history, 16, 30, window=5, threshold=0.02) is True
 
     def test_latency_improvement_breaks_plateau(self):
-        history = [_make_summary(f"exp_{i}", throughput=100, ttft_p95=50) for i in range(4)]
+        history = [_make_summary(f"exp_{i}", agentic_c=8, ttft_p95=50) for i in range(4)]
         # Last experiment has better latency than current best
-        history.append(_make_summary("exp_4", throughput=100, ttft_p95=25))
-        # best_latency=30, and exp_4 has 25 < 30 — improvement
-        assert _check_plateau(history, 200, 30, window=5, threshold=0.02) is False
+        history.append(_make_summary("exp_4", agentic_c=8, ttft_p95=25))
+        assert _check_plateau(history, 16, 30, window=5, threshold=0.02) is False
 
     def test_record_breaking_run_does_not_trip_plateau(self):
-        """Regression: caller must pass *prior* best so the new record can beat it.
-
-        This locks down the bug where a record-breaking experiment trips plateau
-        because best_* was already updated to its own value before the check.
-        """
+        """Caller must pass *prior* best so the new record can beat it."""
         history = [
-            _make_summary(f"exp_{i}", throughput=100, ttft_p95=50) for i in range(4)
+            _make_summary(f"exp_{i}", agentic_c=8, ttft_p95=50) for i in range(4)
         ]
         # Big jump on the last entry — clearly an improvement.
-        history.append(_make_summary("exp_4", throughput=800, ttft_p95=25))
-        # Pre-update best is 100 / 50 (the prior plateau). 800 trivially beats 100.
-        assert _check_plateau(history, 100, 50, window=5, threshold=0.02) is False
-        # But if the caller passed POST-update best (800/25), the new record can
-        # never beat itself, and plateau falsely triggers — that's the buggy
-        # call site we're guarding against.
-        assert _check_plateau(history, 800, 25, window=5, threshold=0.02) is True
+        history.append(_make_summary("exp_4", agentic_c=64, ttft_p95=25))
+        assert _check_plateau(history, 8, 50, window=5, threshold=0.02) is False
+        # POST-update best (64/25) — the record can't beat itself and
+        # plateau falsely fires. The bug we're guarding against.
+        assert _check_plateau(history, 64, 25, window=5, threshold=0.02) is True
 
     def test_threshold_requires_meaningful_improvement(self):
-        """Variant 2: threshold actually gates 'improvement' (was previously dead)."""
-        history = [_make_summary(f"exp_{i}", throughput=100, ttft_p95=50) for i in range(4)]
-        # 1% improvement on a 2% threshold should NOT count as improvement.
-        history.append(_make_summary("exp_4", throughput=101, ttft_p95=49.5))
+        history = [_make_summary(f"exp_{i}", agentic_c=100, ttft_p95=50) for i in range(4)]
+        # +1 over 100 with threshold 2% → required > 102, so 101 doesn't pass.
+        history.append(_make_summary("exp_4", agentic_c=101, ttft_p95=49.5))
         assert _check_plateau(history, 100, 50, window=5, threshold=0.02) is True
-        # 5% improvement clears the 2% bar.
-        history[-1] = _make_summary("exp_4", throughput=105, ttft_p95=47.5)
+        # 5% bump clears the bar.
+        history[-1] = _make_summary("exp_4", agentic_c=105, ttft_p95=47.5)
         assert _check_plateau(history, 100, 50, window=5, threshold=0.02) is False
 
 
@@ -166,6 +162,7 @@ class TestComputeScores:
         ttft_p95: float,
         peak_cv: float = 0.0,
         ttft_cv: float = 0.0,
+        agentic_c: int = 0,
     ):
         from unittest.mock import MagicMock
 
@@ -175,58 +172,83 @@ class TestComputeScores:
         result.benchmark.low_concurrency_ttft_p95_ms = ttft_p95
         result.benchmark.peak_throughput_e2e_cv = peak_cv
         result.benchmark.low_concurrency_ttft_cv = ttft_cv
+        result.benchmark.max_viable_agentic_concurrency = agentic_c
         return result
+
+    def _call(self, result, *, best_throughput=200, best_latency=50,
+              best_agentic_c=0, pareto=None, agentic_pareto=None):
+        return _compute_scores(
+            result,
+            best_agentic_c=best_agentic_c,
+            best_throughput=best_throughput,
+            best_latency=best_latency,
+            pareto=pareto or [],
+            agentic_pareto=agentic_pareto or [],
+        )
 
     def test_basic_scores(self):
         result = self._mock_result(throughput=150.0, ttft_p95=40.0)
-        scores = _compute_scores(result, best_throughput=200, best_latency=50, pareto=[])
+        scores = self._call(result, best_throughput=200, best_latency=50)
         assert scores.throughput_score == 0.75  # 150/200, no derate (cv=0)
         # latency_score = best_latency / lat = 50/40 = 1.25, capped at 1.0
         assert scores.latency_score == 1.0
         assert scores.is_pareto_optimal is False
+        assert scores.agentic_score == 0.0  # no agentic_c on this result
+
+    def test_agentic_score_normalized_against_best(self):
+        result = self._mock_result(throughput=0.0, ttft_p95=0.0, agentic_c=8)
+        scores = self._call(result, best_agentic_c=16)
+        # 8 / 16 = 0.5
+        assert scores.agentic_score == pytest.approx(0.5)
 
     def test_pareto_optimal_flag(self):
         result = self._mock_result(throughput=100.0, ttft_p95=50.0)
         pareto = [ParetoPoint(config_id="test", engine=EngineType.VLLM, throughput=100, ttft_p95=50)]
-        scores = _compute_scores(result, best_throughput=100, best_latency=50, pareto=pareto)
+        scores = self._call(result, best_throughput=100, best_latency=50, pareto=pareto)
         assert scores.is_pareto_optimal is True
+
+    def test_agentic_pareto_flag(self):
+        result = self._mock_result(throughput=0.0, ttft_p95=0.0, agentic_c=16)
+        agentic_pareto = [ParetoPoint(
+            config_id="test", engine=EngineType.VLLM,
+            agentic_max_viable_c=16, agentic_tpot_p95=30.0,
+        )]
+        scores = self._call(result, agentic_pareto=agentic_pareto)
+        assert scores.is_agentic_pareto_optimal is True
 
     def test_zero_best_values(self):
         result = self._mock_result(throughput=0.0, ttft_p95=0.0)
-        scores = _compute_scores(result, best_throughput=0, best_latency=0, pareto=[])
+        scores = self._call(result, best_throughput=0, best_latency=0)
         assert scores.throughput_score == 0.0
         assert scores.latency_score == 0.0
+        assert scores.agentic_score == 0.0
 
     def test_high_cv_derates_throughput(self):
         # Same raw throughput, different cv → noisy config gets a lower score.
         clean = self._mock_result(throughput=150.0, ttft_p95=40.0, peak_cv=0.0)
         noisy = self._mock_result(throughput=150.0, ttft_p95=40.0, peak_cv=0.5)
-        clean_scores = _compute_scores(clean, best_throughput=200, best_latency=50, pareto=[])
-        noisy_scores = _compute_scores(noisy, best_throughput=200, best_latency=50, pareto=[])
-        # Derate factor: 1 - 0.3 * 0.5 = 0.85
+        clean_scores = self._call(clean)
+        noisy_scores = self._call(noisy)
         assert clean_scores.throughput_score == pytest.approx(0.75)
         assert noisy_scores.throughput_score == pytest.approx(0.75 * 0.85)
         assert noisy_scores.throughput_score < clean_scores.throughput_score
 
     def test_cv_derate_is_capped(self):
-        # cv >= NOISE_CV_CAP (1.0) is treated as 1.0 — extreme dispersion
-        # never zeroes out the score, just maxes the derate.
         result = self._mock_result(throughput=200.0, ttft_p95=50.0, peak_cv=5.0)
-        scores = _compute_scores(result, best_throughput=200, best_latency=50, pareto=[])
+        scores = self._call(result)
         # 1 - 0.3 * 1.0 = 0.7 → throughput_score = 1.0 * 0.7 = 0.7
         assert scores.throughput_score == pytest.approx(0.7)
 
     def test_ttft_cv_derates_latency_score(self):
         result = self._mock_result(throughput=100.0, ttft_p95=50.0, ttft_cv=0.4)
-        scores = _compute_scores(result, best_throughput=100, best_latency=50, pareto=[])
+        scores = self._call(result, best_throughput=100, best_latency=50)
         # latency_score before derate = 50/50 = 1.0; derate = 1 - 0.3*0.4 = 0.88
         assert scores.latency_score == pytest.approx(0.88)
 
     def test_pareto_flag_not_affected_by_cv(self):
-        # Pareto front is the hard mathematical filter — derate must not flip it.
         result = self._mock_result(throughput=150.0, ttft_p95=40.0, peak_cv=0.9, ttft_cv=0.9)
         pareto = [ParetoPoint(config_id="test", engine=EngineType.VLLM, throughput=150, ttft_p95=40)]
-        scores = _compute_scores(result, best_throughput=200, best_latency=50, pareto=pareto)
+        scores = self._call(result, pareto=pareto)
         assert scores.is_pareto_optimal is True
 
 

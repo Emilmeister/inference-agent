@@ -115,6 +115,10 @@ class ExperimentSummaryRow(BaseModel):
     agentic_ceiling_hit: bool = False
     agentic_saturation_concurrency: int = 0
     agentic_peak_throughput: float = 0.0
+    agentic_tpot_p95: float = 0.0
+    agentic_ttft_p95: float = 0.0
+    agentic_score: float = 0.0
+    is_agentic_pareto: bool = False
 
 
 class ExperimentPhaseRow(BaseModel):

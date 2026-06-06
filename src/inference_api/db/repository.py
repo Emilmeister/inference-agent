@@ -107,7 +107,11 @@ SELECT
     COALESCE((data->'benchmark'->>'max_viable_agentic_concurrency')::int, 0) AS max_viable_agentic_concurrency,
     COALESCE((data->'benchmark'->>'agentic_concurrency_ceiling_hit')::bool, false) AS agentic_ceiling_hit,
     COALESCE((data->'benchmark'->>'agentic_saturation_concurrency')::int, 0) AS agentic_saturation_concurrency,
-    COALESCE((data->'benchmark'->>'agentic_peak_output_tokens_per_sec')::float, 0) AS agentic_peak_throughput
+    COALESCE((data->'benchmark'->>'agentic_peak_output_tokens_per_sec')::float, 0) AS agentic_peak_throughput,
+    COALESCE((data->'benchmark'->>'agentic_tpot_p95_ms')::float, 0) AS agentic_tpot_p95,
+    COALESCE((data->'benchmark'->>'agentic_ttft_p95_ms')::float, 0) AS agentic_ttft_p95,
+    COALESCE((data->'scores'->>'agentic_score')::float, 0) AS agentic_score,
+    COALESCE((data->'scores'->>'is_agentic_pareto_optimal')::bool, false) AS is_agentic_pareto
 FROM experiments
 """
 

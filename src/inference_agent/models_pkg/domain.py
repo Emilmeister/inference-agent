@@ -19,6 +19,10 @@ class EngineType(str, Enum):
 
 
 class OptimizationGoal(str, Enum):
+    # AGENTIC — primary goal: maximize parallel agents under SLO. Replaces
+    # THROUGHPUT in new leaderboards but THROUGHPUT stays in the enum so the
+    # API can still decode old DB records.
+    AGENTIC = "optimize_agentic"
     THROUGHPUT = "optimize_throughput"
     LATENCY = "optimize_latency"
     BALANCED = "optimize_balanced"
@@ -33,6 +37,9 @@ class ExperimentStatus(str, Enum):
 
 
 class OptimizationClassification(str, Enum):
+    # BEST_AGENTIC — primary classification for the agentic-first ranking.
+    # BEST_THROUGHPUT remains in the enum to deserialize historical DB rows.
+    BEST_AGENTIC = "best_agentic"
     BEST_THROUGHPUT = "best_throughput"
     BEST_LATENCY = "best_latency"
     BEST_BALANCED = "best_balanced"
@@ -193,6 +200,14 @@ class ConcurrencyResult(BaseModel):
     # Per-turn metrics — пустой для не-agentic фаз.
     agentic_turn_metrics: list[AgenticTurnMetric] = Field(default_factory=list)
 
+    # SLO gate (agentic-only; True by default so non-agentic phases never get
+    # filtered as "non-viable"). For agentic phases the runner sets viable
+    # based on AgenticSLO (TTFT p95, tpot p95, session error_rate, per-turn
+    # timeout). `slo_violations` carries human-readable reasons used by the
+    # executor to build a CeilingProbeInfo entry.
+    viable: bool = True
+    slo_violations: list[str] = Field(default_factory=list)
+
 
 class BenchmarkResult(BaseModel):
     # Aggregate timing (across all concurrency levels)
@@ -251,6 +266,13 @@ class BenchmarkResult(BaseModel):
     agentic_concurrency_ceiling_hit: bool = False
     agentic_saturation_concurrency: int = 0
     agentic_peak_output_tokens_per_sec: float = 0.0
+
+    # Latency at the max-viable-agentic-concurrency phase. Lets the analyzer
+    # tie-break between two configs with the same max_viable_c on user-facing
+    # responsiveness (tpot is the "smoothness" axis, ttft is the cold-start
+    # axis). Both default to 0 when no agentic phase passed SLO.
+    agentic_tpot_p95_ms: float = 0.0
+    agentic_ttft_p95_ms: float = 0.0
 
 
 # ── Smoke Tests ────────────────────────────────────────────────────────────
@@ -332,10 +354,20 @@ class CeilingProbeInfo(BaseModel):
 
 
 class ExperimentScores(BaseModel):
-    throughput_score: float = 0.0  # normalized 0-1
+    # Primary score for the agentic-first goal: how many parallel agents the
+    # config sustained under SLO, normalized against the best-known config.
+    agentic_score: float = 0.0
+    # Throughput score remains for backward compatibility with historical
+    # rows and the dashboard "raw throughput" view — it is NO LONGER used for
+    # leaderboards or Pareto front; the agentic_score is.
+    throughput_score: float = 0.0
     latency_score: float = 0.0
     balanced_score: float = 0.0
     is_pareto_optimal: bool = False
+    # Pareto optimality in the agentic axis: (max_viable_agentic_c ↑,
+    # agentic_tpot_p95 ↓). Independent of `is_pareto_optimal` so historical
+    # records keep working.
+    is_agentic_pareto_optimal: bool = False
 
 
 class ExperimentResult(BaseModel):
@@ -408,6 +440,9 @@ class ExperimentSummary(BaseModel):
     # meeting the agentic SLO. Surface separately so the planner doesn't
     # mistake them for engine-side problems.
     agentic_max_viable_concurrency: int = 0
+    agentic_peak_throughput: float = 0.0          # total output tok/s at peak agentic phase
+    agentic_tpot_p95: float = 0.0                  # tpot p95 ms at max-viable phase
+    agentic_ttft_p95: float = 0.0                  # ttft p95 ms at max-viable phase
     agentic_concurrencies_probed: list[int] = Field(default_factory=list)
     agentic_concurrencies_viable: list[int] = Field(default_factory=list)
     agentic_concurrencies_ceiling: list[int] = Field(default_factory=list)
@@ -520,6 +555,9 @@ class ExperimentSummary(BaseModel):
             rationale=result.config.rationale,
             failed_phases=failed_phases,
             agentic_max_viable_concurrency=result.benchmark.max_viable_agentic_concurrency,
+            agentic_peak_throughput=result.benchmark.agentic_peak_output_tokens_per_sec,
+            agentic_tpot_p95=result.benchmark.agentic_tpot_p95_ms,
+            agentic_ttft_p95=result.benchmark.agentic_ttft_p95_ms,
             agentic_concurrencies_probed=probed_agentic_c,
             agentic_concurrencies_viable=viable_agentic_c,
             agentic_concurrencies_ceiling=ceiling_agentic_c,
@@ -530,7 +568,19 @@ class ExperimentSummary(BaseModel):
 
 
 class ParetoPoint(BaseModel):
+    """One point on a 2D Pareto front.
+
+    Two fronts coexist in the analyzer:
+      - Throughput vs TTFT (`throughput`, `ttft_p95`) — historical/dashboard view.
+      - Agentic vs tpot   (`agentic_max_viable_c`, `agentic_tpot_p95`) — the
+        primary front for the agentic-first goal. Points on the agentic
+        front populate the latter pair; on the throughput front the former.
+    The other pair is left at 0 on each point so consumers can detect which
+    front the point belongs to without an extra discriminator.
+    """
     config_id: str
     engine: EngineType
-    throughput: float
-    ttft_p95: float
+    throughput: float = 0.0
+    ttft_p95: float = 0.0
+    agentic_max_viable_c: int = 0
+    agentic_tpot_p95: float = 0.0

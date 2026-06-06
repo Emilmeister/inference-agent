@@ -18,6 +18,85 @@ from inference_agent.models import (
     PercentileStats,
 )
 
+
+# ── Agentic SLO gate ──────────────────────────────────────────────────────
+
+
+class AgenticSLO:
+    """Per-phase SLO contract for agentic_long_context.
+
+    Plain immutable bundle the runner uses to decide if a finished phase is
+    "viable" — i.e. could serve real production agent traffic at this
+    concurrency. ALL gates must hold for the phase to be marked viable;
+    otherwise we record reasons in `slo_violations` so the executor can
+    route the phase to ceiling probes with a meaningful explanation.
+    """
+
+    __slots__ = (
+        "ttft_p95_ms", "tpot_p95_ms", "e2e_p95_ms", "session_error_rate",
+    )
+
+    def __init__(
+        self,
+        *,
+        ttft_p95_ms: float,
+        tpot_p95_ms: float,
+        e2e_p95_ms: float,
+        session_error_rate: float,
+    ):
+        self.ttft_p95_ms = ttft_p95_ms
+        self.tpot_p95_ms = tpot_p95_ms
+        self.e2e_p95_ms = e2e_p95_ms
+        self.session_error_rate = session_error_rate
+
+    @classmethod
+    def from_config(cls, cfg: BenchmarkConfig) -> "AgenticSLO":
+        e2e_ms = cfg.agentic_e2e_p95_slo_ms
+        if e2e_ms <= 0:
+            # Auto: 80% of session timeout — leaves headroom for tail.
+            e2e_ms = cfg.agentic_session_timeout_sec * 1000.0 * 0.8
+        return cls(
+            ttft_p95_ms=cfg.agentic_ttft_p95_slo_ms,
+            tpot_p95_ms=cfg.agentic_tpot_p95_slo_ms,
+            e2e_p95_ms=e2e_ms,
+            session_error_rate=cfg.agentic_session_error_rate_slo,
+        )
+
+
+def _evaluate_agentic_slo(
+    *,
+    ttft_p95: float,
+    tpot_p95: float,
+    e2e_p95: float,
+    error_rate: float,
+    slo: AgenticSLO,
+) -> list[str]:
+    """Return the list of SLO violations (empty list = viable).
+
+    Each violation is a short string suitable for surfacing in
+    CeilingProbeInfo.reason or analyzer logs. Zero/missing percentile values
+    don't trip the gate (a phase with no successful samples gets caught by
+    the error_rate gate instead).
+    """
+    violations: list[str] = []
+    if error_rate > slo.session_error_rate:
+        violations.append(
+            f"error_rate={error_rate:.1%} > slo={slo.session_error_rate:.0%}"
+        )
+    if ttft_p95 > 0 and ttft_p95 > slo.ttft_p95_ms:
+        violations.append(
+            f"ttft_p95={ttft_p95:.0f}ms > slo={slo.ttft_p95_ms:.0f}ms"
+        )
+    if tpot_p95 > 0 and tpot_p95 > slo.tpot_p95_ms:
+        violations.append(
+            f"tpot_p95={tpot_p95:.1f}ms > slo={slo.tpot_p95_ms:.1f}ms"
+        )
+    if e2e_p95 > 0 and e2e_p95 > slo.e2e_p95_ms:
+        violations.append(
+            f"e2e_p95={e2e_p95 / 1000:.0f}s > slo={slo.e2e_p95_ms / 1000:.0f}s"
+        )
+    return violations
+
 logger = logging.getLogger(__name__)
 
 
@@ -481,7 +560,8 @@ async def _run_agent_session(
     http_session: aiohttp.ClientSession,
     url: str,
     model: str,
-    prefix_tokens: int,
+    shared_prefix: str,
+    unique_prompt_tokens: int,
     turns: int,
     max_output_tokens: int,
     tool_result_min: int,
@@ -491,22 +571,25 @@ async def _run_agent_session(
 ) -> list[dict]:
     """Run one full agentic session of N turns, return per-turn metric dicts.
 
-    Сессия:
-      1. Префикс ~prefix_tokens (как в обычном _generate_prompt).
-      2. На каждом ходе:
-         - Отправляем messages → получаем assistant content + метрики
-         - Дописываем assistant message в history
-         - Дописываем synthetic tool-result (rng.randint(min,max) токенов) как user
-      3. Если ход вернул error — break (нет смысла продолжать сломанную сессию).
+    The first user message is `shared_prefix + unique_tail`. The shared
+    prefix is the SAME string for every session in the phase (built once by
+    the caller from a deterministic seed) so the engine's prefix cache can
+    reuse the KV — that is the whole point of agentic-first sizing.
 
-    Returns list[dict] per turn:
-      session_idx, turn_idx, ttft_ms, tpot_ms, e2e_latency_ms, output_tokens,
-      input_tokens, error.
-    `input_tokens` берём из usage.prompt_tokens; если нет — оцениваем как
-    len(joined messages) // 4 (та же rough формула что и в _send_request).
+    Sequence:
+      1. messages[0] = shared_prefix + unique_tail (unique per session).
+      2. For each turn:
+         - Send messages, capture assistant content + metrics.
+         - Append assistant message + synthetic tool_result user-turn.
+      3. Stop the session on the first error turn (no point pumping more
+         turns into a broken conversation).
+
+    Returns one dict per turn: session_idx, turn_idx, ttft_ms, tpot_ms,
+    e2e_latency_ms, output_tokens, input_tokens, error.
     """
-    prefix = _generate_prompt(prefix_tokens, rng)
-    messages: list[dict] = [{"role": "user", "content": prefix}]
+    unique_tail = _generate_prompt(unique_prompt_tokens, rng)
+    first_user = f"{shared_prefix}\n\n{unique_tail}" if shared_prefix else unique_tail
+    messages: list[dict] = [{"role": "user", "content": first_user}]
     per_turn: list[dict] = []
 
     for turn_idx in range(turns):
@@ -553,11 +636,26 @@ async def _run_agent_session(
     return per_turn
 
 
+def build_shared_prefix(shared_prefix_tokens: int, seed: int | None) -> str:
+    """Build the shared per-phase agentic prefix (deterministic from seed).
+
+    Used by `run_agentic_long_context_phase` and exposed for tests so they
+    can verify all sessions in a phase see literally the same tokens (→ KV
+    cache reuse). With seed=None the prefix is random per phase but still
+    shared within the phase.
+    """
+    if shared_prefix_tokens <= 0:
+        return ""
+    rng = random.Random(seed if seed is not None else 0)
+    return _generate_prompt(shared_prefix_tokens, rng)
+
+
 async def run_agentic_long_context_phase(
     api_base_url: str,
     model_name: str,
     concurrency: int,
-    prefix_tokens: int,
+    shared_prefix_tokens: int,
+    unique_prompt_tokens: int,
     max_output_tokens: int,
     turns: int,
     tool_result_min: int,
@@ -567,16 +665,30 @@ async def run_agentic_long_context_phase(
     seed: int | None = None,
     workload_id: str = "agentic_long_context",
     phase_id: str = "",
+    slo: AgenticSLO | None = None,
 ) -> ConcurrencyResult:
-    """Run one agentic long-context phase: N parallel sessions × `turns` turns each.
+    """Run one agentic long-context phase: N parallel sessions × `turns` turns.
 
-    Sample size = concurrency × turns (e.g. 16 × 4 = 64 turn-requests).
-    Phase ends когда все сессии завершились или истёк session_timeout_sec
-    per worker. Per-turn metrics складываются в `agentic_turn_metrics` поле
-    результата — это ключевой данные для дашборд-аналитики (TTFT vs turn_idx).
+    Workload shape per session:
+      messages[0].content = <shared_prefix> + <unique_tail>     # first user turn
+      Then `turns - 1` additional rounds where the assistant replies and a
+      synthetic tool_result user message is appended.
+
+    `shared_prefix` is built ONCE per phase (`build_shared_prefix`) so every
+    parallel session sees the same tokens — engines with prefix caching
+    reuse the KV across sessions instead of paying the prefill cost per
+    session. This is the single biggest lever for agentic concurrency.
+
+    If `slo` is provided, the result is marked `viable=False` and
+    `slo_violations` is populated when any SLO is missed. Non-agentic
+    callers leave `slo=None` and the phase is always viable.
     """
     url = f"{api_base_url}/chat/completions"
     master_rng = random.Random(seed)
+
+    # Build shared prefix once, deterministic from seed — every session in
+    # this phase sees these exact tokens.
+    shared_prefix = build_shared_prefix(shared_prefix_tokens, seed)
 
     connector = aiohttp.TCPConnector(limit=concurrency + 10)
     start_time = time.perf_counter()
@@ -590,7 +702,8 @@ async def run_agentic_long_context_phase(
                 return await asyncio.wait_for(
                     _run_agent_session(
                         idx, http_session, url, model_name,
-                        prefix_tokens, turns, max_output_tokens,
+                        shared_prefix, unique_prompt_tokens,
+                        turns, max_output_tokens,
                         tool_result_min, tool_result_max,
                         session_rng, per_turn_timeout_sec,
                     ),
@@ -658,17 +771,36 @@ async def run_agentic_long_context_phase(
     total_requests = len(flat)
     successful = total_requests - errors
 
+    ttft_stats = _compute_percentiles(ttft_list)
+    tpot_stats = _compute_percentiles(tpot_list)
+    itl_stats = _compute_percentiles(itl_list)
+    e2e_stats = _compute_percentiles(e2e_list)
+    error_rate = errors / total_requests if total_requests > 0 else 0.0
+
+    # SLO gate. None = no SLO requested (legacy callers); otherwise we mark
+    # the phase non-viable on the first failed condition. Viable phases
+    # become the basis for max_viable_agentic_concurrency.
+    slo_violations: list[str] = []
+    if slo is not None:
+        slo_violations = _evaluate_agentic_slo(
+            ttft_p95=ttft_stats.p95,
+            tpot_p95=tpot_stats.p95,
+            e2e_p95=e2e_stats.p95,
+            error_rate=error_rate,
+            slo=slo,
+        )
+
     result = ConcurrencyResult(
         concurrency=concurrency,
-        prompt_length=prefix_tokens,
+        prompt_length=shared_prefix_tokens + unique_prompt_tokens,
         max_output_tokens=max_output_tokens,
         num_requests=total_requests,
         workload_id=workload_id,
         phase_id=phase_id,
-        ttft_ms=_compute_percentiles(ttft_list),
-        tpot_ms=_compute_percentiles(tpot_list),
-        itl_ms=_compute_percentiles(itl_list),
-        e2e_latency_ms=_compute_percentiles(e2e_list),
+        ttft_ms=ttft_stats,
+        tpot_ms=tpot_stats,
+        itl_ms=itl_stats,
+        e2e_latency_ms=e2e_stats,
         requests_per_sec=successful / wall_time if wall_time > 0 else 0,
         input_tokens_per_sec=total_input_tokens / wall_time if wall_time > 0 else 0,
         output_tokens_per_sec=total_output_tokens / wall_time if wall_time > 0 else 0,
@@ -676,16 +808,21 @@ async def run_agentic_long_context_phase(
         if wall_time > 0
         else 0,
         errors=errors,
-        error_rate=errors / total_requests if total_requests > 0 else 0.0,
+        error_rate=error_rate,
         error_details=error_details[:10],
         agentic_turn_metrics=turn_metrics,
+        viable=(slo is None) or (not slo_violations),
+        slo_violations=slo_violations,
     )
 
+    viable_tag = "VIABLE" if result.viable else f"NOT-VIABLE({','.join(slo_violations)})"
     logger.info(
         "Agentic phase complete: c=%d, sessions=%d, turns/session=%d, "
-        "total_turns=%d, throughput=%.1f tok/s, ttft_p95=%.1f ms, errors=%d",
+        "total_turns=%d, throughput=%.1f tok/s, ttft_p95=%.0f ms, "
+        "tpot_p95=%.1f ms, errors=%d → %s",
         concurrency, concurrency, turns, total_requests,
-        result.output_tokens_per_sec, result.ttft_ms.p95, errors,
+        result.output_tokens_per_sec, result.ttft_ms.p95, result.tpot_ms.p95,
+        errors, viable_tag,
     )
 
     return result
@@ -763,20 +900,21 @@ def get_benchmark_phases(
             phases.append((f"c{conc}_p{plen}", "long_context", conc, plen, max_out))
 
     # Agentic long-context phases — multi-turn code-agent simulation. Контекст
-    # растёт от хода к ходу, поэтому проверяем что max_model_len держит
-    # prefix + turns × (max_output + tool_result_max).
+    # растёт от хода к ходу: считаем shared + unique + turns × (output + tool).
     if cfg.enable_agentic_long_context:
+        total_prompt = cfg.agentic_shared_prefix_tokens + cfg.agentic_unique_prompt_tokens
         agentic_required = (
-            cfg.agentic_prefix_tokens
+            total_prompt
             + cfg.agentic_turns_per_session
             * (cfg.agentic_max_output_tokens + cfg.agentic_tool_result_max_tokens)
         )
         if agentic_required > effective_max:
             logger.info(
-                "Skipping agentic_long_context: required %d (prefix %d + %d turns × "
-                "(out %d + tool %d)) exceeds effective context %d",
+                "Skipping agentic_long_context: required %d (shared %d + unique %d "
+                "+ %d turns × (out %d + tool %d)) exceeds effective context %d",
                 agentic_required,
-                cfg.agentic_prefix_tokens,
+                cfg.agentic_shared_prefix_tokens,
+                cfg.agentic_unique_prompt_tokens,
                 cfg.agentic_turns_per_session,
                 cfg.agentic_max_output_tokens,
                 cfg.agentic_tool_result_max_tokens,
@@ -785,10 +923,10 @@ def get_benchmark_phases(
         else:
             for conc in cfg.agentic_concurrency_levels:
                 phases.append((
-                    f"agentic_c{conc}_p{cfg.agentic_prefix_tokens}",
+                    f"agentic_c{conc}_p{total_prompt}",
                     "agentic_long_context",
                     conc,
-                    cfg.agentic_prefix_tokens,
+                    total_prompt,
                     cfg.agentic_max_output_tokens,
                 ))
 

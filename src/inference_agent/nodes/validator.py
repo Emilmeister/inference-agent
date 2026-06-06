@@ -5,12 +5,14 @@ from __future__ import annotations
 import logging
 
 from inference_agent.models import (
+    AgentConfig,
     EngineType,
     ExperimentConfig,
     ExperimentError,
     ExperimentResult,
     ExperimentStatus,
     HardwareProfile,
+    OptimizationGoal,
 )
 from inference_agent.state import AgentState
 
@@ -20,8 +22,15 @@ logger = logging.getLogger(__name__)
 def validate_experiment(
     experiment: ExperimentConfig,
     hardware: HardwareProfile,
+    agent_config: AgentConfig | None = None,
+    goal: OptimizationGoal | None = None,
 ) -> list[str]:
     """Validate experiment config against hardware and engine capabilities.
+
+    When `goal` is OptimizationGoal.AGENTIC, additional gates fire:
+      - prefix_caching MUST be enabled (shared-prefix workload reuses KV)
+      - oversized max_model_len is rejected when it dwarfs the agentic
+        workload budget — agent reserved VRAM that could host more agents.
 
     Returns a list of error messages. Empty list means valid.
     """
@@ -158,6 +167,49 @@ def validate_experiment(
             f"{[e.value for e in hardware.available_engines]}"
         )
 
+    # ── Agentic-goal gates ────────────────────────────────────────────
+    # These fire only when the planner is optimizing for max parallel
+    # agents. Other goals get the synthetic-throughput knobs back.
+    if goal == OptimizationGoal.AGENTIC and agent_config is not None:
+        if not experiment.enable_prefix_caching:
+            errors.append(
+                "enable_prefix_caching must be true under optimize_agentic: "
+                "the benchmark shares a prefix across all sessions; without "
+                "prefix caching each session pays its own ~16K-token prefill "
+                "and concurrency collapses. Set enable_prefix_caching=true."
+            )
+
+        # Oversized max_model_len under the agentic goal wastes KV budget on
+        # context windows the workload never uses. We reject when the
+        # requested ctx is > 2× the realistic agentic budget AND there is a
+        # smaller power-of-2 bucket that still fits — the planner can pick a
+        # tighter value next round.
+        bench = agent_config.benchmark
+        if (
+            bench.enable_agentic_long_context
+            and experiment.max_model_len is not None
+        ):
+            agentic_budget = (
+                bench.agentic_shared_prefix_tokens
+                + bench.agentic_unique_prompt_tokens
+                + bench.agentic_turns_per_session
+                * (
+                    bench.agentic_max_output_tokens
+                    + bench.agentic_tool_result_max_tokens
+                )
+            )
+            # Headroom: 1.5× the live budget so the engine isn't packed at the
+            # limit; anything above 2× is the LLM picking a 131K context when
+            # the workload needs ~40K.
+            if experiment.max_model_len > 2 * agentic_budget:
+                errors.append(
+                    f"max_model_len={experiment.max_model_len} is "
+                    f">2× the agentic workload budget ({agentic_budget}); "
+                    f"under optimize_agentic this wastes KV that could host "
+                    f"more parallel sessions. Pick the smallest power-of-2 "
+                    f"≥ {agentic_budget} (typically 32768 or 65536)."
+                )
+
     return errors
 
 
@@ -166,8 +218,9 @@ async def validator_node(state: AgentState) -> dict:
     experiment = state["current_config"]
     hardware = state["hardware"]
     config = state["config"]
+    goal = state.get("next_optimization_goal")
 
-    errors = validate_experiment(experiment, hardware)
+    errors = validate_experiment(experiment, hardware, config, goal)
 
     if errors:
         error_msg = "Validation failed: " + "; ".join(errors)

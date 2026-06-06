@@ -67,6 +67,32 @@ def _pareto_ids(frame: pd.DataFrame) -> list[str]:
     return ids
 
 
+def _agentic_pareto_ids(frame: pd.DataFrame) -> list[str]:
+    """Return non-dominated ids in (max_viable_agentic_c ↑, agentic_tpot_p95 ↓).
+
+    The primary front under the agentic-first goal — a point stays on the
+    front iff no other point has both more parallel agents AND lower per-
+    token latency at the max-viable phase.
+    """
+    if "max_viable_agentic_concurrency" not in frame.columns:
+        return []
+    valid = frame[
+        (frame["max_viable_agentic_concurrency"] > 0)
+        & (frame.get("agentic_tpot_p95", pd.Series(dtype=float)) > 0)
+    ]
+    if valid.empty:
+        return []
+    ids: list[str] = []
+    best_tpot = float("inf")
+    for _, row in valid.sort_values(
+        "max_viable_agentic_concurrency", ascending=False,
+    ).iterrows():
+        if row["agentic_tpot_p95"] < best_tpot:
+            ids.append(str(row["experiment_id"]))
+            best_tpot = row["agentic_tpot_p95"]
+    return ids
+
+
 def _summary_label(row: pd.Series) -> str:
     return (
         f"{row['experiment_id']} ({row['engine']} "
@@ -209,101 +235,173 @@ tabs = st.tabs([
 
 with tabs[0]:
     st.header("Executive Overview")
+    st.caption(
+        "**Primary goal: maximize parallel agents under SLO.** Raw-throughput "
+        "panels below are informational only — the agent does NOT optimize for "
+        "peak_throughput@c=256, p=512 anymore."
+    )
 
-    best_tp = eligible.nlargest(1, "peak_throughput")
-    best_lat = eligible.nsmallest(1, "ttft_p95")
-    best_bal = eligible.nlargest(1, "balanced_score")
-    pareto_count = len(_pareto_ids(eligible))
+    # Agentic eligibility: success + correctness + non-zero max_viable_c.
+    agentic_eligible = (
+        eligible[eligible.get("max_viable_agentic_concurrency", 0) > 0].copy()
+        if "max_viable_agentic_concurrency" in eligible.columns
+        else pd.DataFrame()
+    )
 
+    best_agentic_row = (
+        agentic_eligible.sort_values(
+            ["max_viable_agentic_concurrency", "agentic_tpot_p95"],
+            ascending=[False, True],
+        ).iloc[0]
+        if not agentic_eligible.empty
+        else None
+    )
+    best_lat_row = eligible.nsmallest(1, "ttft_p95")
+    best_tp_row = eligible.nlargest(1, "peak_throughput")
+    agentic_pareto_count = len(_agentic_pareto_ids(agentic_eligible))
+
+    # ── Primary KPI row: agentic-first ──────────────────────────────────
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        value = best_tp["peak_throughput"].iloc[0] if not best_tp.empty else 0
-        st.metric("Best throughput", _format_metric(value, " tok/s"))
+        value = int(best_agentic_row["max_viable_agentic_concurrency"]) if best_agentic_row is not None else 0
+        suffix = "+" if (best_agentic_row is not None and bool(best_agentic_row.get("agentic_ceiling_hit", False))) else ""
+        st.metric(
+            "Max parallel agents (primary)",
+            f"{value}{suffix}" if value > 0 else "n/a",
+            help=(
+                "Headline metric of the agentic-first goal: largest concurrency "
+                "where TTFT p95, tpot p95 AND session error_rate all meet SLO. "
+                "'+' means the sweep ceiling was hit; the true value may be "
+                "higher."
+            ),
+        )
     with col2:
-        value = best_lat["ttft_p95"].iloc[0] if not best_lat.empty else 0
-        st.metric("Best latency", _format_metric(value, " ms", precision=1))
+        value = _as_float(best_agentic_row["agentic_tpot_p95"]) if best_agentic_row is not None else 0
+        st.metric(
+            "Best agentic tpot p95",
+            _format_metric(value, " ms", precision=1),
+            help="Per-token latency at the max-viable concurrency phase.",
+        )
     with col3:
-        value = best_bal["balanced_score"].iloc[0] if not best_bal.empty else 0
-        st.metric("Best balanced score", f"{value:.3f}" if value > 0 else "n/a")
+        value = best_lat_row["ttft_p95"].iloc[0] if not best_lat_row.empty else 0
+        st.metric("Best cold-start latency", _format_metric(value, " ms", precision=1))
     with col4:
-        st.metric("Pareto points", str(pareto_count))
+        st.metric("Agentic Pareto points", str(agentic_pareto_count))
 
+    # ── Informational KPIs: throughput / counts ─────────────────────────
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Displayed experiments", str(len(filtered)))
+        value = best_tp_row["peak_throughput"].iloc[0] if not best_tp_row.empty else 0
+        st.metric(
+            "Raw throughput (info only)",
+            _format_metric(value, " tok/s"),
+            help=(
+                "Best peak_output_tokens_per_sec — typically a c=256/p=512 "
+                "synthetic phase. NOT a leadership signal in the agentic-first "
+                "regime."
+            ),
+        )
     with col2:
-        st.metric("Eligible experiments", str(len(eligible)))
+        st.metric("Displayed experiments", str(len(filtered)))
     with col3:
-        st.metric("Correctness gate pass", str(int(filtered["correctness_gate_passed"].sum())))
+        st.metric("Eligible experiments", str(len(eligible)))
     with col4:
         failed = int((filtered["status"] != "success").sum())
         st.metric("Non-success runs", str(failed))
 
-    st.subheader("Noise-Aware Leaderboards")
+    # ── Leaderboards: agentic, latency, balanced (in that order) ────────
+    st.subheader("Leaderboards")
     col1, col2, col3 = st.columns(3)
 
-    leaderboard_cols = [
-        "experiment_id",
-        "engine",
-        "quantization",
-        "tp",
-        "peak_throughput",
-        "ttft_p95",
-        "peak_throughput_e2e_cv",
-        "low_concurrency_ttft_cv",
-    ]
-
     with col1:
-        st.caption("Throughput objective")
-        st.dataframe(
-            eligible.nlargest(5, "peak_throughput")[leaderboard_cols],
-            use_container_width=True,
-            hide_index=True,
-        )
+        st.caption("Agentic objective — max parallel agents under SLO (primary)")
+        if not agentic_eligible.empty:
+            cols = [
+                "experiment_id",
+                "engine",
+                "quantization",
+                "tp",
+                "max_viable_agentic_concurrency",
+                "agentic_tpot_p95",
+                "agentic_ttft_p95",
+                "agentic_peak_throughput",
+                "is_agentic_pareto",
+            ]
+            present = [c for c in cols if c in agentic_eligible.columns]
+            top = (
+                agentic_eligible
+                .sort_values(
+                    ["max_viable_agentic_concurrency", "agentic_tpot_p95"],
+                    ascending=[False, True],
+                )
+                .head(5)[present]
+                .rename(columns={
+                    "max_viable_agentic_concurrency": "max_agents",
+                    "agentic_peak_throughput": "agentic_tok/s",
+                })
+            )
+            st.dataframe(top, use_container_width=True, hide_index=True)
+        else:
+            st.info("No experiments passed the agentic SLO yet.")
 
     with col2:
-        st.caption("Latency objective")
+        st.caption("Latency objective — lowest cold-start TTFT p95")
+        latency_cols = [
+            "experiment_id", "engine", "quantization", "tp",
+            "peak_throughput", "ttft_p95",
+            "peak_throughput_e2e_cv", "low_concurrency_ttft_cv",
+        ]
         st.dataframe(
-            eligible.nsmallest(5, "ttft_p95")[leaderboard_cols],
+            eligible.nsmallest(5, "ttft_p95")[latency_cols],
             use_container_width=True,
             hide_index=True,
         )
 
     with col3:
-        st.caption("Balanced objective")
-        st.dataframe(
-            eligible.nlargest(5, "balanced_score")[
-                [
-                    "experiment_id",
-                    "engine",
-                    "quantization",
-                    "tp",
-                    "balanced_score",
-                    "peak_throughput",
+        st.caption(f"Balanced — max agents with TTFT p95 < {latency_threshold_ms}ms")
+        if not agentic_eligible.empty:
+            bal_pool = agentic_eligible[
+                (agentic_eligible["ttft_p95"] > 0)
+                & (agentic_eligible["ttft_p95"] < latency_threshold_ms)
+            ]
+            if not bal_pool.empty:
+                bal_cols = [
+                    "experiment_id", "engine", "quantization", "tp",
+                    "max_viable_agentic_concurrency",
                     "ttft_p95",
+                    "agentic_tpot_p95",
                 ]
-            ],
-            use_container_width=True,
-            hide_index=True,
-        )
+                present = [c for c in bal_cols if c in bal_pool.columns]
+                st.dataframe(
+                    bal_pool.nlargest(5, "max_viable_agentic_concurrency")[present]
+                    .rename(columns={"max_viable_agentic_concurrency": "max_agents"}),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("No agentic-eligible config under the latency threshold yet.")
+        else:
+            st.info("No agentic-eligible runs yet.")
 
+    # ── Timeline: max agents over time (was throughput) ─────────────────
     st.subheader("Best-So-Far Timeline")
     timeline = filtered.dropna(subset=["timestamp"]).sort_values("timestamp").copy()
     timeline = timeline[
         (timeline["status"] == "success")
         & timeline["correctness_gate_passed"]
-        & (timeline["peak_throughput"] > 0)
-        & (timeline["ttft_p95"] > 0)
     ]
-    if not timeline.empty:
-        timeline["best_throughput_so_far"] = timeline["peak_throughput"].cummax()
-        timeline["best_latency_so_far"] = timeline["ttft_p95"].cummin()
+    if "max_viable_agentic_concurrency" in timeline.columns and not timeline.empty:
+        timeline["best_agents_so_far"] = (
+            timeline["max_viable_agentic_concurrency"].cummax()
+        )
+        ttft_valid = timeline["ttft_p95"].where(timeline["ttft_p95"] > 0)
+        timeline["best_latency_so_far"] = ttft_valid.cummin()
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=timeline["timestamp"],
-            y=timeline["best_throughput_so_far"],
+            y=timeline["best_agents_so_far"],
             mode="lines+markers",
-            name="Best throughput so far",
+            name="Best max-parallel agents so far (primary)",
             yaxis="y",
         ))
         fig.add_trace(go.Scatter(
@@ -315,7 +413,7 @@ with tabs[0]:
         ))
         fig.update_layout(
             height=420,
-            yaxis=dict(title="Output tok/s"),
+            yaxis=dict(title="Max parallel agents"),
             yaxis2=dict(title="TTFT p95 ms", overlaying="y", side="right"),
             legend=dict(orientation="h"),
         )
@@ -325,9 +423,90 @@ with tabs[0]:
 
 
 with tabs[1]:
-    st.header("Throughput vs Latency Pareto Explorer")
+    st.header("Pareto Explorer")
 
     pareto_source = eligible if eligible_only else filtered
+
+    # ── Agentic Pareto (primary) ────────────────────────────────────────
+    st.subheader("Agentic — max parallel agents vs tpot p95 (PRIMARY front)")
+    st.caption(
+        "Configurations on this front cannot be beaten on both axes "
+        "simultaneously — more parallel agents AND lower per-token latency. "
+        "Up-and-left is better."
+    )
+    agentic_valid = (
+        pareto_source[
+            (pareto_source.get("max_viable_agentic_concurrency", 0) > 0)
+            & (pareto_source.get("agentic_tpot_p95", 0) > 0)
+        ].copy()
+        if "max_viable_agentic_concurrency" in pareto_source.columns
+        else pd.DataFrame()
+    )
+    if not agentic_valid.empty:
+        agentic_valid["marker_size"] = agentic_valid["tp"].clip(lower=1)
+        fig = px.scatter(
+            agentic_valid,
+            x="agentic_tpot_p95",
+            y="max_viable_agentic_concurrency",
+            color="engine",
+            symbol="quantization",
+            size="marker_size",
+            hover_data=[
+                "experiment_id", "status", "correctness_gate_passed",
+                "agentic_ttft_p95", "agentic_peak_throughput",
+                "prefix_caching", "scheduling_policy",
+            ],
+            labels={
+                "agentic_tpot_p95": "Agentic tpot p95 (ms) — lower is better",
+                "max_viable_agentic_concurrency": "Max parallel agents (under SLO)",
+            },
+        )
+        pareto_ids = _agentic_pareto_ids(agentic_valid)
+        pareto_pts = agentic_valid[agentic_valid["experiment_id"].isin(pareto_ids)]
+        if not pareto_pts.empty:
+            pareto_sorted = pareto_pts.sort_values("agentic_tpot_p95")
+            fig.add_trace(go.Scatter(
+                x=pareto_sorted["agentic_tpot_p95"],
+                y=pareto_sorted["max_viable_agentic_concurrency"],
+                mode="lines+markers",
+                name="Agentic Pareto front",
+                line=dict(color="red", dash="dash", width=2),
+                marker=dict(size=10, symbol="star"),
+            ))
+        fig.update_layout(height=480)
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("**Agentic Pareto points**")
+        st.dataframe(
+            pareto_pts.sort_values(
+                ["max_viable_agentic_concurrency", "agentic_tpot_p95"],
+                ascending=[False, True],
+            )[
+                [c for c in [
+                    "experiment_id", "engine", "quantization", "tp",
+                    "max_viable_agentic_concurrency",
+                    "agentic_tpot_p95",
+                    "agentic_ttft_p95",
+                    "agentic_peak_throughput",
+                    "prefix_caching",
+                ] if c in pareto_pts.columns]
+            ].rename(columns={"max_viable_agentic_concurrency": "max_agents"}),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info(
+            "No experiments cleared the agentic SLO with a measured tpot p95 "
+            "yet. Run a config with `enable_agentic_long_context: true`."
+        )
+
+    # ── Throughput vs Latency Pareto (informational / historical) ──────
+    st.subheader("Throughput vs Latency (informational)")
+    st.caption(
+        "Kept for backward compatibility and the synthetic-throughput view. "
+        "Not the active leadership criterion — best raw throughput often comes "
+        "from c=256, p=512 phases that fail the agentic SLO."
+    )
     valid = pareto_source[
         (pareto_source["peak_throughput"] > 0)
         & (pareto_source["ttft_p95"] > 0)

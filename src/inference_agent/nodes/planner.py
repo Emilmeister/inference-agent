@@ -64,10 +64,17 @@ previous sessions. Treat them as a strong starting point: prefer iterating ON th
 {history_json}
 
 ## Best Results So Far
-- Best throughput: {best_throughput:.1f} tok/s (config: {best_throughput_id})
+- Best AGENTIC (primary): max_viable_agents={best_agentic_c} \
+(config: {best_agentic_id}, agentic_tpot_p95={best_agentic_tpot:.1f}ms, \
+agentic_throughput={best_agentic_tp:.1f} tok/s)
 - Best latency (TTFT p95): {best_latency:.1f} ms (config: {best_latency_id})
-- Best balanced: throughput={best_balanced_tp:.1f}, latency={best_balanced_lat:.1f} \
+- Best balanced (max agentic c under TTFT≤{latency_threshold}ms): \
+agents={best_balanced_tp:.0f}, ttft={best_balanced_lat:.1f}ms \
 (config: {best_balanced_id})
+- (Informational only — NOT a goal) Best raw throughput: \
+{best_throughput:.1f} tok/s (config: {best_throughput_id}). c=256/p=512 wins \
+here do NOT count as leadership — agentic concurrency is what we are \
+optimizing for.
 
 ## Experiment Count
 {exp_count} / {max_experiments}
@@ -78,14 +85,46 @@ to every experiment by the agent — DO NOT try to vary it, do not pass any \
 `--quantization` flag via extra_engine_args, and do not reason about which \
 quantization method to use. Treat it as part of the hardware/model setup.
 1. For BASELINES: use default params — no speculative decoding, \
-kv_cache_dtype=auto, scheduling_policy=fcfs.
+kv_cache_dtype=auto, scheduling_policy=fcfs. ENABLE prefix caching (it is \
+mandatory under the agentic goal — see Rule 3a — and harmless elsewhere).
 2. After baselines, analyze trends and improve based on the optimization goal.
-3. If goal is "optimize_throughput": focus on batching, DP, high concurrency.
-4. If goal is "optimize_latency": focus on TP, enforce_eager, lower batch sizes.
+3. PRIMARY GOAL — "optimize_agentic" (maximize parallel agents under SLO). \
+The headline metric is `agentic.max_viable_concurrency`. Levers, in order \
+of expected impact:
+   - **Increase KV budget.** vLLM: `gpu_memory_utilization` 0.88→0.92→0.95 \
+(watch OOM). SGLang: `mem_fraction_static` 0.88→0.93. More KV → more \
+long-context sessions in parallel.
+   - **`enable_prefix_caching` MUST be true.** The benchmark uses a shared \
+prefix across all sessions; without prefix caching it is re-prefilled per \
+session and concurrency collapses. The validator will reject configs that \
+disable it under the agentic goal.
+   - **`max_model_len` ≤ realistic agent context.** Do NOT pick 131072/262144 \
+under the agentic goal — that just reserves KV budget for a context window \
+nobody uses. Choose the smallest bucket from {{16384, 32768, 65536}} that \
+still fits shared_prefix + unique + turns × (out + tool). The validator \
+warns when oversized.
+   - **`chunked_prefill_size` smaller** (vLLM `--max-num-batched-tokens` ~4096-8192, \
+SGLang `chunked_prefill_size=4096`) — fairer scheduling when many sessions \
+share heavy prefill bursts.
+   - **`max_running_requests` (SGLang) / `max_num_seqs` (vLLM) ≈ 2-4× the \
+expected viable concurrency** — generous enough to absorb bursts without \
+starving KV. Do NOT push these to 256/288 (those are throughput-shaped \
+configurations and waste KV under the agentic SLO).
+   - **Speculative decoding is usually NEUTRAL or NEGATIVE under agentic.** \
+Small effective batch (c=8..48) plus long context drops accept-rate; raw \
+overhead can dominate. Try it only after exhausting the levers above, and \
+prefer self-speculation (NEXTN / mtp) when mtp_num_layers > 0.
+3a. THINGS THAT HURT AGENTIC AND SHOULD BE AVOIDED unless explicitly testing \
+them: enable_chunked_prefill=false (slows multi-session prefill fairness); \
+prefix_caching=false (kills shared-prefix reuse — VALIDATOR REJECTS); large \
+max_model_len like 131072+ when shared+unique+turns*out fits in <65536.
+4. If goal is "optimize_latency": focus on TP, enforce_eager, lower batch \
+sizes. Latency rank uses the cold-start TTFT p95 at c=1; agentic SLO does \
+not apply here.
 5. If goal is "optimize_balanced": find configs where TTFT p95 < {latency_threshold} ms \
-AND throughput is maximized.
-6. If goal is "explore": try something new — speculative decoding, different max_model_len, \
-attention backends.
+AND max_viable_agentic_concurrency is maximized. NOT raw throughput.
+6. If goal is "explore": try something new — speculative decoding, different \
+max_model_len, attention backends. Still respect Rule 3a.
 7. SPECULATIVE DECODING is a first-class lever — actively probe it once a stable baseline exists, \
 do NOT treat it as a last resort. Sweep across algorithms (vLLM: ngram, eagle, eagle3, medusa, mlp_speculator; \
 SGLang: NEXTN, EAGLE, EAGLE3) AND across `speculative_num_steps` (try at least 3, 5, 8) AND across \
@@ -554,6 +593,10 @@ async def planner_node(state: AgentState) -> dict:
             if loaded_top_for_llm
             else "No prior runs on this hardware/model."
         ),
+        best_agentic_c=state.get("best_agentic_max_viable_c", 0),
+        best_agentic_id=state.get("best_agentic_config_id", "none"),
+        best_agentic_tpot=state.get("best_agentic_tpot_p95", float("inf")),
+        best_agentic_tp=state.get("best_agentic_throughput", 0.0),
         best_throughput=state.get("best_throughput", 0),
         best_throughput_id=state.get("best_throughput_config_id", "none"),
         best_latency=state.get("best_latency_ttft_p95", float("inf")),
