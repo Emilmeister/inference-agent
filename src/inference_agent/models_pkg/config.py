@@ -232,6 +232,13 @@ class AgentConfig(BaseModel):
     # it. Set to e.g. "fp8" / "awq" / "gptq", or null to disable.
     quantization: str | None = None
 
+    # max_model_len is fixed across all experiments — the planner does not
+    # vary it. Treat as a hardware/product constraint. When None the planner
+    # picks per experiment (legacy behavior). When set, the planner is told
+    # the value upfront and the validator's agentic oversize gate is skipped
+    # (user explicitly chose this context window).
+    max_model_len: int | None = None
+
     agent_llm: AgentLLMConfig = Field(default_factory=AgentLLMConfig)
     container: ContainerConfig = Field(default_factory=ContainerConfig)
     startup: StartupConfig = Field(default_factory=StartupConfig)

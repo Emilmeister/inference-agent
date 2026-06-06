@@ -118,12 +118,11 @@ if not hardware_options:
     st.info("No experiments in the database yet. Run `inference-agent` to populate it.")
     st.stop()
 
-hw_labels = {hw.label(): hw for hw in hardware_options}
-hw_label = st.sidebar.selectbox("Hardware", list(hw_labels.keys()))
-selected_hw: HardwareKey = hw_labels[hw_label]
-
+# Primary selectors — model and context window first, hardware/engine after.
+# The benchmarking story usually starts with "which model on which context",
+# everything else is a refinement of that.
 selected_models = st.sidebar.multiselect(
-    "Model",
+    "Model (primary filter)",
     model_options,
     default=model_options,
 )
@@ -132,6 +131,10 @@ selected_engines_src = st.sidebar.multiselect(
     engine_options,
     default=engine_options,
 )
+
+hw_labels = {hw.label(): hw for hw in hardware_options}
+hw_label = st.sidebar.selectbox("Hardware", list(hw_labels.keys()))
+selected_hw: HardwareKey = hw_labels[hw_label]
 
 filters = Filters(
     hardware=selected_hw,
@@ -144,6 +147,26 @@ df = list_experiment_summaries(filters)
 if df.empty:
     st.warning("No experiments match the current filters.")
     st.stop()
+
+# Context-window picker built from the LOADED rows (REST already filtered
+# by hardware/model/engine). Sits right next to the model selector so the
+# operator can lock both invariants before exploring other axes.
+ctx_values_all = sorted(
+    int(v) for v in df["max_model_len"].dropna().unique().tolist() if v > 0
+) if "max_model_len" in df.columns else []
+if ctx_values_all:
+    selected_ctx = st.sidebar.multiselect(
+        "Context window (max_model_len)",
+        ctx_values_all,
+        default=ctx_values_all,
+        help=(
+            "Across-experiment invariant in this project — fix it in config.yaml "
+            "to keep the planner from varying it, then use this filter to "
+            "compare runs at the same context."
+        ),
+    )
+else:
+    selected_ctx = []
 
 st.success(f"Loaded {len(df)} experiments from inference-api")
 
@@ -191,6 +214,8 @@ filtered = df[
     & df["quantization"].isin(quants)
     & df["tp"].isin(tp_values)
 ].copy()
+if selected_ctx and "max_model_len" in filtered.columns:
+    filtered = filtered[filtered["max_model_len"].isin(selected_ctx)]
 
 eligible_mask = (
     (filtered["status"] == "success")

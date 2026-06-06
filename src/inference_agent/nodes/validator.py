@@ -184,10 +184,17 @@ def validate_experiment(
         # requested ctx is > 2× the realistic agentic budget AND there is a
         # smaller power-of-2 bucket that still fits — the planner can pick a
         # tighter value next round.
+        #
+        # EXCEPTION: when the operator has fixed max_model_len at the
+        # AgentConfig level, this is an explicit invariant — don't override
+        # their choice with a heuristic about agentic budget. The whole point
+        # of the fixed value is that they want this context window across
+        # every experiment regardless of workload shape.
         bench = agent_config.benchmark
         if (
             bench.enable_agentic_long_context
             and experiment.max_model_len is not None
+            and agent_config.max_model_len is None
         ):
             agentic_budget = (
                 bench.agentic_shared_prefix_tokens

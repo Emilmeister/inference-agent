@@ -84,6 +84,13 @@ optimizing for.
 to every experiment by the agent — DO NOT try to vary it, do not pass any \
 `--quantization` flag via extra_engine_args, and do not reason about which \
 quantization method to use. Treat it as part of the hardware/model setup.
+0a. MAX_MODEL_LEN IS FIXED for this run at: {fixed_max_model_len}. It is \
+applied to every experiment by the agent — DO NOT try to vary it, do not \
+pass `--max-model-len` / `--context-length` via extra_engine_args, and do \
+NOT include max_model_len in your rationale as a tunable knob. Treat it as \
+a hardware/product constraint. The schema field `max_model_len` will be \
+overridden with the fixed value regardless of what you emit; you may emit \
+any plausible value to satisfy the JSON schema.
 1. For BASELINES: use default params — no speculative decoding, \
 kv_cache_dtype=auto, scheduling_policy=fcfs. ENABLE prefix caching (it is \
 mandatory under the agentic goal — see Rule 3a — and harmless elsewhere).
@@ -615,6 +622,11 @@ async def planner_node(state: AgentState) -> dict:
         model_max_context=hardware.model_max_context,
         gpu_count=hardware.gpu_count,
         fixed_quantization=config.quantization or "disabled (no quantization)",
+        fixed_max_model_len=(
+            f"{config.max_model_len} (LLM cannot vary it)"
+            if config.max_model_len is not None
+            else "not fixed — pick per Rule 9 below"
+        ),
     ) + engine_section
 
     if failure_patterns:
@@ -812,8 +824,13 @@ def _build_experiment_config(
         valid_tps = [i for i in range(1, hardware.gpu_count + 1) if hardware.gpu_count % i == 0]
         tp = min(valid_tps, key=lambda x: abs(x - tp))
 
-    # Validate max_model_len — must be set, capped to model max
-    max_model_len = output.max_model_len
+    # max_model_len: when fixed at AgentConfig level, the LLM choice is
+    # ignored — operator-level invariant for the whole run. Otherwise validate
+    # and cap to the model's advertised max.
+    if config.max_model_len is not None:
+        max_model_len = config.max_model_len
+    else:
+        max_model_len = output.max_model_len
     if max_model_len > hardware.model_max_context:
         max_model_len = hardware.model_max_context
     # Sanity: at least 512
