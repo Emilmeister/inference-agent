@@ -216,28 +216,39 @@ def _compute_agentic_pareto_front(
 def _check_plateau(
     history: list[ExperimentSummary],
     best_agentic_c: int,
+    best_agentic_tpot: float,
+    best_agentic_throughput: float,
     best_latency: float,
     window: int,
     threshold: float,
 ) -> bool:
     """Check if the last `window` experiments improved on the prior best.
 
-    Plateau triggers only when NEITHER the agentic concurrency NOR the cold-
-    start latency moved meaningfully. We do NOT consider raw throughput for
-    plateau anymore — c=256, p=512 wins are not what we're optimizing for.
+    Plateau triggers only when NONE of the active leaderboard axes moved
+    meaningfully. The axes match the agentic leaderboard's tie-break order
+    so improvements that count for ranking also count against plateau:
 
-    `best_agentic_c` / `best_latency` MUST be the bests from BEFORE the
-    latest experiment was folded in — otherwise the just-set new best can
-    never be beaten by itself. Caller is responsible for passing pre-update
-    bests.
+      1. max_viable_agentic_concurrency — primary headline; integer.
+      2. agentic_tpot_p95               — tie-break #1; lower is better.
+      3. agentic_peak_throughput        — tie-break #2; higher is better.
+      4. low_concurrency_ttft_p95       — independent latency objective.
 
-    "Improvement" is strict and threshold-bounded:
-      - agentic_c improves iff new > floor(best * (1 + threshold)) AND new > best
-      - latency improves iff ttft <= best * (1 - threshold)
+    Raw synthetic peak_throughput is intentionally NOT considered — c=256,
+    p=512 wins are not what we're optimizing for under the agentic goal.
+
+    Bests MUST be the values from BEFORE the latest experiment was folded
+    in — otherwise a record-breaking run sets best_*=its_own_value and then
+    trivially fails to beat itself. Caller is responsible for passing the
+    pre-update bests.
+
+    "Improvement" is strict and threshold-bounded.
     """
     countable = [
         h for h in history
-        if h.agentic_max_viable_concurrency > 0 or h.low_concurrency_ttft_p95 > 0
+        if (
+            h.agentic_max_viable_concurrency > 0
+            or h.low_concurrency_ttft_p95 > 0
+        )
     ]
     if len(countable) < window:
         return False
@@ -247,11 +258,28 @@ def _check_plateau(
     # For an integer metric (concurrency) the multiplicative threshold can
     # round down to zero on small bests — guard with a strict ">" so a
     # first-ever non-zero value always counts as improvement.
-    agentic_improved = any(
+    agentic_c_improved = any(
         h.agentic_max_viable_concurrency > 0
         and h.agentic_max_viable_concurrency
         > max(best_agentic_c, 0) * (1 + threshold)
         and h.agentic_max_viable_concurrency > best_agentic_c
+        for h in recent
+    )
+
+    # tpot is the second leaderboard axis (lower is better). +inf default
+    # makes the first non-zero value count as improvement.
+    agentic_tpot_improved = any(
+        0 < h.agentic_tpot_p95 <= best_agentic_tpot * (1 - threshold)
+        for h in recent
+    )
+
+    # Agentic peak throughput is the third tie-break and very often the only
+    # axis that moves when knobs are nudged at a stable max_viable_c. NOT
+    # the same as synthetic peak_throughput.
+    agentic_thr_improved = any(
+        h.agentic_peak_throughput
+        > max(best_agentic_throughput, 0.0) * (1 + threshold)
+        and h.agentic_peak_throughput > best_agentic_throughput
         for h in recent
     )
 
@@ -260,7 +288,12 @@ def _check_plateau(
         for h in recent
     )
 
-    return not (agentic_improved or latency_improved)
+    return not (
+        agentic_c_improved
+        or agentic_tpot_improved
+        or agentic_thr_improved
+        or latency_improved
+    )
 
 
 # Soft noise penalty applied to throughput_score / latency_score. Capped so
@@ -437,6 +470,8 @@ async def analyzer_node(state: AgentState) -> dict:
     if not hard_stop and _check_plateau(
         session_with_current,
         best_agentic_c,
+        best_agentic_tpot,
+        best_agentic_tp,
         best_latency,
         config.experiments.plateau_window,
         config.experiments.plateau_threshold,

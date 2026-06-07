@@ -113,8 +113,11 @@ benchmark:
   agentic_turns_per_session: 4
 
   # Полный sweep: executor проходит по уровням и останавливается после двух
-  # подряд not-viable фаз. Под H100×8 / 122B FP8 — рабочий диапазон.
-  agentic_concurrency_levels: [8, 12, 16, 20, 24, 32, 48]
+  # подряд not-viable фаз. Под H100×8 / 122B FP8 — рабочий диапазон с
+  # запасом сверху: SGLang-конфиги ловят c=48 без потолка, нужно дать
+  # верхние уровни чтобы реальный ceiling нашёлся, а не «уперлись в потолок
+  # sweep'а». Дешёвые уровни (бесплатные если предыдущие не viable).
+  agentic_concurrency_levels: [8, 12, 16, 20, 24, 32, 48, 64, 96]
 
   agentic_session_timeout_sec: 1500       # 25 мин на сессию (4 turn × ~5 мин worst case)
   agentic_per_turn_timeout_sec: 300       # 5 мин на один HTTP turn (запас над 30s TTFT + 144s decode)

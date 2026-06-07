@@ -33,6 +33,7 @@ def _make_summary(
     ttft_p95: float = 50.0,
     agentic_c: int = 0,
     agentic_tpot: float = 0.0,
+    agentic_throughput: float = 0.0,
     status: ExperimentStatus = ExperimentStatus.SUCCESS,
     engine: EngineType = EngineType.VLLM,
     correctness_gate_passed: bool = True,
@@ -46,6 +47,7 @@ def _make_summary(
         correctness_gate_passed=correctness_gate_passed,
         agentic_max_viable_concurrency=agentic_c,
         agentic_tpot_p95=agentic_tpot,
+        agentic_peak_throughput=agentic_throughput,
     )
 
 
@@ -107,52 +109,99 @@ class TestComputeParetoFront:
 
 
 class TestCheckPlateau:
-    """Plateau detection now keys on max_viable_agentic_c (primary axis) and
-    cold-start latency. Synthetic peak_throughput no longer drives the
-    decision."""
+    """Plateau detection covers all four leaderboard axes:
+      1. max_viable_agentic_concurrency  (primary)
+      2. agentic_tpot_p95                (tie-break #1, lower better)
+      3. agentic_peak_throughput         (tie-break #2, higher better)
+      4. low_concurrency_ttft_p95        (latency)
+    Synthetic peak_throughput is intentionally NOT considered.
+    """
+
+    def _call(self, history, *, best_c=0, best_tpot=float("inf"),
+              best_thr=0.0, best_lat=float("inf"), window=5, threshold=0.02):
+        return _check_plateau(
+            history, best_c, best_tpot, best_thr, best_lat,
+            window=window, threshold=threshold,
+        )
 
     def test_not_enough_history(self):
         history = [_make_summary("a", agentic_c=8), _make_summary("b", agentic_c=8)]
-        assert _check_plateau(history, 8, 50, window=5, threshold=0.02) is False
+        assert self._call(history, best_c=8, best_lat=50) is False
 
-    def test_no_plateau_with_improvement(self):
-        history = [
-            _make_summary(f"exp_{i}", agentic_c=8 + i) for i in range(5)
-        ]
+    def test_no_plateau_with_max_v_improvement(self):
+        history = [_make_summary(f"exp_{i}", agentic_c=8 + i) for i in range(5)]
         # Pre-update best is 11; exp_4 has agentic_c=12 — strict improvement.
-        assert _check_plateau(history, 11, 50, window=5, threshold=0.02) is False
+        assert self._call(history, best_c=11, best_lat=50) is False
 
-    def test_plateau_detected(self):
-        # All experiments have same agentic_c and latency — no improvement.
-        history = [_make_summary(f"exp_{i}", agentic_c=8, ttft_p95=50) for i in range(5)]
-        assert _check_plateau(history, 16, 30, window=5, threshold=0.02) is True
+    def test_plateau_detected_all_axes_flat(self):
+        history = [
+            _make_summary(f"exp_{i}", agentic_c=8, ttft_p95=50, agentic_tpot=50.0)
+            for i in range(5)
+        ]
+        assert self._call(history, best_c=16, best_tpot=40.0, best_thr=1000.0, best_lat=30) is True
 
     def test_latency_improvement_breaks_plateau(self):
         history = [_make_summary(f"exp_{i}", agentic_c=8, ttft_p95=50) for i in range(4)]
-        # Last experiment has better latency than current best
         history.append(_make_summary("exp_4", agentic_c=8, ttft_p95=25))
-        assert _check_plateau(history, 16, 30, window=5, threshold=0.02) is False
+        assert self._call(history, best_c=16, best_lat=30) is False
+
+    def test_agentic_tpot_improvement_breaks_plateau(self):
+        """A tied max_viable_c with a meaningful tpot drop must NOT plateau."""
+        history = [
+            _make_summary(f"exp_{i}", agentic_c=48, agentic_tpot=50.0, ttft_p95=50)
+            for i in range(4)
+        ]
+        history.append(_make_summary("exp_4", agentic_c=48, agentic_tpot=45.0, ttft_p95=50))
+        # best_lat=50 holds the latency axis flat so only tpot/c/thr can break.
+        assert self._call(history, best_c=48, best_tpot=50.0, best_lat=50) is False
+
+    def test_agentic_throughput_improvement_breaks_plateau(self):
+        """Tied max_viable_c + tied tpot but better agentic_throughput counts."""
+        history = [
+            _make_summary(
+                f"exp_{i}", agentic_c=48, agentic_tpot=50.0, agentic_throughput=900.0,
+                ttft_p95=50,
+            )
+            for i in range(4)
+        ]
+        history.append(_make_summary(
+            "exp_4", agentic_c=48, agentic_tpot=50.0, agentic_throughput=945.0,
+            ttft_p95=50,
+        ))
+        assert self._call(
+            history, best_c=48, best_tpot=50.0, best_thr=900.0, best_lat=50,
+        ) is False
+
+    def test_tiny_agentic_thr_movement_still_plateaus(self):
+        """0.4% throughput bump is below 2% threshold — plateau holds."""
+        history = [
+            _make_summary(
+                f"exp_{i}", agentic_c=48, agentic_tpot=50.0, agentic_throughput=900.0,
+                ttft_p95=50,
+            )
+            for i in range(4)
+        ]
+        history.append(_make_summary(
+            "exp_4", agentic_c=48, agentic_tpot=50.0, agentic_throughput=903.6,
+            ttft_p95=50,
+        ))
+        assert self._call(
+            history, best_c=48, best_tpot=50.0, best_thr=900.0, best_lat=50,
+        ) is True
 
     def test_record_breaking_run_does_not_trip_plateau(self):
-        """Caller must pass *prior* best so the new record can beat it."""
-        history = [
-            _make_summary(f"exp_{i}", agentic_c=8, ttft_p95=50) for i in range(4)
-        ]
-        # Big jump on the last entry — clearly an improvement.
+        history = [_make_summary(f"exp_{i}", agentic_c=8, ttft_p95=50) for i in range(4)]
         history.append(_make_summary("exp_4", agentic_c=64, ttft_p95=25))
-        assert _check_plateau(history, 8, 50, window=5, threshold=0.02) is False
-        # POST-update best (64/25) — the record can't beat itself and
-        # plateau falsely fires. The bug we're guarding against.
-        assert _check_plateau(history, 64, 25, window=5, threshold=0.02) is True
+        assert self._call(history, best_c=8, best_lat=50) is False
+        # Post-update best — should plateau (record can't beat itself).
+        assert self._call(history, best_c=64, best_lat=25) is True
 
     def test_threshold_requires_meaningful_improvement(self):
         history = [_make_summary(f"exp_{i}", agentic_c=100, ttft_p95=50) for i in range(4)]
-        # +1 over 100 with threshold 2% → required > 102, so 101 doesn't pass.
         history.append(_make_summary("exp_4", agentic_c=101, ttft_p95=49.5))
-        assert _check_plateau(history, 100, 50, window=5, threshold=0.02) is True
-        # 5% bump clears the bar.
+        assert self._call(history, best_c=100, best_lat=50) is True
         history[-1] = _make_summary("exp_4", agentic_c=105, ttft_p95=47.5)
-        assert _check_plateau(history, 100, 50, window=5, threshold=0.02) is False
+        assert self._call(history, best_c=100, best_lat=50) is False
 
 
 class TestComputeScores:
