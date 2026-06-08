@@ -129,7 +129,7 @@ benchmark:
   # SLO под агентский workflow, где «модель думает несколько секунд» — нормально.
   # Фаза viable только если ВСЕ условия выполнены:
   #   TTFT p95 ≤ 60000 ms        — допустимая пауза перед первым токеном
-  #   tpot p95 ≤ 60 ms            — ~16 tok/s — комфортная скорость чтения
+  #   tpot p95 ≤ 100 ms            — ~10 tok/s — комфортная скорость чтения
   #   session error rate ≤ 5%     — реальные таймауты, не «прошло-почти»
   # ВНИМАНИЕ: TTFT SLO + tpot SLO × max_output должны помещаться в
   # per_turn_timeout: 60 + 0.060 × 16000 = 1020s ≤ 1200s.
@@ -137,7 +137,7 @@ benchmark:
   # Иначе legal-SLO turn'ы падают в timeout раньше, чем успевают нарушить SLO,
   # и попадают в error_rate вместо честного нарушения tpot/ttft p95.
   agentic_ttft_p95_slo_ms: 60000
-  agentic_tpot_p95_slo_ms: 60
+  agentic_tpot_p95_slo_ms: 100
   agentic_session_error_rate_slo: 0.05
   agentic_e2e_p95_slo_ms: 0               # 0 → авто = 0.8 * session_timeout (= 4320s)
 

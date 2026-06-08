@@ -357,11 +357,13 @@ async def _run_all_phases(
     error_rate_threshold = config.benchmark.phase_error_rate_threshold
     agentic_slo = AgenticSLO.from_config(config.benchmark)
 
-    # Agentic sweep stops after two consecutive not-viable phases (SLO miss).
-    # A single bad phase can be transient — backpressure under burst, garbage
-    # collection, network — but two in a row at increasing concurrency is the
-    # ceiling. Remaining higher concurrencies are recorded as `skipped`
-    # ceiling probes so the dashboard shows the sweep ended deliberately.
+    # Agentic ceiling detection: after two consecutive not-viable phases (SLO
+    # miss) we abort the entire experiment loop. A single bad phase can be
+    # transient — backpressure under burst, GC, network — but two in a row at
+    # increasing concurrency is the ceiling. Since the agentic objective is
+    # primary, a config that lost the agentic race contributes only
+    # informational data via remaining non-agentic phases (peak_throughput,
+    # ttft_p95 at short prompts) — not worth 5-10 min of executor time.
     agentic_ceiling_lock: int | None = None
     consecutive_non_viable_agentic = 0
 
@@ -375,24 +377,6 @@ async def _run_all_phases(
         is_warmup = workload_id == "warmup"
         is_agentic = workload_id == "agentic_long_context"
         duration = 10 if is_warmup else config.benchmark.duration_per_level_sec
-
-        if is_agentic and agentic_ceiling_lock is not None and concurrency >= agentic_ceiling_lock:
-            # Cheap skip: record a synthetic ceiling probe so the dashboard
-            # and analyzer can see the sweep ended deliberately, not silently.
-            logger.info(
-                "  Phase: %s [%s] (c=%d) — skipped, agentic ceiling locked at c=%d",
-                phase_id, workload_id, concurrency, agentic_ceiling_lock,
-            )
-            ceiling_probes.append(CeilingProbeInfo(
-                phase_id=phase_id,
-                workload_id=workload_id,
-                concurrency=concurrency,
-                prompt_length=prompt_len,
-                error_rate=1.0,
-                errors=concurrency,
-                reason=f"skipped: c={agentic_ceiling_lock} already past SLO",
-            ))
-            continue
 
         if is_agentic:
             logger.info(
@@ -476,12 +460,13 @@ async def _run_all_phases(
                         agentic_ceiling_lock = concurrency
                         logger.info(
                             "  Agentic ceiling locked at c=%d "
-                            "(%d consecutive non-viable phases); higher "
-                            "agentic levels will be skipped as %d-th SLO miss "
-                            "in a row is a real ceiling.",
+                            "(%d consecutive non-viable phases) — terminating "
+                            "experiment: this config already lost the agentic "
+                            "SLO race, remaining phases (agentic and non-agentic) "
+                            "would only add 5-10 min of informational data.",
                             concurrency, consecutive_non_viable_agentic,
-                            _MAX_CONSECUTIVE_NON_VIABLE_AGENTIC,
                         )
+                        break
                 # Error-rate gate for non-agentic workloads (and agentic
                 # phases that passed SLO but somehow tripped the error gate
                 # — currently impossible since session_error_rate ≤ phase
