@@ -20,6 +20,8 @@ from typing import Any
 import pandas as pd
 import requests
 import streamlit as st
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,25 @@ def _session() -> requests.Session:
         "Authorization": f"Bearer {_token()}",
         "Accept": "application/json",
     })
+    # All dashboard endpoints are idempotent (reads + dedup-DELETE), so it is
+    # safe to retry GET/POST/DELETE on transient connection failures and
+    # retryable 5xx/429 responses. macOS errno 89 ("Operation canceled") slips
+    # through here when the OS tears down a half-open socket; without retries
+    # the whole tab crashes.
+    retry = Retry(
+        total=5,
+        connect=5,
+        read=5,
+        status=5,
+        backoff_factor=0.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET", "POST", "DELETE"]),
+        raise_on_status=False,
+        respect_retry_after_header=True,
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=20)
+    s.mount("http://", adapter)
+    s.mount("https://", adapter)
     return s
 
 

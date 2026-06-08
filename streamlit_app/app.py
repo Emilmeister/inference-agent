@@ -101,6 +101,44 @@ def _summary_label(row: pd.Series) -> str:
     )
 
 
+def _build_search_widget(field: str, series: pd.Series, key_prefix: str) -> pd.Series:
+    """Render a Streamlit filter widget appropriate for `series`; return a boolean mask.
+
+    Bool        → radio any/true/false.
+    Numeric     → multiselect if ≤12 distinct values, else range slider.
+    Categorical → multiselect of distinct values.
+    """
+    key = f"{key_prefix}_{field}"
+    non_null = series.dropna()
+    if non_null.empty:
+        st.caption(f"{field}: all values are missing.")
+        return pd.Series(True, index=series.index)
+
+    if pd.api.types.is_bool_dtype(series) or set(non_null.unique()) <= {True, False}:
+        choice = st.radio(field, ["any", "true", "false"], horizontal=True, key=key)
+        if choice == "any":
+            return pd.Series(True, index=series.index)
+        return series == (choice == "true")
+
+    if pd.api.types.is_numeric_dtype(series):
+        uniq = sorted(non_null.unique().tolist())
+        if len(uniq) <= 12:
+            sel = st.multiselect(field, uniq, default=uniq, key=key)
+            return series.isin(sel)
+        lo, hi = float(non_null.min()), float(non_null.max())
+        if lo == hi:
+            st.caption(f"{field}: single value = {lo}")
+            return pd.Series(True, index=series.index)
+        sel_range = st.slider(
+            field, min_value=lo, max_value=hi, value=(lo, hi), key=key,
+        )
+        return series.between(sel_range[0], sel_range[1], inclusive="both")
+
+    options = sorted(non_null.astype(str).unique().tolist())
+    sel = st.multiselect(field, options, default=options, key=key)
+    return series.astype(str).isin(sel)
+
+
 # ---- Source filters (inference-api backed) ----
 
 
@@ -253,6 +291,7 @@ tabs = st.tabs([
     "GPU Efficiency",
     "Reproduce",
     "Tables",
+    "Search",
     "Agentic",
     "Manage",
 ])
@@ -1109,6 +1148,275 @@ with tabs[7]:
 
 
 with tabs[8]:
+    st.header("Configuration Search")
+    st.caption(
+        "Find experiments by any combination of config or metric values, then "
+        "drill into one to see its standard + agentic benchmark results inline. "
+        "Scope: source-level filters from the sidebar (hardware/model/engine) "
+        "apply; display-level narrowing (status/quant/tp) does NOT — the full "
+        "loaded set is searchable here."
+    )
+
+    search_pool = df.copy()
+
+    id_query = st.text_input(
+        "Experiment ID contains",
+        value="",
+        help="Substring match against experiment_id (case-insensitive).",
+        key="search_id_query",
+    )
+    if id_query:
+        search_pool = search_pool[
+            search_pool["experiment_id"]
+            .astype(str)
+            .str.contains(id_query, case=False, na=False)
+        ]
+
+    candidate_fields = [c for c in [
+        # Identity & status
+        "engine", "engine_version", "model", "status", "correctness_gate_passed",
+        # Precision
+        "quantization", "dtype", "kv_cache_dtype",
+        # Parallelism & memory
+        "tp", "pp", "dp", "parallelism",
+        "max_model_len", "gpu_count",
+        "gpu_memory_utilization", "mem_fraction_static",
+        "max_num_seqs", "max_running_requests",
+        "max_num_batched_tokens", "max_prefill_tokens",
+        # Engine knobs
+        "chunked_prefill", "prefix_caching", "enforce_eager",
+        "scheduling_policy", "attention_backend", "speculative_algorithm",
+        # Standard metrics
+        "peak_throughput", "peak_total_throughput", "peak_requests_per_sec",
+        "ttft_p95", "tpot_p95",
+        "peak_throughput_e2e_cv", "low_concurrency_ttft_cv",
+        "prefix_hit_rate", "kv_cache_usage",
+        # Agentic metrics
+        "max_viable_agentic_concurrency", "agentic_ceiling_hit",
+        "agentic_saturation_concurrency", "agentic_peak_throughput",
+        "agentic_tpot_p95", "agentic_ttft_p95",
+        "is_pareto", "is_agentic_pareto",
+        # GPU
+        "gpu_util_avg", "gpu_power_total_w", "gpu_memory_peak_mb",
+    ] if c in search_pool.columns]
+
+    chosen_fields = st.multiselect(
+        "Parameters to filter on (AND across selections)",
+        candidate_fields,
+        default=[],
+        help=(
+            "Pick any combination of fields. Bool → any/true/false; "
+            "low-cardinality numeric (tp, dp, …) → multiselect of values; "
+            "high-cardinality numeric → range slider; string → multiselect."
+        ),
+        key="search_fields",
+    )
+
+    if chosen_fields:
+        widget_cols = st.columns(min(3, len(chosen_fields)))
+        for i, field in enumerate(chosen_fields):
+            with widget_cols[i % len(widget_cols)]:
+                mask = _build_search_widget(
+                    field, search_pool[field], "search",
+                )
+                search_pool = search_pool[mask.reindex(search_pool.index, fill_value=True)]
+
+    st.divider()
+    st.subheader(f"Matched {len(search_pool)} experiments")
+
+    if search_pool.empty:
+        st.info("No experiments match the current filters.")
+    else:
+        result_cols = [c for c in [
+            "experiment_id", "timestamp", "engine", "model",
+            "status", "correctness_gate_passed",
+            "quantization", "tp", "pp", "dp",
+            "prefix_caching", "chunked_prefill",
+            "peak_throughput", "ttft_p95", "tpot_p95",
+            "max_viable_agentic_concurrency",
+            "agentic_tpot_p95", "agentic_peak_throughput",
+        ] if c in search_pool.columns]
+        sort_col = "timestamp" if "timestamp" in search_pool.columns else "experiment_id"
+        st.dataframe(
+            search_pool.sort_values(sort_col, ascending=False)[result_cols],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.subheader("Inspect experiment")
+        pick_label_map = {
+            row["experiment_id"]: _summary_label(row)
+            for _, row in search_pool.iterrows()
+        }
+        pick_options = list(pick_label_map.keys())
+        selected_search_id = st.selectbox(
+            "Pick an experiment to view its benchmark results",
+            pick_options,
+            format_func=lambda x: pick_label_map.get(x, x),
+            key="search_pick_id",
+        )
+
+        if selected_search_id:
+            row = search_pool[
+                search_pool["experiment_id"] == selected_search_id
+            ].iloc[0]
+
+            mcols = st.columns(4)
+            mcols[0].metric(
+                "Peak throughput",
+                _format_metric(_as_float(row.get("peak_throughput")), " tok/s"),
+            )
+            mcols[1].metric(
+                "TTFT p95",
+                _format_metric(_as_float(row.get("ttft_p95")), " ms", 1),
+            )
+            agents_val = int(_as_float(row.get("max_viable_agentic_concurrency", 0)))
+            mcols[2].metric(
+                "Max parallel agents",
+                f"{agents_val}{'+' if bool(row.get('agentic_ceiling_hit', False)) else ''}"
+                if agents_val > 0
+                else "n/a",
+            )
+            mcols[3].metric(
+                "Agentic tpot p95",
+                _format_metric(_as_float(row.get("agentic_tpot_p95")), " ms", 1),
+            )
+
+            with st.expander("Config & runtime identifiers", expanded=False):
+                cfg_keys = [
+                    "engine", "engine_version", "model",
+                    "quantization", "dtype", "kv_cache_dtype",
+                    "tp", "pp", "dp",
+                    "max_model_len", "max_num_seqs", "max_num_batched_tokens",
+                    "max_running_requests", "max_prefill_tokens",
+                    "gpu_memory_utilization", "mem_fraction_static",
+                    "prefix_caching", "chunked_prefill", "enforce_eager",
+                    "scheduling_policy", "attention_backend",
+                    "speculative_algorithm",
+                    "container_image_digest", "benchmark_seed",
+                ]
+                cfg_view = {
+                    k: row.get(k) for k in cfg_keys if k in row.index
+                }
+                st.dataframe(
+                    pd.DataFrame(
+                        [(k, v) for k, v in cfg_view.items()],
+                        columns=["field", "value"],
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                container_cmd = row.get("container_command", "")
+                if container_cmd:
+                    st.markdown("**Container command:**")
+                    st.code(container_cmd, language="bash")
+
+            phases_single = list_experiment_phases((selected_search_id,))
+            if phases_single.empty:
+                st.info("No phase-level data recorded for this experiment.")
+            else:
+                agentic_mask = phases_single["workload_id"] == "agentic_long_context"
+                std_phases = phases_single[~agentic_mask].copy()
+                agt_phases = phases_single[agentic_mask].copy()
+
+                st.markdown("### Standard benchmark phases")
+                if std_phases.empty:
+                    st.info("No standard phases (agentic-only run).")
+                else:
+                    std_cols = [c for c in [
+                        "workload_id", "phase_id", "concurrency", "prompt_length",
+                        "num_requests", "output_tokens_per_sec",
+                        "requests_per_sec",
+                        "ttft_p50", "ttft_p95", "ttft_p99",
+                        "tpot_p95", "e2e_p95",
+                        "errors", "error_rate",
+                    ] if c in std_phases.columns]
+                    st.dataframe(
+                        std_phases.sort_values(
+                            ["workload_id", "concurrency", "prompt_length"]
+                        )[std_cols],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    chart_df = std_phases.sort_values(["workload_id", "concurrency"])
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.plotly_chart(
+                            px.line(
+                                chart_df,
+                                x="concurrency",
+                                y="output_tokens_per_sec",
+                                color="workload_id",
+                                line_dash="prompt_length",
+                                markers=True,
+                                title="Output throughput by concurrency",
+                                hover_data=["phase_id", "ttft_p95", "errors"],
+                            ),
+                            use_container_width=True,
+                        )
+                    with col_b:
+                        st.plotly_chart(
+                            px.line(
+                                chart_df,
+                                x="concurrency",
+                                y="ttft_p95",
+                                color="workload_id",
+                                line_dash="prompt_length",
+                                markers=True,
+                                title="TTFT p95 by concurrency",
+                                hover_data=["phase_id", "errors"],
+                            ),
+                            use_container_width=True,
+                        )
+
+                st.markdown("### Agentic long-context phases")
+                if agt_phases.empty:
+                    st.info(
+                        "No agentic phases. Enable "
+                        "`benchmark.enable_agentic_long_context: true` in "
+                        "`config.yaml` and re-run the agent."
+                    )
+                else:
+                    agt_cols = [c for c in [
+                        "phase_id", "concurrency", "num_requests",
+                        "output_tokens_per_sec",
+                        "ttft_p50", "ttft_p95", "tpot_p95", "e2e_p95",
+                        "errors", "error_rate",
+                    ] if c in agt_phases.columns]
+                    st.dataframe(
+                        agt_phases.sort_values("concurrency")[agt_cols],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    turns_single = list_agentic_turn_metrics((selected_search_id,))
+                    if not turns_single.empty:
+                        ok_turns = turns_single[
+                            turns_single["error"].isna()
+                            & (turns_single["ttft_ms"] > 0)
+                        ]
+                        if not ok_turns.empty:
+                            st.plotly_chart(
+                                px.box(
+                                    ok_turns,
+                                    x="turn_idx",
+                                    y="ttft_ms",
+                                    color="concurrency",
+                                    points=False,
+                                    title=(
+                                        "TTFT distribution per turn "
+                                        "(0 = cold prefill, 1+ = warm cache)"
+                                    ),
+                                    labels={
+                                        "turn_idx": "Turn index",
+                                        "ttft_ms": "TTFT, ms",
+                                    },
+                                ),
+                                use_container_width=True,
+                            )
+
+
+with tabs[9]:
     st.header("Agentic Long-Context Analytics")
     st.caption(
         "Multi-turn code-agent simulation: фиксированный префикс ~64k + N ходов, "
@@ -1289,7 +1597,7 @@ with tabs[8]:
         )
 
 
-with tabs[9]:
+with tabs[10]:
     st.header("Manage Experiments")
     st.caption(
         "Permanently delete experiments from the database. This cannot be undone; "

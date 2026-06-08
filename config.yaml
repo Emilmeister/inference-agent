@@ -90,24 +90,28 @@ benchmark:
   # throughput среди фаз, укладывающихся в этот порог.
   latency_threshold_ms: 2000
 
-  # Agentic long-context — ПЕРВИЧНАЯ цель оптимизации. Имитация реального
-  # пула code-агентов: общий system+tools-префикс (одинаковые токены у всех
-  # сессий → prefix-cache переиспользует KV) + уникальная user-часть на
-  # сессию + многоходовая беседа с synthetic tool_result.
+  # Agentic long-context — ПЕРВИЧНАЯ цель оптимизации. Реалистичная
+  # имитация пула code-агентов: каждая параллельная сессия — НЕЗАВИСИМЫЙ
+  # агент со своим уникальным system+tools+memory+skills промптом (~33k)
+  # и своей историей сообщений (~50k). Кросс-сессионного shared-префикса
+  # НЕТ по дизайну — в реальной мульти-агентной нагрузке (разные customer'ы,
+  # разные тулсеты, разные skills loaded) prefix-cache между сессиями не
+  # попадает. Тест мерит intra-session кеширование: turn N переиспользует
+  # KV от turn N-1 в рамках одной сессии.
   #
   # Главная метрика — max_viable_agentic_concurrency: сколько параллельных
-  # агентов конфиг тащит, удовлетворяя ВСЕМ SLO ниже одновременно. Лидерборд
-  # best_agentic сортирует по этому числу.
+  # независимых агентов конфиг тащит, удовлетворяя ВСЕМ SLO одновременно.
+  # Лидерборд best_agentic сортирует по этому числу.
   #
-  # Бюджет токенов на одну сессию (с запасом):
-  #   shared_prefix + unique + turns × (max_output + tool_result_max)
-  #   = 16000 + 8000 + 4 × (2400 + 1536) = 39744 — комфортно в 65536.
-  # На малом max_model_len planner получит больше KV под параллельные сессии.
+  # Бюджет токенов на одну сессию (steady state):
+  #   unique + turns × (max_output + tool_result_max)
+  #   = 83000 + 8 × (4096 + 1536) = 128_056 — пограничный max_model_len.
+  # Раскладка unique: 10k system + 15k tools + 5k memory + 3k skills + 50k messages.
   enable_agentic_long_context: true
 
-  agentic_shared_prefix_tokens: 16000    # общий system+tools (одинаков у всех сессий)
-  agentic_unique_prompt_tokens: 8000     # уникальная часть на сессию
-  agentic_max_output_tokens: 2400        # cap per turn
+  agentic_shared_prefix_tokens: 0        # агенты разные → cross-session shared нет
+  agentic_unique_prompt_tokens: 83000    # 10k system + 15k tools + 5k memory + 3k skills + 50k messages
+  agentic_max_output_tokens: 16000        # cap per turn (code-агенты пишут крупные блоки)
   agentic_tool_result_min_tokens: 1024
   agentic_tool_result_max_tokens: 1536
   agentic_turns_per_session: 4
@@ -130,7 +134,7 @@ benchmark:
   # ВНИМАНИЕ: TTFT SLO + tpot SLO + max_output должны помещаться в
   # per_turn_timeout: 30000 + 2400*60 = 174s ≤ 300s. Иначе legal-SLO
   # turn'ы падают в timeout до того, как успевают нарушить SLO.
-  agentic_ttft_p95_slo_ms: 30000
+  agentic_ttft_p95_slo_ms: 60000
   agentic_tpot_p95_slo_ms: 60
   agentic_session_error_rate_slo: 0.05
   agentic_e2e_p95_slo_ms: 0               # 0 → авто = 0.8 * session_timeout
