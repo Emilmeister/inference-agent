@@ -30,8 +30,14 @@ class APIClientError(RuntimeError):
     """Raised when a call to the inference-api service fails.
 
     Wraps HTTP non-2xx responses, connection errors, and decode failures so
-    callers can treat any API problem uniformly.
+    callers can treat any API problem uniformly. `status_code` is set for HTTP
+    error responses (None for transport/decode failures) so callers can treat
+    specific codes — e.g. a 404 on an optional endpoint — as a soft outcome.
     """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class ExperimentApiClient:
@@ -113,7 +119,8 @@ class ExperimentApiClient:
                 body_text = await resp.text()
                 if resp.status >= 400:
                     raise APIClientError(
-                        f"{method} {path} failed with HTTP {resp.status}: {body_text[:512]}"
+                        f"{method} {path} failed with HTTP {resp.status}: {body_text[:512]}",
+                        status_code=resp.status,
                     )
                 if not body_text:
                     return None
@@ -195,7 +202,21 @@ class ExperimentApiClient:
             "nvlink_available": "true" if hardware.nvlink_available else "false",
             "model_name": model_name,
         }
-        payload = await self._request("GET", "/experiments/baseline", params=params)
+        try:
+            payload = await self._request("GET", "/experiments/baseline", params=params)
+        except APIClientError as e:
+            # Tolerate an older inference-api that predates the /baseline route:
+            # FastAPI then matches "baseline" against /experiments/{id} and 404s.
+            # A missing optional endpoint means "no baseline", not a fatal run
+            # failure — degrade gracefully instead of crashing the agent.
+            if e.status_code == 404:
+                logger.warning(
+                    "GET /experiments/baseline returned 404 — inference-api "
+                    "likely predates the baseline endpoint; treating as 'no "
+                    "baseline'. Update the API to enable baseline anchoring."
+                )
+                return None
+            raise
         if not payload:
             return None
         if not isinstance(payload, dict) or "summary" not in payload:
