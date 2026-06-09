@@ -68,10 +68,12 @@ extra_engine_args:
   - "3"
   - "--enable-prompt-tokens-details"
   - "--enable-force-include-usage"
-  - "--speculative-config.method"
-  - "mtp"
-  - "--speculative-config.num_speculative_tokens"
-  - "1"
+  # MTP self-speculation в JSON-форме — та же запись, что эмитит планировщик,
+  # чтобы diff во вкладке Compare не показывал ложного расхождения по
+  # спекулятиву (dotted-форма --speculative-config.method давала бы отдельные
+  # строки). Для vLLM эквивалентно.
+  - "--speculative-config"
+  - '{"method": "mtp", "num_speculative_tokens": 1}'
   - "--override-generation-config"
   - '{"max_new_tokens": 65536}'
 

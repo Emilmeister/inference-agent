@@ -139,9 +139,57 @@ def _flatten_dict(d: Any, prefix: str = "") -> dict[str, Any]:
     return out
 
 
+_FLAG_PRESENT = "✓ (set)"  # marker for a valueless boolean CLI flag
+
+
+def _parse_cli_tokens(tokens: Any) -> dict[str, Any]:
+    """Parse a flat CLI token list into {flag: value} pairs (order-independent).
+
+    `--flag value`  → {"--flag": "value"}
+    `--flag=value`  → {"--flag": "value"}
+    `--bool-flag`   → {"--bool-flag": _FLAG_PRESENT}   (no following value)
+
+    A token is a flag if it starts with "-"; the next token is its value unless
+    it also starts with "-" (then the flag is valueless). This lets the Compare
+    tab diff engine args flag-by-flag instead of comparing the whole ordered
+    list as one opaque string — so reordered-but-equal arg lists show no diff,
+    and only the genuinely added/removed/changed flags surface.
+    """
+    out: dict[str, Any] = {}
+    if not tokens:
+        return out
+    toks = [str(t) for t in tokens]
+    i, n = 0, len(toks)
+    while i < n:
+        tok = toks[i]
+        if tok.startswith("-"):
+            if tok.startswith("--") and "=" in tok:
+                key, _, val = tok.partition("=")
+                out[key] = val
+                i += 1
+                continue
+            if i + 1 < n and not toks[i + 1].startswith("-"):
+                out[tok] = toks[i + 1]
+                i += 2
+            else:
+                out[tok] = _FLAG_PRESENT
+                i += 1
+        else:
+            # Stray positional token (shouldn't happen for engine args) — keep
+            # it visible rather than silently dropping.
+            out[f"<positional #{i}>"] = tok
+            i += 1
+    return out
+
+
 _COMPARE_IGNORE_KEYS = frozenset({
     # LLM-генерируемый текст — всегда разный, шум в diff
     "rationale",
+    # Уникальный id эксперимента — различается ВСЕГДА, бесполезен в diff
+    "experiment_id",
+    # Метка бейзлайна — это метаданные, не knob запуска; уже показана
+    # звёздочкой ⭐ в лейблах, в diff только шумит ("True" vs "—").
+    "is_baseline",
 })
 
 
@@ -156,10 +204,17 @@ def _runtime_inputs(payload: dict) -> dict[str, Any]:
         "container_image_digest": payload.get("container_image_digest"),
         "benchmark_seed": payload.get("benchmark_seed"),
     }
-    flat_cfg = _flatten_dict(payload.get("config") or {})
+    cfg = dict(payload.get("config") or {})
+    # extra_engine_args is an ordered token list — diffing it as one tuple makes
+    # any reorder or single added flag light up the whole row. Expand it into
+    # per-flag keys so the diff is flag-level and order-independent.
+    engine_args = cfg.pop("extra_engine_args", None)
+    flat_cfg = _flatten_dict(cfg)
     for k in _COMPARE_IGNORE_KEYS:
         flat_cfg.pop(k, None)
     out.update(flat_cfg)
+    for flag, val in _parse_cli_tokens(engine_args).items():
+        out[f"engine_arg {flag}"] = val
     return out
 
 

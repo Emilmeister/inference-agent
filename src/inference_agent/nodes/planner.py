@@ -956,8 +956,15 @@ def _build_experiment_config(
         # builder level, but normalize at config level to keep digests clean.
         num_continuous_decode_steps = output.num_continuous_decode_steps or 1
 
-    # Strip cross-engine env vars
-    extra_env = dict(output.extra_env)
+    # Inherit the operator baseline's container env as the BASE layer so planned
+    # configs don't silently drop the baseline's NCCL/OMP/CUDA tuning (which
+    # would make baseline-vs-agent comparisons unfair — perf deltas could come
+    # from missing env rather than engine knobs). The LLM's own extra_env wins
+    # per-key, so the planner can still deliberately override a specific var.
+    baseline_env: dict[str, str] = {}
+    if config.baseline is not None:
+        baseline_env = dict(config.baseline.extra_env)
+    extra_env = {**baseline_env, **dict(output.extra_env)}
     if engine == EngineType.VLLM:
         for k in list(extra_env.keys()):
             if k.startswith("SGLANG"):
