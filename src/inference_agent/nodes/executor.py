@@ -301,12 +301,44 @@ def _summarize_ceiling_reason(error_details: list[str]) -> str:
     return "slo violation"
 
 
+def _classify_agentic_miss(result: ConcurrencyResult, slo: AgenticSLO) -> str:
+    """Classify a non-viable agentic phase as 'hard' or 'marginal'.
+
+    'hard'     — a real ceiling: any request-level failures over the error SLO,
+                 OR a latency metric (ttft/tpot/e2e) overshooting its SLO by
+                 more than _AGENTIC_MARGINAL_TOLERANCE. Lock the ceiling at once.
+    'marginal' — no excess errors and every violated latency metric sits within
+                 the tolerance band just above its SLO. Could be transient
+                 timing noise → worth one same-level retry before locking.
+    """
+    # Real request failures are never "noise" — straight to hard.
+    if result.error_rate > slo.session_error_rate:
+        return "hard"
+    worst_ratio = 1.0
+    for actual, limit in (
+        (result.ttft_ms.p95, slo.ttft_p95_ms),
+        (result.tpot_ms.p95, slo.tpot_p95_ms),
+        (result.e2e_latency_ms.p95, slo.e2e_p95_ms),
+    ):
+        if limit > 0 and actual > limit:
+            worst_ratio = max(worst_ratio, actual / limit)
+    return "hard" if worst_ratio > 1.0 + _AGENTIC_MARGINAL_TOLERANCE else "marginal"
+
+
 _AGENTIC_SATURATION_RATE = 0.95  # error_rate at/above which we lock the agentic sweep
 
-# After this many consecutive agentic phases miss SLO (full duration, full
-# metrics — NOT a short probe), stop the agentic sweep. One non-viable phase
-# can be transient; two in a row at increasing concurrency is a real ceiling.
-_MAX_CONSECUTIVE_NON_VIABLE_AGENTIC = 2
+# Adaptive agentic ceiling detection. A non-viable agentic phase is either a
+# HARD miss (a real ceiling — stop now) or a MARGINAL miss (a latency metric
+# only just over SLO, no request failures — possibly transient noise, so re-run
+# the SAME concurrency once to confirm before locking). This is better than
+# probing the NEXT, higher concurrency to "confirm": more load is near-certain
+# to fail too, so it wasted ~10 min on a foregone conclusion AND conflated "is
+# this noise?" with "can it take more?". A same-level retry isolates the noise
+# question with identical inputs (same seed).
+#
+# MARGINAL = every violated latency SLO (ttft/tpot/e2e) is within this fraction
+# above its limit, and error_rate is within SLO. Anything worse is HARD.
+_AGENTIC_MARGINAL_TOLERANCE = 0.15  # +15% over an SLO still counts as marginal
 
 # Experiment-level watchdog: after this many consecutive phases die with
 # socket-level errors, we stop the sweep entirely. The engine is gone and
@@ -357,15 +389,39 @@ async def _run_all_phases(
     error_rate_threshold = config.benchmark.phase_error_rate_threshold
     agentic_slo = AgenticSLO.from_config(config.benchmark)
 
-    # Agentic ceiling detection: after two consecutive not-viable phases (SLO
-    # miss) we abort the entire experiment loop. A single bad phase can be
-    # transient — backpressure under burst, GC, network — but two in a row at
-    # increasing concurrency is the ceiling. Since the agentic objective is
-    # primary, a config that lost the agentic race contributes only
-    # informational data via remaining non-agentic phases (peak_throughput,
-    # ttft_p95 at short prompts) — not worth 5-10 min of executor time.
+    async def _run_agentic_phase(c: int, max_o: int, pid: str) -> ConcurrencyResult:
+        """Run one agentic_long_context phase at concurrency `c`.
+
+        Factored out so the adaptive ceiling logic can re-run the SAME level
+        (identical params + seed → identical workload) to confirm a marginal
+        SLO miss is a real ceiling and not transient timing noise.
+        """
+        return await run_agentic_long_context_phase(
+            api_base_url=engine.api_base_url(),
+            model_name=config.model_name,
+            concurrency=c,
+            shared_prefix_tokens=config.benchmark.agentic_shared_prefix_tokens,
+            unique_prompt_tokens=config.benchmark.agentic_unique_prompt_tokens,
+            max_output_tokens=max_o,
+            turns=config.benchmark.agentic_turns_per_session,
+            tool_result_min=config.benchmark.agentic_tool_result_min_tokens,
+            tool_result_max=config.benchmark.agentic_tool_result_max_tokens,
+            session_timeout_sec=config.benchmark.agentic_session_timeout_sec,
+            per_turn_timeout_sec=config.benchmark.agentic_per_turn_timeout_sec,
+            seed=seed,
+            workload_id="agentic_long_context",
+            phase_id=pid,
+            slo=agentic_slo,
+        )
+
+    # Agentic ceiling detection (adaptive). A non-viable agentic phase locks the
+    # ceiling and terminates the experiment — but a MARGINAL miss (latency just
+    # over SLO, no errors) first gets ONE same-level retry to rule out transient
+    # noise; a HARD miss locks immediately. See _classify_agentic_miss. Since the
+    # agentic objective is primary, a config that lost the agentic race
+    # contributes only informational data via remaining phases — not worth the
+    # executor time.
     agentic_ceiling_lock: int | None = None
-    consecutive_non_viable_agentic = 0
 
     # Experiment-level watchdog: count consecutive phases that came back with
     # socket-shaped 100% failure (engine crashed mid-sweep). After the second,
@@ -395,23 +451,7 @@ async def _run_all_phases(
 
         try:
             if is_agentic:
-                result = await run_agentic_long_context_phase(
-                    api_base_url=engine.api_base_url(),
-                    model_name=config.model_name,
-                    concurrency=concurrency,
-                    shared_prefix_tokens=config.benchmark.agentic_shared_prefix_tokens,
-                    unique_prompt_tokens=config.benchmark.agentic_unique_prompt_tokens,
-                    max_output_tokens=max_out,
-                    turns=config.benchmark.agentic_turns_per_session,
-                    tool_result_min=config.benchmark.agentic_tool_result_min_tokens,
-                    tool_result_max=config.benchmark.agentic_tool_result_max_tokens,
-                    session_timeout_sec=config.benchmark.agentic_session_timeout_sec,
-                    per_turn_timeout_sec=config.benchmark.agentic_per_turn_timeout_sec,
-                    seed=seed,
-                    workload_id=workload_id,
-                    phase_id=phase_id,
-                    slo=agentic_slo,
-                )
+                result = await _run_agentic_phase(concurrency, max_out, phase_id)
             else:
                 result = await run_benchmark_phase(
                     api_base_url=engine.api_base_url(),
@@ -426,21 +466,46 @@ async def _run_all_phases(
                     phase_id=phase_id,
                 )
             if not is_warmup:
-                # Agentic phases are gated by full SLO (TTFT + tpot + error
-                # rate + e2e), evaluated by the runner. A non-viable phase is
-                # routed to ceiling_probes regardless of how clean the error
-                # rate looks — meeting throughput at terrible TTFT is not
-                # serving real agent traffic.
+                # Adaptive agentic ceiling. A non-viable agentic phase that is
+                # only MARGINALLY over SLO (latency just past the limit, no
+                # request failures) gets ONE same-level retry first — identical
+                # workload (same seed), so a pass means the first miss was
+                # transient noise and we keep the level. A HARD miss, or a retry
+                # that still fails, is a real ceiling.
+                if is_agentic and not result.viable:
+                    if _classify_agentic_miss(result, agentic_slo) == "marginal":
+                        logger.info(
+                            "  Phase %s MARGINAL agentic miss at c=%d (%s) — "
+                            "re-running the SAME level once to rule out "
+                            "transient noise.",
+                            phase_id, concurrency, "; ".join(result.slo_violations),
+                        )
+                        result = await _run_agentic_phase(concurrency, max_out, phase_id)
+                        if result.viable:
+                            logger.info(
+                                "  Retry at c=%d PASSED (throughput=%.1f tok/s, "
+                                "ttft_p95=%.0fms, tpot_p95=%.1fms) — first miss "
+                                "was transient, keeping this level.",
+                                concurrency, result.output_tokens_per_sec,
+                                result.ttft_ms.p95, result.tpot_ms.p95,
+                            )
+                        else:
+                            logger.info(
+                                "  Retry at c=%d still NOT VIABLE (%s) — "
+                                "confirmed ceiling.",
+                                concurrency, "; ".join(result.slo_violations),
+                            )
+
+                # Agentic phases are gated by full SLO (TTFT + tpot + error rate
+                # + e2e). A still-non-viable phase (hard miss, or a marginal miss
+                # whose retry also failed) is a real ceiling: record the probe,
+                # lock, and terminate — the agentic objective is primary, so the
+                # remaining phases would only add informational data.
                 if is_agentic and not result.viable:
                     reason = (
                         "; ".join(result.slo_violations)
                         if result.slo_violations
                         else _summarize_ceiling_reason(list(result.error_details))
-                    )
-                    logger.info(
-                        "  Phase %s NOT VIABLE at c=%d (%s) — recording as "
-                        "ceiling probe, not a malfunction",
-                        phase_id, concurrency, reason,
                     )
                     ceiling_probes.append(CeilingProbeInfo(
                         phase_id=phase_id,
@@ -451,22 +516,14 @@ async def _run_all_phases(
                         errors=result.errors,
                         reason=reason,
                     ))
-                    consecutive_non_viable_agentic += 1
-                    if (
-                        agentic_ceiling_lock is None
-                        and consecutive_non_viable_agentic
-                        >= _MAX_CONSECUTIVE_NON_VIABLE_AGENTIC
-                    ):
-                        agentic_ceiling_lock = concurrency
-                        logger.info(
-                            "  Agentic ceiling locked at c=%d "
-                            "(%d consecutive non-viable phases) — terminating "
-                            "experiment: this config already lost the agentic "
-                            "SLO race, remaining phases (agentic and non-agentic) "
-                            "would only add 5-10 min of informational data.",
-                            concurrency, consecutive_non_viable_agentic,
-                        )
-                        break
+                    agentic_ceiling_lock = concurrency
+                    logger.info(
+                        "  Agentic ceiling locked at c=%d (%s) — terminating "
+                        "experiment: this config lost the agentic SLO race, "
+                        "remaining phases would only add informational data.",
+                        concurrency, reason,
+                    )
+                    break
                 # Error-rate gate for non-agentic workloads (and agentic
                 # phases that passed SLO but somehow tripped the error gate
                 # — currently impossible since session_error_rate ≤ phase
@@ -515,10 +572,6 @@ async def _run_all_phases(
                             },
                         ))
                 else:
-                    # Viable agentic phase resets the consecutive counter —
-                    # we may yet test higher c successfully.
-                    if is_agentic:
-                        consecutive_non_viable_agentic = 0
                     concurrency_results.append(result)
 
             # Update the dead-engine watchdog regardless of which branch above
