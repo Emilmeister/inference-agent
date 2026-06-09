@@ -123,6 +123,51 @@ def _baseline_badge(row: pd.Series) -> str:
     return "⭐ " if bool(row.get("is_baseline", False)) else ""
 
 
+def _overlay_baseline_point(
+    fig: "go.Figure",
+    frame: pd.DataFrame,
+    x_col: str,
+    y_col: str,
+) -> str | None:
+    """Mark the baseline as a distinct gold ⭐ on a scatter `fig`.
+
+    Coordinates are read from `frame` (the chart's already-filtered data) so the
+    star lands exactly where the baseline's own point sits. No-op (returns None)
+    when there is no baseline in `frame` or it lacks valid coordinates — e.g. the
+    baseline never cleared this chart's SLO/validity filter. Returns the baseline
+    experiment_id when drawn, so callers can avoid double-labelling it.
+    """
+    base = _baseline_row(frame)
+    if base is None:
+        return None
+    x = _as_float(base.get(x_col, 0))
+    y = _as_float(base.get(y_col, 0))
+    if x <= 0 or y <= 0:
+        return None
+    fig.add_trace(go.Scatter(
+        x=[x],
+        y=[y],
+        mode="markers",
+        name="⭐ Baseline (anchor)",
+        marker=dict(
+            size=20,
+            symbol="star",
+            color="gold",
+            line=dict(color="black", width=1.5),
+        ),
+        hovertext=[f"⭐ baseline: {base.get('experiment_id', '')}"],
+        hoverinfo="text+name",
+    ))
+    return str(base.get("experiment_id", "")) or None
+
+
+def _highlight_baseline_rows(row: pd.Series) -> list[str]:
+    """pandas Styler row callback — tint the baseline row gold in a dataframe."""
+    if bool(row.get("is_baseline", False)):
+        return ["background-color: rgba(255, 215, 0, 0.18)"] * len(row)
+    return [""] * len(row)
+
+
 def _flatten_dict(d: Any, prefix: str = "") -> dict[str, Any]:
     """Flatten a nested dict for diffing. Lists become tuples (hashable, comparable)."""
     out: dict[str, Any] = {}
@@ -825,6 +870,9 @@ with tabs[1]:
                 line=dict(color="red", dash="dash", width=2),
                 marker=dict(size=10, symbol="star"),
             ))
+        _overlay_baseline_point(
+            fig, agentic_valid, "agentic_tpot_p95", "max_viable_agentic_concurrency"
+        )
         fig.update_layout(height=480)
         st.plotly_chart(fig, use_container_width=True)
 
@@ -907,6 +955,7 @@ with tabs[1]:
             line_color="green",
             annotation_text=f"Balanced threshold: {latency_threshold_ms} ms",
         )
+        _overlay_baseline_point(fig, valid, "ttft_p95", "peak_throughput")
         fig.update_layout(height=560)
         st.plotly_chart(fig, use_container_width=True)
 
@@ -1415,11 +1464,16 @@ with tabs[6]:
 
 with tabs[7]:
     st.header("Full Comparison")
-    st.dataframe(
-        filtered.sort_values("peak_throughput", ascending=False),
-        use_container_width=True,
-        hide_index=True,
-    )
+    full_sorted = filtered.sort_values("peak_throughput", ascending=False)
+    if "is_baseline" in full_sorted.columns and bool(full_sorted["is_baseline"].any()):
+        st.caption("⭐ Строка бейзлайна (operator anchor) подсвечена золотым.")
+        st.dataframe(
+            full_sorted.style.apply(_highlight_baseline_rows, axis=1),
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.dataframe(full_sorted, use_container_width=True, hide_index=True)
 
     if not phase_df.empty:
         st.subheader("Per-Phase Results")
@@ -2202,6 +2256,24 @@ with tabs[10]:
                 "concurrency": "Concurrent agentic sessions",
             },
         )
+        # Overlay the baseline's own throughput curve so the operator can see how
+        # the anchor compares to the best-per-engine bars at each concurrency.
+        base_summary = _baseline_row(filtered)
+        if base_summary is not None:
+            base_id = str(base_summary.get("experiment_id", ""))
+            base_phases = agentic_phases_df[
+                agentic_phases_df["experiment_id"].astype(str) == base_id
+            ].sort_values("concurrency")
+            if not base_phases.empty:
+                fig_tp.add_trace(go.Scatter(
+                    x=base_phases["concurrency"],
+                    y=base_phases["output_tokens_per_sec"],
+                    mode="lines+markers",
+                    name="⭐ Baseline (anchor)",
+                    line=dict(color="gold", width=3),
+                    marker=dict(size=11, symbol="star",
+                                line=dict(color="black", width=1)),
+                ))
         st.plotly_chart(fig_tp, use_container_width=True)
         with st.expander("Show all runs (not just best per concurrency)"):
             st.caption(
