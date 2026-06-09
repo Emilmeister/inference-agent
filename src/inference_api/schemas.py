@@ -109,7 +109,6 @@ class ExperimentSummaryRow(BaseModel):
     smoke_basic: bool = False
     smoke_tool: bool = False
     smoke_tool_required: bool = False
-    smoke_json: bool = False
     smoke_schema: bool = False
 
     throughput_score: float = 0.0

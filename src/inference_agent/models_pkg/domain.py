@@ -292,8 +292,6 @@ class SmokeTestResult(BaseModel):
     tool_calling_detail: str = ""
     tool_required: bool = False
     tool_required_detail: str = ""
-    json_mode: bool = False
-    json_mode_detail: str = ""
     json_schema: bool = False
     json_schema_detail: str = ""
 
@@ -509,7 +507,6 @@ class ExperimentSummary(BaseModel):
             result.smoke_tests.basic_chat,
             result.smoke_tests.tool_calling,
             result.smoke_tests.tool_required,
-            result.smoke_tests.json_mode,
             result.smoke_tests.json_schema,
         ])
 

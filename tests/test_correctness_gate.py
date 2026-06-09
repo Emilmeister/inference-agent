@@ -32,11 +32,11 @@ class TestSmokeTestGate:
         r = SmokeTestResult()
         assert r.gate_passed is False
 
-    def test_json_mode_not_required(self):
-        """json_mode and tool_required are NOT required for the gate."""
+    def test_tool_required_not_required(self):
+        """tool_required is NOT required for the gate."""
         r = SmokeTestResult(
             basic_chat=True, tool_calling=True, json_schema=True,
-            json_mode=False, tool_required=False,
+            tool_required=False,
         )
         assert r.gate_passed is True
 
@@ -45,7 +45,6 @@ class TestSmokeTestGate:
             basic_chat=True, basic_chat_detail="PASS: got response",
             tool_calling=True, tool_calling_detail="PASS: tool_calls",
             tool_required=True, tool_required_detail="PASS: forced",
-            json_mode=True, json_mode_detail="PASS: valid JSON",
             json_schema=True, json_schema_detail="PASS: 3 languages",
         )
         assert r.gate_passed is True

@@ -971,7 +971,6 @@ with tabs[3]:
         "smoke_basic",
         "smoke_tool",
         "smoke_tool_required",
-        "smoke_json",
         "smoke_schema",
     ]
     smoke_summary = pd.DataFrame({
@@ -1015,7 +1014,6 @@ with tabs[3]:
                     "smoke_basic",
                     "smoke_tool",
                     "smoke_tool_required",
-                    "smoke_json",
                     "smoke_schema",
                     "time_to_healthy_sec",
                     "duration_s",
@@ -1919,7 +1917,6 @@ with tabs[9]:
             ("Smoke: basic chat", "smoke_basic"),
             ("Smoke: tool calling", "smoke_tool"),
             ("Smoke: tool_required", "smoke_tool_required"),
-            ("Smoke: json_object", "smoke_json"),
             ("Smoke: json_schema", "smoke_schema"),
             ("Post-bench basic chat", "post_basic_chat"),
             ("Gate passed (overall)", "correctness_gate_passed"),

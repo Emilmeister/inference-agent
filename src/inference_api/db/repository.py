@@ -98,7 +98,6 @@ SELECT
     COALESCE((data->'smoke_tests'->>'basic_chat')::bool, false) AS smoke_basic,
     COALESCE((data->'smoke_tests'->>'tool_calling')::bool, false) AS smoke_tool,
     COALESCE((data->'smoke_tests'->>'tool_required')::bool, false) AS smoke_tool_required,
-    COALESCE((data->'smoke_tests'->>'json_mode')::bool, false) AS smoke_json,
     COALESCE((data->'smoke_tests'->>'json_schema')::bool, false) AS smoke_schema,
     COALESCE((data->'scores'->>'throughput_score')::float, 0) AS throughput_score,
     COALESCE((data->'scores'->>'latency_score')::float, 0) AS latency_score,

@@ -840,7 +840,6 @@ async def executor_node(state: AgentState) -> dict:
                         "basic_chat": smoke_results.basic_chat_detail,
                         "tool_calling": smoke_results.tool_calling_detail,
                         "tool_required": smoke_results.tool_required_detail,
-                        "json_mode": smoke_results.json_mode_detail,
                         "json_schema": smoke_results.json_schema_detail,
                     },
                 )],

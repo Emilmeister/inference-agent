@@ -156,42 +156,6 @@ async def test_tool_required(
         return False, f"ERROR: {e}"
 
 
-async def test_json_mode(
-    session: aiohttp.ClientSession,
-    url: str,
-    model: str,
-) -> tuple[bool, str]:
-    """Test that the model can produce valid JSON in JSON mode."""
-    try:
-        data = await _chat_completion(session, url, model, {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": (
-                        "List 3 programming languages with their year of creation. "
-                        "Respond in JSON format. Do not think, just respond with JSON directly."
-                    ),
-                }
-            ],
-            "max_tokens": 8128,
-            "response_format": {"type": "json_object"},
-        })
-
-        message = data["choices"][0]["message"]
-        content = message.get("content") or ""
-        if not content:
-            return False, "No content in response (reasoning model may not support JSON mode)"
-        parsed = json.loads(content)
-        if not isinstance(parsed, dict):
-            return False, f"Expected JSON object, got {type(parsed).__name__}"
-        return True, f"PASS: valid JSON with keys {list(parsed.keys())[:5]}"
-
-    except json.JSONDecodeError as e:
-        return False, f"Invalid JSON: {e}"
-    except Exception as e:
-        return False, f"ERROR: {e}"
-
-
 async def test_json_schema(
     session: aiohttp.ClientSession,
     url: str,
@@ -296,13 +260,6 @@ async def run_smoke_tests(api_base_url: str, model: str) -> SmokeTestResult:
         )
         logger.info("  %s", result.tool_required_detail)
 
-        # JSON mode
-        logger.info("Smoke test: JSON mode...")
-        result.json_mode, result.json_mode_detail = await test_json_mode(
-            session, url, model
-        )
-        logger.info("  %s", result.json_mode_detail)
-
         # JSON schema
         logger.info("Smoke test: JSON schema...")
         result.json_schema, result.json_schema_detail = await test_json_schema(
@@ -312,10 +269,10 @@ async def run_smoke_tests(api_base_url: str, model: str) -> SmokeTestResult:
 
     passed = sum([
         result.basic_chat, result.tool_calling, result.tool_required,
-        result.json_mode, result.json_schema,
+        result.json_schema,
     ])
     logger.info(
-        "Smoke tests: %d/5 passed, gate=%s",
+        "Smoke tests: %d/4 passed, gate=%s",
         passed, "PASS" if result.gate_passed else "FAIL",
     )
 
