@@ -202,8 +202,20 @@ async def test_json_schema(
     session: aiohttp.ClientSession,
     url: str,
     model: str,
+    *,
+    enable_thinking: bool = True,
 ) -> tuple[bool, str, dict | None]:
-    """Test structured output with a JSON schema."""
+    """Test structured output with a JSON schema.
+
+    Reasoning models frequently break guided decoding: the engine constrains the
+    visible channel to the schema while the model wants to emit a reasoning
+    preamble, so it either returns empty ``content`` (all text went to
+    ``reasoning_content``) or violates the grammar. Passing
+    ``chat_template_kwargs={"enable_thinking": false}`` (a vLLM/SGLang chat-
+    template knob) suppresses the thinking channel so structured output has a
+    clean path. We run BOTH variants and the gate passes if either works — see
+    run_smoke_tests.
+    """
     schema = {
         "type": "json_schema",
         "json_schema": {
@@ -231,18 +243,24 @@ async def test_json_schema(
         },
     }
 
+    payload = {
+        "messages": [
+            {
+                "role": "user",
+                "content": "List 3 programming languages with their year of creation. Do not think, just respond directly.",
+            }
+        ],
+        "max_tokens": 8128,
+        "response_format": schema,
+    }
+    if not enable_thinking:
+        # vLLM/SGLang chat-template knob — suppress the reasoning channel so
+        # guided decoding has a clean path to the schema-constrained output.
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
+
     data = None
     try:
-        data = await _chat_completion(session, url, model, {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "List 3 programming languages with their year of creation. Do not think, just respond directly.",
-                }
-            ],
-            "max_tokens": 8128,
-            "response_format": schema,
-        })
+        data = await _chat_completion(session, url, model, payload)
 
         message = data["choices"][0]["message"]
         content = message.get("content") or ""
@@ -314,12 +332,26 @@ async def run_smoke_tests(api_base_url: str, model: str) -> SmokeTestResult:
         )
         _log_outcome("tool required", result.tool_required, result.tool_required_detail, raw)
 
-        # JSON schema
-        logger.info("Smoke test: JSON schema...")
-        result.json_schema, result.json_schema_detail, raw = await test_json_schema(
-            session, url, model
+        # JSON schema — two variants. Reasoning models often break guided
+        # decoding with thinking ON, so we also try with the reasoning channel
+        # suppressed. Gate passes if EITHER variant produces valid output.
+        logger.info("Smoke test: JSON schema (thinking on)...")
+        ok_think, detail_think, raw_think = await test_json_schema(
+            session, url, model, enable_thinking=True
         )
-        _log_outcome("json schema", result.json_schema, result.json_schema_detail, raw)
+        _log_outcome("json schema [thinking on]", ok_think, detail_think, raw_think)
+
+        logger.info("Smoke test: JSON schema (thinking off)...")
+        ok_nothink, detail_nothink, raw_nothink = await test_json_schema(
+            session, url, model, enable_thinking=False
+        )
+        _log_outcome("json schema [thinking off]", ok_nothink, detail_nothink, raw_nothink)
+
+        result.json_schema = ok_think or ok_nothink
+        result.json_schema_detail = (
+            f"thinking_on={'PASS' if ok_think else 'FAIL'} ({detail_think}); "
+            f"thinking_off={'PASS' if ok_nothink else 'FAIL'} ({detail_nothink})"
+        )
 
     passed = sum([
         result.basic_chat, result.tool_calling, result.tool_required,
