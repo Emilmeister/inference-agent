@@ -192,9 +192,80 @@ _COMPARE_IGNORE_KEYS = frozenset({
     "is_baseline",
 })
 
+# nerdctl-level flags from build_common_container_args — container plumbing, not
+# engine knobs.
+_NERDCTL_FLAGS = frozenset({"--name", "--gpus", "--shm-size", "--network"})
+# Injected by the engine builder for EVERY run (identical) — not a tunable knob.
+_INJECTED_ENGINE_FLAGS = frozenset({"--model", "--model-path", "--host", "--port"})
+# Env the harness force-adds to every container (offline mode / token) — not a
+# user/LLM knob, so excluded from the env diff.
+_HARNESS_ENV = frozenset({"HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_TOKEN"})
+
+
+def _engine_flags_from_argv(container_args: Any) -> dict[str, Any]:
+    """Extract the real, post-dedup engine serve flags from the launched argv.
+
+    ``container_args`` is the full ``nerdctl run ... <image> <serve flags>`` token
+    list that was actually executed — after ``dedup_flags`` merged config.yaml's
+    always-appended ``vllm_extra_args`` into the per-experiment ones. Diffing THIS
+    instead of ``config.extra_engine_args`` is what kills the phantom diffs:
+
+      * ``--reasoning-parser`` / ``--tool-call-parser`` / ``--enable-auto-tool-choice``
+        are appended from config.yaml to every run, so the baseline omits them
+        from its stored config while planned runs carry them — but in the real
+        command both have them.
+      * ``--speculative-config`` lives in the baseline's raw extra_engine_args but
+        in a structured field for planned runs — same flag, different slot.
+
+    Sourcing from the executed command makes both sides line up. Drops nerdctl
+    plumbing, the injected model/host/port, and ``-e`` env tokens (env is diffed
+    separately from ``config.extra_env``).
+    """
+    flags: dict[str, Any] = {}
+    if not container_args:
+        return flags
+    toks = [str(t) for t in container_args]
+    i, n = 0, len(toks)
+    while i < n:
+        tok = toks[i]
+        if tok.startswith("--"):
+            if "=" in tok:
+                key, _, val = tok.partition("=")
+                consume = 1
+            elif i + 1 < n and not toks[i + 1].startswith("-"):
+                key, val, consume = tok, toks[i + 1], 2
+            else:
+                key, val, consume = tok, _FLAG_PRESENT, 1
+            if key not in _NERDCTL_FLAGS and key not in _INJECTED_ENGINE_FLAGS:
+                flags[key] = val
+            i += consume
+        else:
+            # positionals (nerdctl/run/image/python3/...) and short flags
+            # (-d, -v <vol>, -e <KEY=VAL>, -m <mod>) — not engine knobs.
+            i += 1
+    return flags
+
+
+def _env_inputs_from_config(cfg: dict) -> dict[str, Any]:
+    """User/LLM-set container env, excluding harness-injected vars.
+
+    config.extra_env is a faithful source (config.yaml appends only engine args,
+    never env), so unlike extra_engine_args it does not suffer the slot-mismatch
+    problem and can be diffed directly.
+    """
+    env = cfg.get("extra_env") or {}
+    return {f"env {k}": v for k, v in env.items() if k not in _HARNESS_ENV}
+
 
 def _runtime_inputs(payload: dict) -> dict[str, Any]:
-    """Snapshot of fields that describe HOW the run was launched (inputs, not measurements)."""
+    """Snapshot of fields that describe HOW the run was launched (inputs, not measurements).
+
+    Engine flags come from the actually-executed ``container_args`` (ground truth
+    after dedup), so the same setting stored in different slots (config field vs
+    raw extra_engine_args vs config.yaml append) compares equal on both sides.
+    Falls back to the legacy config-field view for experiments recorded before
+    ``container_args`` was captured.
+    """
     if not payload:
         return {}
     out: dict[str, Any] = {
@@ -205,16 +276,23 @@ def _runtime_inputs(payload: dict) -> dict[str, Any]:
         "benchmark_seed": payload.get("benchmark_seed"),
     }
     cfg = dict(payload.get("config") or {})
-    # extra_engine_args is an ordered token list — diffing it as one tuple makes
-    # any reorder or single added flag light up the whole row. Expand it into
-    # per-flag keys so the diff is flag-level and order-independent.
-    engine_args = cfg.pop("extra_engine_args", None)
-    flat_cfg = _flatten_dict(cfg)
-    for k in _COMPARE_IGNORE_KEYS:
-        flat_cfg.pop(k, None)
-    out.update(flat_cfg)
-    for flag, val in _parse_cli_tokens(engine_args).items():
-        out[f"engine_arg {flag}"] = val
+    container_args = payload.get("container_args")
+    if container_args:
+        # Engine flags from the real command; env from the faithful config field.
+        for flag, val in _engine_flags_from_argv(container_args).items():
+            out[f"engine_arg {flag}"] = val
+        out.update(_env_inputs_from_config(cfg))
+    else:
+        # Legacy fallback: structured config fields + per-flag extra_engine_args.
+        # Suffers the slot-mismatch phantom diffs, but it's the best we have for
+        # experiments predating container_args capture.
+        engine_args = cfg.pop("extra_engine_args", None)
+        flat_cfg = _flatten_dict(cfg)
+        for k in _COMPARE_IGNORE_KEYS:
+            flat_cfg.pop(k, None)
+        out.update(flat_cfg)
+        for flag, val in _parse_cli_tokens(engine_args).items():
+            out[f"engine_arg {flag}"] = val
     return out
 
 
