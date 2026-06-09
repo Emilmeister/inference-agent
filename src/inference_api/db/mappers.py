@@ -65,6 +65,7 @@ def result_to_row(result: ExperimentResult) -> ExperimentRow:
         peak_throughput=result.benchmark.peak_output_tokens_per_sec,
         low_concurrency_ttft_p95=result.benchmark.low_concurrency_ttft_p95_ms,
         max_model_len=max_model_len,
+        is_baseline=result.is_baseline,
         data=result.model_dump(mode="json"),
     )
 

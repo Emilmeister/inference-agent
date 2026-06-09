@@ -45,6 +45,13 @@ class ExperimentRow(Base):
     peak_throughput: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     low_concurrency_ttft_p95: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 
+    # Operator-defined baseline anchor. Indexed flat column so the dashboard
+    # and the agent's `find_baseline` lookup can locate the reference run for a
+    # hardware+model without unpacking JSONB.
+    is_baseline: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, index=True
+    )
+
     # Effective max context the engine was launched with: either the launch
     # flag (`config.max_model_len`) when the planner pinned it, or the
     # model's intrinsic max from HF config (`hardware.model_max_context`)

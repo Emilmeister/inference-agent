@@ -111,7 +111,8 @@ SELECT
     COALESCE((data->'benchmark'->>'agentic_tpot_p95_ms')::float, 0) AS agentic_tpot_p95,
     COALESCE((data->'benchmark'->>'agentic_ttft_p95_ms')::float, 0) AS agentic_ttft_p95,
     COALESCE((data->'scores'->>'agentic_score')::float, 0) AS agentic_score,
-    COALESCE((data->'scores'->>'is_agentic_pareto_optimal')::bool, false) AS is_agentic_pareto
+    COALESCE((data->'scores'->>'is_agentic_pareto_optimal')::bool, false) AS is_agentic_pareto,
+    is_baseline
 FROM experiments
 """
 
@@ -271,6 +272,36 @@ class ExperimentRepository:
             seen.add(row.experiment_id)
             summaries.append(row_to_summary(row))
         return summaries
+
+    async def find_baseline(
+        self,
+        hardware: HardwareProfile,
+        model_name: str,
+    ) -> ExperimentSummary | None:
+        """Return the most-recent baseline run for this hardware+model, or None.
+
+        Used by the agent's `find_baseline` lookup (anchor + skip re-running)
+        and by the dashboard to highlight the reference configuration.
+        """
+        _assert_homogeneous(hardware)
+        primary = hardware.gpus[0]
+
+        query = (
+            select(ExperimentRow)
+            .where(
+                ExperimentRow.is_baseline.is_(True),
+                ExperimentRow.gpu_name == primary.name,
+                ExperimentRow.gpu_count == hardware.gpu_count,
+                ExperimentRow.gpu_vram_mb == primary.vram_total_mb,
+                ExperimentRow.nvlink_available == hardware.nvlink_available,
+                ExperimentRow.model_name == model_name,
+            )
+            .order_by(ExperimentRow.created_at.desc())
+            .limit(1)
+        )
+        async with self._sessionmaker() as session:
+            row = (await session.execute(query)).scalars().first()
+        return row_to_summary(row) if row is not None else None
 
     # ── Dashboard projections ──────────────────────────────────────────────
 

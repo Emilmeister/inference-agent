@@ -59,10 +59,12 @@ def _apply_api_env_overrides(raw: dict) -> None:
             section[field] = os.environ[env_name]
 
 
-def _load_config(path: str) -> AgentConfig:
+def _load_config(path: str, baseline_path: str | None = None) -> AgentConfig:
     """Load and validate config from YAML file.
 
     Env vars override agent_llm and api fields (AGENT_LLM_* / AGENT_API_*).
+    If `baseline_path` is given and the file exists, it is parsed as an
+    ExperimentConfig and attached as `config.baseline` (the operator anchor).
     """
     with open(path) as f:
         raw = yaml.safe_load(f)
@@ -76,6 +78,13 @@ def _load_config(path: str) -> AgentConfig:
 
     _apply_agent_llm_env_overrides(raw)
     _apply_api_env_overrides(raw)
+
+    # Baseline anchor — separate file (default baseline.yaml). Shaped like an
+    # ExperimentConfig. Inline `baseline:` in config.yaml takes precedence if
+    # someone set it there; otherwise the side file wins.
+    if baseline_path and os.path.exists(baseline_path) and "baseline" not in raw:
+        with open(baseline_path) as bf:
+            raw["baseline"] = yaml.safe_load(bf)
 
     return AgentConfig(**raw)
 
@@ -129,6 +138,11 @@ async def _run(config: AgentConfig) -> None:
             "current_config": None,
             "current_result": None,
             "skip_executor": False,
+            # Baseline anchor: pending iff an operator baseline is configured.
+            # history_loader downgrades this to False when a baseline already
+            # exists in the DB for this hardware/model (don't re-run it).
+            "baseline_pending": config.baseline is not None,
+            "baseline_summary": None,
         }
 
         logger.info("Starting inference benchmark agent")
@@ -190,6 +204,15 @@ def main() -> None:
         help="Path to config file (default: config.yaml)",
     )
     parser.add_argument(
+        "--baseline",
+        default="baseline.yaml",
+        help=(
+            "Path to baseline launch config (default: baseline.yaml). When the "
+            "file exists it is run as the anchor experiment #1 and highlighted "
+            "as the baseline in the dashboard. Missing file → no baseline."
+        ),
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="Enable verbose logging",
@@ -213,7 +236,7 @@ def main() -> None:
         print(f"Config file not found: {args.config}", file=sys.stderr)
         sys.exit(1)
 
-    config = _load_config(args.config)
+    config = _load_config(args.config, baseline_path=args.baseline)
     asyncio.run(_run(config))
 
 

@@ -7,7 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from inference_agent.models_pkg.domain import EngineType
+from inference_agent.models_pkg.domain import EngineType, ExperimentConfig
 
 
 class AgentLLMConfig(BaseModel):
@@ -250,3 +250,12 @@ class AgentConfig(BaseModel):
     # Natural language instructions for the LLM planner
     # e.g. "Try chunked_prefill_size=4096 with SGLang."
     planner_instructions: str = ""
+
+    # Operator-defined baseline launch config (loaded from baseline.yaml by the
+    # CLI). When set AND no baseline yet exists in the DB for this hardware +
+    # model, the agent runs it deterministically as experiment #1 — NOT via the
+    # LLM planner — so the benchmark harness measures a real anchor. The planner
+    # then iterates ON these measured numbers, and the dashboard highlights the
+    # agent's impact relative to them. None → legacy behavior (LLM plans every
+    # experiment, including the first "baseline").
+    baseline: ExperimentConfig | None = None

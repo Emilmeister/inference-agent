@@ -20,6 +20,7 @@ from inference_api.auth import require_bearer
 from inference_api.db.repository import ExperimentRepository
 from inference_api.schemas import (
     AgenticTurnRow,
+    BaselineResponse,
     CreateExperimentResponse,
     DeleteResponse,
     ExperimentDetailResponse,
@@ -101,6 +102,38 @@ async def get_top(
         limit=limit,
     )
     return TopHistoryResponse(summaries=summaries)
+
+
+@router.get("/baseline", response_model=BaselineResponse)
+async def get_baseline(
+    request: Request,
+    gpu_name: str = Query(...),
+    gpu_count: int = Query(..., ge=1),
+    gpu_vram_mb: int = Query(..., ge=1),
+    nvlink_available: bool = Query(...),
+    model_name: str = Query(...),
+) -> BaselineResponse:
+    """The operator-defined baseline for this hardware+model, or null.
+
+    Used by the agent to anchor the planner (and skip re-running an existing
+    baseline) and by the dashboard to highlight the reference configuration.
+    """
+    hardware = HardwareProfile(
+        gpus=[GPUInfo(
+            index=0,
+            name=gpu_name,
+            vram_total_mb=gpu_vram_mb,
+            vram_free_mb=0,
+        )],
+        gpu_count=gpu_count,
+        nvlink_available=nvlink_available,
+        model_name=model_name,
+    )
+    summary = await _repo(request).find_baseline(
+        hardware=hardware,
+        model_name=model_name,
+    )
+    return BaselineResponse(summary=summary)
 
 
 # ── Dashboard projections ──────────────────────────────────────────────────

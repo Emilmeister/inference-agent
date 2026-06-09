@@ -168,29 +168,13 @@ api:
 # Пиши сюда на какие параметры обратить внимание, что попробовать,
 # что пропустить и т.д.
 planner_instructions: |
-  Отталкивайся в vllm от baseline (нельзя делать модель text-only):
-  vllm serve /models/zai-org/GLM-4.7-FP8 \
-            --host 0.0.0.0 \
-            --port 8080 \
-            --stream-interval 2 \
-            --async-scheduling \
-            --trust-remote-code \
-            --scheduling-policy fcfs \
-            --max-model-len 202752 \
-            --max-num-batched-tokens 16384 \
-            --gpu-memory-utilization 0.88 \
-            --enable-expert-parallel \
-            --tensor-parallel-size 8 \
-            --kv-cache-dtype fp8_e4m3 \
-            --max-num-seqs 48 \
-            --optimization-level 3 \
-            --enable-prefix-caching \
-            --enable-chunked-prefill \
-            --enable-prompt-tokens-details \
-            --enable-force-include-usage \
-            --speculative-config.method mtp \
-            --speculative-config.num_speculative_tokens 1 \
-            --reasoning-parser glm45 \
-            --tool-call-parser glm47 --enable-auto-tool-choice \
-            --override-generation-config '{"max_new_tokens": 65536}'
+  Бейзлайн вынесен в отдельный baseline.yaml и прогоняется как измеренный
+  эксперимент #1 — планировщик получает его точную команду и реальные метрики
+  в блоке "## BASELINE — operator anchor" и итерирует ОТ него (по одному knob
+  за раз). НЕ генерируй generic-бейзлайн заново.
+
+  Жёсткие инварианты модели (нельзя выкидывать, иначе ломается корректность):
+  не делать модель text-only — всегда сохраняй tool-call-parser glm47,
+  reasoning-parser glm45, enable-auto-tool-choice, trust-remote-code и
+  override-generation-config. Эти флаги уже идут из container.vllm_extra_args.
 

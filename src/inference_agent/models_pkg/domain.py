@@ -130,6 +130,13 @@ class ExperimentConfig(BaseModel):
     # LLM rationale
     rationale: str = ""
 
+    # Metadata — NOT an engine knob. True when this config came from the
+    # operator-provided baseline.yaml (run deterministically as the anchor
+    # experiment), False for LLM-planned configs. Deliberately excluded from
+    # config_digest so it never affects the planner's "never repeat exact
+    # config" dedup or leaderboard identity.
+    is_baseline: bool = False
+
 
 # ── Benchmark Results ──────────────────────────────────────────────────────
 
@@ -400,6 +407,12 @@ class ExperimentResult(BaseModel):
     correctness_gate_passed: bool = False
     post_benchmark_correctness: SmokeTestResult | None = None  # re-check after load
 
+    # True when this is the operator-defined baseline run (from baseline.yaml),
+    # used as the anchor the agent improves upon. Surfaced to the dashboard and
+    # the planner so baseline metrics can be highlighted and the agent's impact
+    # measured against them.
+    is_baseline: bool = False
+
     # Agentic phases that hit SLO at a given concurrency without indicating
     # an engine bug. Informational, NOT counted in `errors` and NOT promoted
     # to status=partial. See executor._classify_phase_outcome.
@@ -454,6 +467,7 @@ class ExperimentSummary(BaseModel):
     llm_commentary: str = ""
     container_command: str = ""
     rationale: str = ""
+    is_baseline: bool = False
 
     @classmethod
     def from_result(cls, result: ExperimentResult) -> ExperimentSummary:
@@ -561,6 +575,7 @@ class ExperimentSummary(BaseModel):
             agentic_concurrencies_probed=probed_agentic_c,
             agentic_concurrencies_viable=viable_agentic_c,
             agentic_concurrencies_ceiling=ceiling_agentic_c,
+            is_baseline=result.is_baseline,
         )
 
 

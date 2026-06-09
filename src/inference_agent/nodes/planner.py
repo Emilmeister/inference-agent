@@ -52,7 +52,7 @@ the next configuration to benchmark for an LLM inference engine running on a GPU
 
 ## Optimization Goal
 {optimization_goal}
-
+{baseline_block}
 ## Top Results from Prior Runs (same hardware + model, loaded from DB)
 These are the best already-measured configurations on this exact hardware/model from \
 previous sessions. Treat them as a strong starting point: prefer iterating ON them \
@@ -93,7 +93,10 @@ overridden with the fixed value regardless of what you emit; you may emit \
 any plausible value to satisfy the JSON schema.
 1. For BASELINES: use default params — no speculative decoding, \
 kv_cache_dtype=auto, scheduling_policy=fcfs. ENABLE prefix caching (it is \
-mandatory under the agentic goal — see Rule 3a — and harmless elsewhere).
+mandatory under the agentic goal — see Rule 3a — and harmless elsewhere). \
+SKIP THIS RULE ENTIRELY when a `## BASELINE — operator anchor` block is \
+present above: that measured config IS the baseline, you must iterate on it \
+(one knob at a time), NOT emit a fresh generic baseline.
 2. After baselines, analyze trends and improve based on the optimization goal.
 3. PRIMARY GOAL — "optimize_agentic" (maximize parallel agents under SLO). \
 The headline metric is `agentic.max_viable_concurrency`. Levers, in order \
@@ -294,6 +297,65 @@ range (config-side: lower agentic_concurrency_levels or relax SLO).
 {user_instructions}
 Generate the next experiment configuration.
 """
+
+
+def _format_baseline_block(baseline: ExperimentSummary | None) -> str:
+    """Render the measured-baseline anchor block for the planner prompt.
+
+    Empty string when no baseline has been measured yet (the agent then plans
+    every experiment from scratch as before). When present, the planner is told
+    to iterate ON these exact numbers — change one knob at a time and justify
+    the expected impact relative to the baseline.
+    """
+    if baseline is None:
+        return ""
+
+    digest = json.dumps(baseline.config_digest, indent=2)
+    cmd = baseline.container_command or "(command not recorded)"
+    return (
+        "\n## BASELINE — operator anchor (MEASURED, experiment {bid})\n"
+        "This is the operator-defined reference configuration, run through the "
+        "SAME benchmark harness. It is the config you must IMPROVE UPON. Treat "
+        "it as the origin of your search, not a generic default.\n\n"
+        "### Baseline launch command (exact)\n"
+        "```\n{cmd}\n```\n\n"
+        "### Baseline config digest\n"
+        "```json\n{digest}\n```\n\n"
+        "### Baseline measured metrics\n"
+        "- engine: {engine}\n"
+        "- max_viable_agents (PRIMARY): {max_agents}\n"
+        "- agentic_tpot_p95: {agentic_tpot:.1f} ms\n"
+        "- agentic_ttft_p95: {agentic_ttft:.1f} ms\n"
+        "- agentic_peak_throughput: {agentic_tp:.1f} tok/s\n"
+        "- cold-start TTFT p95 (c=1): {ttft:.1f} ms\n"
+        "- raw peak throughput (info): {peak_tp:.1f} tok/s\n"
+        "- correctness gate passed: {gate}\n\n"
+        "### How to use the baseline\n"
+        "- START from the baseline's exact flags. Change ONE knob per "
+        "experiment and NAME, in your rationale, the expected impact vs "
+        "baseline (e.g. 'raise gpu_memory_utilization 0.88→0.92 to add KV "
+        "budget → more parallel agents').\n"
+        "- NEVER silently drop a baseline flag that the model needs to stay "
+        "correct (tool-call parser, reasoning parser, trust-remote-code, "
+        "generation-config overrides). Removing them is a regression, not an "
+        "optimization.\n"
+        "- If you beat the baseline on the PRIMARY metric (max_viable_agents) "
+        "without breaking the correctness gate, that is a win worth building "
+        "on; if you fall below it, revert toward the baseline and try a "
+        "different single knob.\n"
+    ).format(
+        bid=baseline.experiment_id,
+        cmd=cmd,
+        digest=digest,
+        engine=baseline.engine.value,
+        max_agents=baseline.agentic_max_viable_concurrency,
+        agentic_tpot=baseline.agentic_tpot_p95,
+        agentic_ttft=baseline.agentic_ttft_p95,
+        agentic_tp=baseline.agentic_peak_throughput,
+        ttft=baseline.low_concurrency_ttft_p95,
+        peak_tp=baseline.peak_throughput,
+        gate=baseline.correctness_gate_passed,
+    )
 
 
 def _aggregate_failure_patterns(history: list[ExperimentSummary]) -> str:
@@ -595,10 +657,22 @@ async def planner_node(state: AgentState) -> dict:
     if config.planner_instructions:
         user_instructions = f"\n## User Instructions\n{config.planner_instructions}\n"
 
+    # Baseline anchor: prefer the explicit baseline_summary (from history_loader
+    # / this session's measured baseline); fall back to scanning session history
+    # for the is_baseline entry in case state was reconstructed.
+    baseline_summary = state.get("baseline_summary")
+    if baseline_summary is None:
+        for h in history:
+            if getattr(h, "is_baseline", False):
+                baseline_summary = h
+                break
+    baseline_block = _format_baseline_block(baseline_summary)
+
     prompt = _PROMPT_HEADER.format(
         hardware_json=hardware.model_dump_json(indent=2),
         engine_instruction=engine_instruction,
         optimization_goal=goal.value,
+        baseline_block=baseline_block,
         history_json=json.dumps(history_for_llm, indent=2) if history_for_llm else "No experiments yet.",
         loaded_top_history_json=(
             json.dumps(loaded_top_for_llm, indent=2)

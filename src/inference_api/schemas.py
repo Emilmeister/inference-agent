@@ -38,6 +38,12 @@ class TopHistoryResponse(BaseModel):
     summaries: list[ExperimentSummary]
 
 
+class BaselineResponse(BaseModel):
+    """The operator-defined baseline for a hardware+model, or null if none."""
+
+    summary: ExperimentSummary | None = None
+
+
 class ExperimentSummaryRow(BaseModel):
     """Compact dashboard projection — one row per experiment.
 
@@ -120,6 +126,8 @@ class ExperimentSummaryRow(BaseModel):
     agentic_score: float = 0.0
     is_agentic_pareto: bool = False
 
+    is_baseline: bool = False
+
 
 class ExperimentPhaseRow(BaseModel):
     experiment_id: str
@@ -188,6 +196,7 @@ class ExperimentDetailResponse(BaseModel):
 # Re-export so route signatures read cleanly.
 __all__ = [
     "AgenticTurnRow",
+    "BaselineResponse",
     "CreateExperimentResponse",
     "DeleteResponse",
     "ExperimentDetailResponse",

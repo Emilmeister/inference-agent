@@ -43,17 +43,37 @@ async def test_history_loader_populates_state():
     client = AsyncMock(spec=ExperimentApiClient)
     summaries = [_summary("a"), _summary("b")]
     client.find_top_for_hardware.return_value = summaries
+    client.find_baseline.return_value = None  # no baseline yet
 
     node = make_history_loader_node(client)
     config = AgentConfig(model_name="Qwen/Qwen2.5-7B-Instruct")
     out = await node({"config": config, "hardware": _hw()})
 
-    assert out == {"loaded_top_history": summaries}
+    assert out["loaded_top_history"] == summaries
+    # No baseline in DB and none configured → not pending.
+    assert out["baseline_pending"] is False
     client.find_top_for_hardware.assert_awaited_once()
     kwargs = client.find_top_for_hardware.call_args.kwargs
     assert kwargs["model_name"] == "Qwen/Qwen2.5-7B-Instruct"
     assert kwargs["limit"] == 2
     assert kwargs["latency_threshold_ms"] == config.benchmark.latency_threshold_ms
+
+
+@pytest.mark.asyncio
+async def test_history_loader_anchors_on_existing_baseline():
+    client = AsyncMock(spec=ExperimentApiClient)
+    client.find_top_for_hardware.return_value = []
+    baseline = _summary("base")
+    baseline.is_baseline = True
+    client.find_baseline.return_value = baseline
+
+    node = make_history_loader_node(client)
+    config = AgentConfig(model_name="Qwen/Qwen2.5-7B-Instruct")
+    out = await node({"config": config, "hardware": _hw()})
+
+    # Existing baseline → surfaced and NOT pending (don't re-run).
+    assert out["baseline_summary"] is baseline
+    assert out["baseline_pending"] is False
 
 
 @pytest.mark.asyncio

@@ -101,6 +101,86 @@ def _summary_label(row: pd.Series) -> str:
     )
 
 
+def _baseline_row(frame: pd.DataFrame) -> pd.Series | None:
+    """Return the most-recent baseline row in `frame`, or None.
+
+    Baseline rows carry is_baseline=True (operator anchor). When several exist
+    (re-runs over time) the newest by timestamp wins so the dashboard always
+    measures impact against the latest reference.
+    """
+    if frame.empty or "is_baseline" not in frame.columns:
+        return None
+    base = frame[frame["is_baseline"] == True]  # noqa: E712 — pandas mask
+    if base.empty:
+        return None
+    if "timestamp" in base.columns and base["timestamp"].notna().any():
+        return base.sort_values("timestamp", ascending=False).iloc[0]
+    return base.iloc[0]
+
+
+def _baseline_badge(row: pd.Series) -> str:
+    """Short marker prefix for a row that is the baseline (else empty)."""
+    return "⭐ " if bool(row.get("is_baseline", False)) else ""
+
+
+def _flatten_dict(d: Any, prefix: str = "") -> dict[str, Any]:
+    """Flatten a nested dict for diffing. Lists become tuples (hashable, comparable)."""
+    out: dict[str, Any] = {}
+    if not isinstance(d, dict):
+        return out
+    for k, v in d.items():
+        key = f"{prefix}.{k}" if prefix else str(k)
+        if isinstance(v, dict):
+            out.update(_flatten_dict(v, key))
+        elif isinstance(v, list):
+            out[key] = tuple(v)
+        else:
+            out[key] = v
+    return out
+
+
+_COMPARE_IGNORE_KEYS = frozenset({
+    # LLM-генерируемый текст — всегда разный, шум в diff
+    "rationale",
+})
+
+
+def _runtime_inputs(payload: dict) -> dict[str, Any]:
+    """Snapshot of fields that describe HOW the run was launched (inputs, not measurements)."""
+    if not payload:
+        return {}
+    out: dict[str, Any] = {
+        "engine": payload.get("engine"),
+        "engine_version": payload.get("engine_version"),
+        "model": payload.get("model"),
+        "container_image_digest": payload.get("container_image_digest"),
+        "benchmark_seed": payload.get("benchmark_seed"),
+    }
+    flat_cfg = _flatten_dict(payload.get("config") or {})
+    for k in _COMPARE_IGNORE_KEYS:
+        flat_cfg.pop(k, None)
+    out.update(flat_cfg)
+    return out
+
+
+def _diff_runtime_inputs(a: dict, b: dict) -> list[dict[str, Any]]:
+    """Return rows {field, A, B} for keys where the two runtime snapshots differ."""
+    flat_a = _runtime_inputs(a)
+    flat_b = _runtime_inputs(b)
+    keys = sorted(set(flat_a) | set(flat_b))
+    out: list[dict[str, Any]] = []
+    for k in keys:
+        va = flat_a.get(k, "<missing>")
+        vb = flat_b.get(k, "<missing>")
+        if va != vb:
+            out.append({
+                "field": k,
+                "A": "—" if va == "<missing>" else va,
+                "B": "—" if vb == "<missing>" else vb,
+            })
+    return out
+
+
 def _build_search_widget(field: str, series: pd.Series, key_prefix: str) -> pd.Series:
     """Render a Streamlit filter widget appropriate for `series`; return a boolean mask.
 
@@ -292,6 +372,7 @@ tabs = st.tabs([
     "Reproduce",
     "Tables",
     "Search",
+    "Compare",
     "Agentic",
     "Manage",
 ])
@@ -323,6 +404,80 @@ with tabs[0]:
     best_lat_row = eligible.nsmallest(1, "ttft_p95")
     best_tp_row = eligible.nlargest(1, "peak_throughput")
     agentic_pareto_count = len(_agentic_pareto_ids(agentic_eligible))
+
+    # ── Impact vs baseline ──────────────────────────────────────────────
+    # Find the operator baseline in the FULL loaded set (df), not the
+    # display-filtered one, so display filters can't hide the anchor. Compare
+    # the best agent-found config against it on the primary axes.
+    baseline_row = _baseline_row(df)
+    if baseline_row is not None:
+        st.subheader("⭐ Impact vs baseline")
+        st.caption(
+            f"Baseline experiment `{baseline_row['experiment_id']}` — the "
+            "operator anchor the agent improves upon. Deltas are best-found vs "
+            "baseline."
+        )
+
+        def _impact(label, best_val, base_val, suffix, prec, lower_better):
+            base_val = _as_float(base_val)
+            best_val = _as_float(best_val)
+            if base_val <= 0 and best_val <= 0:
+                return {"metric": label, "baseline": "n/a", "best agent": "n/a", "impact": "—"}
+            delta = best_val - base_val
+            if base_val > 0:
+                pct = (delta / base_val) * 100.0
+                improved = (delta < 0) if lower_better else (delta > 0)
+                sign = "+" if delta > 0 else ""
+                arrow = "✅" if improved else ("➖" if delta == 0 else "🔻")
+                impact = f"{arrow} {sign}{delta:.{prec}f}{suffix} ({sign}{pct:.0f}%)"
+            else:
+                impact = "new"
+            return {
+                "metric": label,
+                "baseline": _format_metric(base_val, suffix, prec),
+                "best agent": _format_metric(best_val, suffix, prec),
+                "impact": impact,
+            }
+
+        best_agents_val = (
+            _as_float(best_agentic_row["max_viable_agentic_concurrency"])
+            if best_agentic_row is not None else 0.0
+        )
+        best_agentic_tpot_val = (
+            _as_float(best_agentic_row["agentic_tpot_p95"])
+            if best_agentic_row is not None else 0.0
+        )
+        impact_rows = [
+            _impact(
+                "Max parallel agents (PRIMARY)",
+                best_agents_val,
+                baseline_row.get("max_viable_agentic_concurrency", 0),
+                "", 0, False,
+            ),
+            _impact(
+                "Agentic tpot p95",
+                best_agentic_tpot_val,
+                baseline_row.get("agentic_tpot_p95", 0),
+                " ms", 1, True,
+            ),
+            _impact(
+                "Cold-start TTFT p95",
+                best_lat_row["ttft_p95"].iloc[0] if not best_lat_row.empty else 0,
+                baseline_row.get("ttft_p95", 0),
+                " ms", 1, True,
+            ),
+            _impact(
+                "Raw throughput (info)",
+                best_tp_row["peak_throughput"].iloc[0] if not best_tp_row.empty else 0,
+                baseline_row.get("peak_throughput", 0),
+                " tok/s", 0, False,
+            ),
+        ]
+        st.dataframe(
+            pd.DataFrame(impact_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
 
     # ── Primary KPI row: agentic-first ──────────────────────────────────
     col1, col2, col3, col4 = st.columns(4)
@@ -1003,7 +1158,7 @@ with tabs[6]:
     st.header("Reproducibility")
     st.caption("Copy-paste ready runtime details for reproducing experiments.")
 
-    label_map = {row["experiment_id"]: _summary_label(row) for _, row in filtered.iterrows()}
+    label_map = {row["experiment_id"]: _baseline_badge(row) + _summary_label(row) for _, row in filtered.iterrows()}
     selected_exp = st.selectbox(
         "Select experiment",
         list(label_map.keys()),
@@ -1228,7 +1383,7 @@ with tabs[8]:
         st.info("No experiments match the current filters.")
     else:
         result_cols = [c for c in [
-            "experiment_id", "timestamp", "engine", "model",
+            "experiment_id", "is_baseline", "timestamp", "engine", "model",
             "status", "correctness_gate_passed",
             "quantization", "tp", "pp", "dp",
             "prefix_caching", "chunked_prefill",
@@ -1245,7 +1400,7 @@ with tabs[8]:
 
         st.subheader("Inspect experiment")
         pick_label_map = {
-            row["experiment_id"]: _summary_label(row)
+            row["experiment_id"]: _baseline_badge(row) + _summary_label(row)
             for _, row in search_pool.iterrows()
         }
         pick_options = list(pick_label_map.keys())
@@ -1417,6 +1572,397 @@ with tabs[8]:
 
 
 with tabs[9]:
+    st.header("Compare Two Configs")
+    st.caption(
+        "Подбираешь два эксперимента, видишь команды запуска, headline-метрики "
+        "с дельтой, diff только различающихся параметров конфига, оверлеи "
+        "throughput/TTFT по concurrency, агентные кривые по turn-индексу (cold/warm "
+        "разделены), correctness gate, стабильность и LLM-комментарии."
+    )
+
+    if df.empty:
+        st.info("No experiments loaded.")
+    else:
+        compare_pool = df.copy()
+        labels = {
+            row["experiment_id"]: _baseline_badge(row) + _summary_label(row)
+            for _, row in compare_pool.iterrows()
+        }
+        opts = list(labels.keys())
+
+        # If a baseline exists, default A to it so the natural comparison is
+        # "baseline vs <something>" — directly answers "what did the agent add?".
+        baseline_compare = _baseline_row(compare_pool)
+        baseline_id = (
+            baseline_compare["experiment_id"] if baseline_compare is not None else None
+        )
+        default_a_idx = opts.index(baseline_id) if baseline_id in opts else 0
+
+        sel_a, sel_b = st.columns(2)
+        with sel_a:
+            id_a = st.selectbox(
+                "Config A (⭐ = baseline)",
+                opts,
+                index=default_a_idx,
+                format_func=lambda x: labels.get(x, x),
+                key="compare_a",
+            )
+        with sel_b:
+            # Default B to the best agent config (highest max parallel agents)
+            # that isn't A, so the page opens on baseline-vs-best out of the box.
+            default_b_idx = 1 if len(opts) > 1 else 0
+            if "max_viable_agentic_concurrency" in compare_pool.columns:
+                ranked = compare_pool.sort_values(
+                    "max_viable_agentic_concurrency", ascending=False,
+                )
+                for cand in ranked["experiment_id"]:
+                    if cand != id_a and cand in opts:
+                        default_b_idx = opts.index(cand)
+                        break
+            id_b = st.selectbox(
+                "Config B",
+                opts,
+                index=default_b_idx,
+                format_func=lambda x: labels.get(x, x),
+                key="compare_b",
+            )
+
+        if id_a == id_b:
+            st.warning(
+                "Выбраны одинаковые эксперименты — diff и дельты будут пустыми."
+            )
+
+        payload_a = get_experiment_payload(id_a) or {}
+        payload_b = get_experiment_payload(id_b) or {}
+        row_a = compare_pool[compare_pool["experiment_id"] == id_a].iloc[0]
+        row_b = compare_pool[compare_pool["experiment_id"] == id_b].iloc[0]
+
+        # Загружаем phase / turn данные один раз для обоих
+        pair_ids = tuple(sorted({id_a, id_b}))
+        pair_phases = list_experiment_phases(pair_ids)
+        pair_turns = list_agentic_turn_metrics(pair_ids)
+
+        # ── 1. Headline metrics ───────────────────────────────────────────
+        st.subheader("Headline metrics")
+        metric_specs: list[tuple[str, str, str, int, bool]] = [
+            # label, field, suffix, precision, lower_is_better
+            ("Peak throughput", "peak_throughput", " tok/s", 0, False),
+            ("TTFT p95", "ttft_p95", " ms", 1, True),
+            ("Tpot p95", "tpot_p95", " ms", 1, True),
+            ("Max parallel agents", "max_viable_agentic_concurrency", "", 0, False),
+            ("Agentic peak", "agentic_peak_throughput", " tok/s", 0, False),
+            ("Agentic tpot p95", "agentic_tpot_p95", " ms", 1, True),
+            ("Agentic TTFT p95", "agentic_ttft_p95", " ms", 1, True),
+            ("Prefix hit rate", "prefix_hit_rate", "", 3, False),
+        ]
+        metric_rows = []
+        for label, field, suffix, prec, lower_better in metric_specs:
+            va = _as_float(row_a.get(field, 0))
+            vb = _as_float(row_b.get(field, 0))
+            delta = vb - va if (va > 0 or vb > 0) else 0.0
+            if abs(delta) < 10 ** (-prec):
+                delta_str = "—"
+                winner = "="
+            else:
+                arrow = "↑" if delta > 0 else "↓"
+                delta_str = f"{arrow} {abs(delta):.{prec}f}{suffix}"
+                if lower_better:
+                    winner = "A" if delta > 0 else "B"
+                else:
+                    winner = "B" if delta > 0 else "A"
+            metric_rows.append({
+                "metric": label,
+                "A": _format_metric(va, suffix, prec),
+                "B": _format_metric(vb, suffix, prec),
+                "Δ (B−A)": delta_str,
+                "winner": winner,
+            })
+        st.dataframe(
+            pd.DataFrame(metric_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # ── 2. Container commands ─────────────────────────────────────────
+        st.subheader("Container commands (launch lines)")
+        ccol_a, ccol_b = st.columns(2)
+        with ccol_a:
+            st.markdown(f"**A** — `{id_a}`")
+            cmd_a = payload_a.get("container_command", "") if payload_a else ""
+            st.code(cmd_a or "(not recorded)", language="bash")
+        with ccol_b:
+            st.markdown(f"**B** — `{id_b}`")
+            cmd_b = payload_b.get("container_command", "") if payload_b else ""
+            st.code(cmd_b or "(not recorded)", language="bash")
+
+        # ── 3. Config diff ────────────────────────────────────────────────
+        st.subheader("Config diff — only differing keys")
+        diff_rows = _diff_runtime_inputs(payload_a, payload_b)
+        if not diff_rows:
+            st.success("Конфиги идентичны — расхождений нет (включая engine_version и digest).")
+        else:
+            view_mode = st.radio(
+                "Diff view",
+                ["table", "code-block (A vs B)"],
+                horizontal=True,
+                key="compare_diff_view",
+            )
+            if view_mode == "table":
+                diff_df = pd.DataFrame(diff_rows)
+                diff_df["A"] = diff_df["A"].astype(str)
+                diff_df["B"] = diff_df["B"].astype(str)
+                st.dataframe(diff_df, use_container_width=True, hide_index=True)
+            else:
+                lines = []
+                for r in diff_rows:
+                    lines.append(f"- {r['field']}: {r['A']}")
+                    lines.append(f"+ {r['field']}: {r['B']}")
+                    lines.append("")
+                st.code("\n".join(lines), language="diff")
+
+        # ── 4. Standard throughput / TTFT overlay vs concurrency ──────────
+        st.subheader("Standard benchmark — overlay vs concurrency")
+        std_pair = pair_phases[
+            pair_phases["workload_id"] != "agentic_long_context"
+        ].copy() if not pair_phases.empty else pd.DataFrame()
+        if std_pair.empty:
+            st.info("No standard-workload phases for the selected pair.")
+        else:
+            std_pair["config"] = std_pair["experiment_id"].map({id_a: "A", id_b: "B"})
+            ovcol1, ovcol2 = st.columns(2)
+            with ovcol1:
+                fig = px.line(
+                    std_pair.sort_values(["workload_id", "concurrency"]),
+                    x="concurrency",
+                    y="output_tokens_per_sec",
+                    color="config",
+                    line_dash="workload_id",
+                    markers=True,
+                    title="Throughput by concurrency",
+                    hover_data=["phase_id", "prompt_length", "ttft_p95"],
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            with ovcol2:
+                fig = px.line(
+                    std_pair.sort_values(["workload_id", "concurrency"]),
+                    x="concurrency",
+                    y="ttft_p95",
+                    color="config",
+                    line_dash="workload_id",
+                    markers=True,
+                    title="TTFT p95 by concurrency",
+                    hover_data=["phase_id", "prompt_length"],
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            # ── 5. Per-phase delta table (inner join on common cells) ─────
+            with st.expander("Per-phase delta table (intersected phases)", expanded=False):
+                a_phases = std_pair[std_pair["experiment_id"] == id_a]
+                b_phases = std_pair[std_pair["experiment_id"] == id_b]
+                merge_keys = ["workload_id", "concurrency", "prompt_length"]
+                merged = a_phases.merge(
+                    b_phases,
+                    on=merge_keys,
+                    suffixes=("_A", "_B"),
+                )
+                if merged.empty:
+                    st.info("Нет совпадающих (workload, concurrency, prompt_length) ячеек.")
+                else:
+                    merged["Δ_throughput"] = (
+                        merged["output_tokens_per_sec_B"]
+                        - merged["output_tokens_per_sec_A"]
+                    )
+                    merged["Δ_ttft_p95"] = merged["ttft_p95_B"] - merged["ttft_p95_A"]
+                    show_cols = [
+                        "workload_id", "concurrency", "prompt_length",
+                        "output_tokens_per_sec_A", "output_tokens_per_sec_B", "Δ_throughput",
+                        "ttft_p95_A", "ttft_p95_B", "Δ_ttft_p95",
+                        "error_rate_A", "error_rate_B",
+                    ]
+                    show_cols = [c for c in show_cols if c in merged.columns]
+                    st.dataframe(
+                        merged[show_cols].sort_values(
+                            ["workload_id", "concurrency", "prompt_length"]
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+        # ── 6. Agentic side-by-side: per-c metrics ────────────────────────
+        st.subheader("Agentic — side-by-side by concurrency")
+        ag_pair = pair_phases[
+            pair_phases["workload_id"] == "agentic_long_context"
+        ].copy() if not pair_phases.empty else pd.DataFrame()
+        if ag_pair.empty:
+            st.info(
+                "Нет agentic-фаз для пары. Включи `benchmark.enable_agentic_long_context: true` "
+                "в обеих конфигурациях, чтобы появилась эта сводка."
+            )
+        else:
+            ag_pair["config"] = ag_pair["experiment_id"].map({id_a: "A", id_b: "B"})
+            ag_cols = [
+                "config", "concurrency", "num_requests",
+                "output_tokens_per_sec", "ttft_p95", "tpot_p95",
+                "e2e_p95", "errors", "error_rate",
+            ]
+            ag_cols = [c for c in ag_cols if c in ag_pair.columns]
+            st.dataframe(
+                ag_pair[ag_cols].sort_values(["concurrency", "config"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            # ── 7. Agentic turn-by-turn overlay, cold/warm split ──────────
+            if not pair_turns.empty:
+                pair_turns_view = pair_turns.copy()
+                pair_turns_view["config"] = pair_turns_view["experiment_id"].map(
+                    {id_a: "A", id_b: "B"}
+                )
+                ok = pair_turns_view[
+                    pair_turns_view["error"].isna() & (pair_turns_view["ttft_ms"] > 0)
+                ]
+                cold = ok[ok["turn_idx"] == 0]
+                warm = ok[ok["turn_idx"] >= 1]
+                st.markdown("**TTFT per turn — A vs B (cold left, warm right)**")
+                tcol_cold, tcol_warm = st.columns(2)
+                with tcol_cold:
+                    if cold.empty:
+                        st.info("No cold (turn 0) samples.")
+                    else:
+                        fig = px.box(
+                            cold,
+                            x="config",
+                            y="ttft_ms",
+                            color="config",
+                            points="outliers",
+                            title="Cold (turn 0)",
+                            labels={"ttft_ms": "TTFT cold, ms"},
+                        )
+                        fig.update_layout(showlegend=False)
+                        st.plotly_chart(fig, use_container_width=True)
+                with tcol_warm:
+                    if warm.empty:
+                        st.info("No warm (turn 1+) samples.")
+                    else:
+                        fig = px.box(
+                            warm,
+                            x="turn_idx",
+                            y="ttft_ms",
+                            color="config",
+                            points=False,
+                            title="Warm (turn 1+)",
+                            labels={
+                                "turn_idx": "Turn index",
+                                "ttft_ms": "TTFT warm, ms",
+                            },
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+
+        # ── 8. Correctness gate breakdown ─────────────────────────────────
+        st.subheader("Correctness gate")
+        gate_fields = [
+            ("Smoke: basic chat", "smoke_basic"),
+            ("Smoke: tool calling", "smoke_tool"),
+            ("Smoke: tool_required", "smoke_tool_required"),
+            ("Smoke: json_object", "smoke_json"),
+            ("Smoke: json_schema", "smoke_schema"),
+            ("Post-bench basic chat", "post_basic_chat"),
+            ("Gate passed (overall)", "correctness_gate_passed"),
+        ]
+        gate_rows = []
+        for label, field in gate_fields:
+            va = bool(row_a.get(field, False))
+            vb = bool(row_b.get(field, False))
+            gate_rows.append({
+                "check": label,
+                "A": "✓" if va else "✗",
+                "B": "✓" if vb else "✗",
+                "diff": "" if va == vb else ("A→✗ / B→✓" if not va else "A→✓ / B→✗"),
+            })
+        st.dataframe(
+            pd.DataFrame(gate_rows),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # ── 9. Stability / CV / cache ─────────────────────────────────────
+        with st.expander("Stability, dispersion, cache effectiveness", expanded=False):
+            stab_fields = [
+                ("Peak throughput e2e CV", "peak_throughput_e2e_cv", "", 3, True),
+                ("Low-concurrency TTFT CV", "low_concurrency_ttft_cv", "", 3, True),
+                ("Prefix hit rate", "prefix_hit_rate", "", 3, False),
+                ("KV cache usage", "kv_cache_usage", "", 3, False),
+            ]
+            stab_rows = []
+            for label, field, suffix, prec, lower_better in stab_fields:
+                va = _as_float(row_a.get(field, 0))
+                vb = _as_float(row_b.get(field, 0))
+                delta = vb - va
+                stab_rows.append({
+                    "metric": label,
+                    "A": _format_metric(va, suffix, prec),
+                    "B": _format_metric(vb, suffix, prec),
+                    "Δ (B−A)": f"{'+' if delta > 0 else ''}{delta:.{prec}f}{suffix}",
+                    "lower_better": "yes" if lower_better else "no",
+                })
+            st.dataframe(
+                pd.DataFrame(stab_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        # ── 10. Runtime cost ──────────────────────────────────────────────
+        with st.expander("Runtime cost (startup + benchmark duration)", expanded=False):
+            cost_rows = []
+            for label, field, suffix, prec in [
+                ("Time to healthy", "time_to_healthy_sec", " s", 1),
+                ("Total duration", "duration_s", " s", 1),
+            ]:
+                va = _as_float(row_a.get(field, 0))
+                vb = _as_float(row_b.get(field, 0))
+                delta = vb - va
+                cost_rows.append({
+                    "metric": label,
+                    "A": _format_metric(va, suffix, prec),
+                    "B": _format_metric(vb, suffix, prec),
+                    "Δ (B−A)": f"{'+' if delta > 0 else ''}{delta:.{prec}f}{suffix}",
+                })
+            st.dataframe(
+                pd.DataFrame(cost_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        # ── 11. LLM rationale + analyzer commentary ───────────────────────
+        with st.expander("LLM rationale + analyzer commentary", expanded=False):
+            rcol_a, rcol_b = st.columns(2)
+            with rcol_a:
+                st.markdown(f"**A** — `{id_a}`")
+                rationale_a = (payload_a.get("config") or {}).get("rationale", "")
+                commentary_a = payload_a.get("llm_commentary", "")
+                if rationale_a:
+                    st.markdown("_Planner rationale:_")
+                    st.write(rationale_a)
+                if commentary_a:
+                    st.markdown("_Analyzer commentary:_")
+                    st.write(commentary_a)
+                if not rationale_a and not commentary_a:
+                    st.info("(no commentary)")
+            with rcol_b:
+                st.markdown(f"**B** — `{id_b}`")
+                rationale_b = (payload_b.get("config") or {}).get("rationale", "")
+                commentary_b = payload_b.get("llm_commentary", "")
+                if rationale_b:
+                    st.markdown("_Planner rationale:_")
+                    st.write(rationale_b)
+                if commentary_b:
+                    st.markdown("_Analyzer commentary:_")
+                    st.write(commentary_b)
+                if not rationale_b and not commentary_b:
+                    st.info("(no commentary)")
+
+
+with tabs[10]:
     st.header("Agentic Long-Context Analytics")
     st.caption(
         "Multi-turn code-agent simulation: фиксированный префикс ~64k + N ходов, "
@@ -1542,42 +2088,117 @@ with tabs[9]:
             )
             st.plotly_chart(fig_all, use_container_width=True)
 
-        # ── TTFT vs turn_idx (the killer chart) ──
+        # ── TTFT vs turn_idx — split into cold (turn 0) and warm (turn 1+) ──
+        # Объединять их на одном Y нельзя: cold prefill 83k токенов даёт
+        # 20-60s, а warm cache-hit на ~5k новых токенов — 0.2-1s. Боксы warm
+        # турнов схлопываются в полосу около нуля и шкала становится мёртвой.
+        # Разделение на два графика даёт каждой популяции свою Y-ось.
         if not turns_df.empty:
             st.subheader("TTFT vs turn index — does prefix-cache work?")
             st.caption(
-                "Turn 0 = cold prefill of the ~64k prefix. Turn 1+ should be a "
-                "cache-hit and TTFT should drop dramatically. A flat line means "
-                "prefix-caching is disabled or not effective for this config."
+                "Cold (turn 0) — полный prefill ~83k unique-токенов. Warm (turn 1+) — "
+                "должен лететь на cache-hit, TTFT падает в ~50× раз. Разделили в два "
+                "графика, потому что общая Y-ось делает warm-turn'ы нечитаемыми."
             )
             ok_turns = turns_df[(turns_df["error"].isna()) & (turns_df["ttft_ms"] > 0)].copy()
             if not ok_turns.empty:
-                fig_ttft = px.box(
-                    ok_turns,
-                    x="turn_idx",
-                    y="ttft_ms",
-                    color="engine",
-                    points=False,
-                    labels={"turn_idx": "Turn index (0 = cold)", "ttft_ms": "TTFT, ms"},
-                )
-                st.plotly_chart(fig_ttft, use_container_width=True)
+                cold_turns = ok_turns[ok_turns["turn_idx"] == 0]
+                warm_turns = ok_turns[ok_turns["turn_idx"] >= 1]
 
-                # Scatter: input_tokens (per turn) vs ttft_ms
+                col_cold, col_warm = st.columns(2)
+                with col_cold:
+                    st.markdown("**Cold: turn 0 (full prefill)**")
+                    if cold_turns.empty:
+                        st.info("No turn-0 samples.")
+                    else:
+                        fig_cold = px.box(
+                            cold_turns,
+                            x="engine",
+                            y="ttft_ms",
+                            color="engine",
+                            points="outliers",
+                            labels={"ttft_ms": "TTFT, ms (cold prefill)"},
+                        )
+                        fig_cold.update_layout(showlegend=False)
+                        st.plotly_chart(fig_cold, use_container_width=True)
+                with col_warm:
+                    st.markdown("**Warm: turn 1+ (cache-hit expected)**")
+                    if warm_turns.empty:
+                        st.info("No turn-1+ samples.")
+                    else:
+                        fig_warm = px.box(
+                            warm_turns,
+                            x="turn_idx",
+                            y="ttft_ms",
+                            color="engine",
+                            points=False,
+                            labels={
+                                "turn_idx": "Turn index (warm)",
+                                "ttft_ms": "TTFT, ms (warm)",
+                            },
+                        )
+                        st.plotly_chart(fig_warm, use_container_width=True)
+
+                # Scatter: input_tokens (per turn) vs ttft_ms — также split.
+                # На общей шкале turn 0 (50s, 83k tokens) живёт высоко слева,
+                # а warm turns тянутся горизонтальной линией у нуля при росте
+                # input_tokens — невозможно понять, есть ли наклон.
                 st.subheader("Per-turn input length vs TTFT")
                 st.caption(
-                    "Linear (rising) trend ⇒ engine is doing full prefill every turn "
-                    "(prefix-cache miss). Flat trend ⇒ cache works."
+                    "На warm-графике: линейный (растущий) тренд ⇒ engine делает "
+                    "full prefill каждый turn (cache miss). Плоский тренд ⇒ кеш "
+                    "работает. Cold-график показывает разброс самого тяжёлого "
+                    "prefill'а по разным конфигам."
                 )
-                fig_scatter = px.scatter(
-                    ok_turns,
-                    x="input_tokens",
-                    y="ttft_ms",
-                    color="engine",
-                    symbol="turn_idx",
-                    hover_data=["experiment_id", "concurrency", "session_idx", "turn_idx"],
-                    labels={"input_tokens": "Per-turn input tokens", "ttft_ms": "TTFT, ms"},
-                )
-                st.plotly_chart(fig_scatter, use_container_width=True)
+                col_cold2, col_warm2 = st.columns(2)
+                with col_cold2:
+                    st.markdown("**Cold: turn 0 only**")
+                    if cold_turns.empty:
+                        st.info("No turn-0 samples.")
+                    else:
+                        fig_cold_sc = px.scatter(
+                            cold_turns,
+                            x="input_tokens",
+                            y="ttft_ms",
+                            color="engine",
+                            hover_data=["experiment_id", "concurrency", "session_idx"],
+                            labels={
+                                "input_tokens": "Cold prefill tokens",
+                                "ttft_ms": "TTFT, ms (cold)",
+                            },
+                        )
+                        st.plotly_chart(fig_cold_sc, use_container_width=True)
+                with col_warm2:
+                    st.markdown("**Warm: turn 1+**")
+                    if warm_turns.empty:
+                        st.info("No turn-1+ samples.")
+                    else:
+                        fig_warm_sc = px.scatter(
+                            warm_turns,
+                            x="input_tokens",
+                            y="ttft_ms",
+                            color="engine",
+                            symbol="turn_idx",
+                            hover_data=["experiment_id", "concurrency", "session_idx", "turn_idx"],
+                            labels={
+                                "input_tokens": "Per-turn input tokens (warm)",
+                                "ttft_ms": "TTFT, ms (warm)",
+                            },
+                        )
+                        st.plotly_chart(fig_warm_sc, use_container_width=True)
+                        # Linear OLS на dataframe (без statsmodels): простой
+                        # numeric slope как подпись — даёт ответ «работает ли
+                        # кеш» в одной цифре без визуального fitting'а.
+                        if len(warm_turns) >= 2:
+                            x = warm_turns["input_tokens"].astype(float).to_numpy()
+                            y = warm_turns["ttft_ms"].astype(float).to_numpy()
+                            if x.std() > 0:
+                                slope = float(((x - x.mean()) * (y - y.mean())).sum() / ((x - x.mean()) ** 2).sum())
+                                st.caption(
+                                    f"OLS slope: **{slope:.3f} ms/token** — близко к 0 ⇒ "
+                                    "cache работает; заметный положительный ⇒ full prefill "
+                                    "каждый turn."
+                                )
             else:
                 st.info("No successful turns to plot.")
 
@@ -1597,7 +2218,7 @@ with tabs[9]:
         )
 
 
-with tabs[10]:
+with tabs[11]:
     st.header("Manage Experiments")
     st.caption(
         "Permanently delete experiments from the database. This cannot be undone; "
@@ -1606,7 +2227,7 @@ with tabs[10]:
 
     with st.expander("Delete experiments", expanded=False):
         id_to_label = {
-            row["experiment_id"]: _summary_label(row)
+            row["experiment_id"]: _baseline_badge(row) + _summary_label(row)
             for _, row in filtered.iterrows()
             if row["experiment_id"]
         }

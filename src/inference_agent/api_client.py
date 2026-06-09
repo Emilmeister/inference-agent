@@ -174,3 +174,36 @@ class ExperimentApiClient:
                 f"GET /experiments/top: unexpected payload shape {type(payload).__name__}"
             )
         return [ExperimentSummary.model_validate(s) for s in payload["summaries"]]
+
+    async def find_baseline(
+        self,
+        hardware: HardwareProfile,
+        model_name: str,
+    ) -> ExperimentSummary | None:
+        """GET /experiments/baseline — the latest baseline for this hw+model.
+
+        Returns None when no baseline has been measured yet for this exact
+        hardware + model, so the agent knows it still needs to run one.
+        """
+        if not hardware.gpus:
+            return None
+        primary = hardware.gpus[0]
+        params = {
+            "gpu_name": primary.name,
+            "gpu_count": str(hardware.gpu_count),
+            "gpu_vram_mb": str(primary.vram_total_mb),
+            "nvlink_available": "true" if hardware.nvlink_available else "false",
+            "model_name": model_name,
+        }
+        payload = await self._request("GET", "/experiments/baseline", params=params)
+        if not payload:
+            return None
+        if not isinstance(payload, dict) or "summary" not in payload:
+            raise APIClientError(
+                f"GET /experiments/baseline: unexpected payload shape "
+                f"{type(payload).__name__}"
+            )
+        summary = payload["summary"]
+        if summary is None:
+            return None
+        return ExperimentSummary.model_validate(summary)

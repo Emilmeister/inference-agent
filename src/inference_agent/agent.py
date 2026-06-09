@@ -8,6 +8,7 @@ from langgraph.graph import END, StateGraph
 
 from inference_agent.api_client import ExperimentApiClient
 from inference_agent.nodes.analyzer import analyzer_node
+from inference_agent.nodes.baseline_injector import baseline_injector_node
 from inference_agent.nodes.discovery import discovery_node
 from inference_agent.nodes.executor import executor_node
 from inference_agent.nodes.history_loader import make_history_loader_node
@@ -35,6 +36,18 @@ def _after_validator(state: AgentState) -> str:
     return "run"
 
 
+def _after_history_loader(state: AgentState) -> str:
+    """Route after history load: inject the baseline anchor or plan normally.
+
+    The baseline runs deterministically as the first experiment (no LLM) when
+    one is configured and not yet measured for this hardware/model. Every other
+    iteration goes through the planner.
+    """
+    if state.get("baseline_pending"):
+        return "baseline"
+    return "plan"
+
+
 def build_graph(client: ExperimentApiClient) -> StateGraph:
     """Build the LangGraph agent graph.
 
@@ -45,6 +58,7 @@ def build_graph(client: ExperimentApiClient) -> StateGraph:
 
     graph.add_node("discovery", discovery_node)
     graph.add_node("history_loader", make_history_loader_node(client))
+    graph.add_node("baseline_injector", baseline_injector_node)
     graph.add_node("planner", planner_node)
     graph.add_node("validator", validator_node)
     graph.add_node("executor", executor_node)
@@ -53,11 +67,21 @@ def build_graph(client: ExperimentApiClient) -> StateGraph:
 
     graph.set_entry_point("discovery")
 
-    # Flow: discovery → history_loader → planner → validator → executor →
-    # analyzer → reporter → loop. If validation fails, skip executor and go
+    # Flow: discovery → history_loader → (baseline_injector | planner) →
+    # validator → executor → analyzer → reporter → loop. The first iteration
+    # may inject the operator baseline (deterministic, no LLM); every later
+    # iteration plans via the LLM. If validation fails, skip executor and go
     # directly to analyzer.
     graph.add_edge("discovery", "history_loader")
-    graph.add_edge("history_loader", "planner")
+    graph.add_conditional_edges(
+        "history_loader",
+        _after_history_loader,
+        {
+            "baseline": "baseline_injector",
+            "plan": "planner",
+        },
+    )
+    graph.add_edge("baseline_injector", "validator")
     graph.add_edge("planner", "validator")
 
     graph.add_conditional_edges(

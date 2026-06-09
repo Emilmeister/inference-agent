@@ -1,0 +1,82 @@
+# Operator-defined BASELINE launch config (anchor experiment).
+#
+# Shaped like an ExperimentConfig. Loaded by the agent CLI (--baseline, default
+# this file). When present AND no baseline yet exists in the DB for this
+# hardware+model, it runs deterministically as experiment #1 — WITHOUT the LLM
+# planner — so the benchmark harness measures a real anchor. The planner then
+# iterates ON these measured numbers (one knob at a time), and the dashboard
+# highlights the agent's impact relative to this run.
+#
+# Source: the hand-tuned production launch command (GLM-4.7-FP8 on H100x8).
+# Flags with dedicated schema fields live in those fields; everything else is
+# passed verbatim through extra_engine_args. Container env vars go in extra_env.
+#
+# NOTE: --reasoning-parser / --tool-call-parser / --enable-auto-tool-choice are
+# NOT repeated here — they are always appended by container.vllm_extra_args in
+# config.yaml. The model id (--model zai-org/GLM-4.7-FP8) and --host/--port are
+# injected by the engine builder; dedup_flags drops accidental duplicates.
+#
+# DELIBERATELY OMITTED: --served-model-name zai-org/GLM-4.7. The benchmark
+# harness addresses the model by its HF id (config.model_name =
+# "zai-org/GLM-4.7-FP8") in every smoke/benchmark request. Serving it under the
+# alias "zai-org/GLM-4.7" would make every request fail with model-not-found and
+# the baseline would report failed_correctness. The alias is a client-routing
+# concern, irrelevant to the benchmark — the engine itself is byte-identical.
+
+engine: vllm
+
+tensor_parallel_size: 8
+max_model_len: 202752
+
+gpu_memory_utilization: 0.88
+max_num_seqs: 48
+max_num_batched_tokens: 16384
+
+scheduling_policy: fcfs
+kv_cache_dtype: fp8_e4m3
+
+enable_prefix_caching: true
+enable_chunked_prefill: true
+
+# Container environment variables (nerdctl -e KEY=VALUE). Copied verbatim from
+# the production launch env.
+extra_env:
+  TZ: "Europe/Moscow"
+  CUDA_DISABLE_CONTROL: "true"
+  OMP_NUM_THREADS: "124"
+  TORCH_CUDA_ARCH_LIST: "10.0"
+  NCCL_CUMEM_ENABLE: "true"
+  NCCL_P2P_LEVEL: "NVL"
+  SAFETENSORS_FAST_GPU: "1"
+  # NCCL_P2P_DISABLE intentionally left out (commented in the source command).
+
+# Flags without a dedicated ExperimentConfig field — passed through verbatim,
+# in the same order as the production command. Includes the GLM MTP
+# self-speculation knobs (no external draft model) and the generation-config
+# override.
+extra_engine_args:
+  - "--api-server-count"
+  - "1"
+  - "--stream-interval"
+  - "2"
+  - "--async-scheduling"
+  - "--trust-remote-code"
+  - "--performance-mode"
+  - "throughput"
+  - "--enable-expert-parallel"
+  - "--optimization-level"
+  - "3"
+  - "--enable-prompt-tokens-details"
+  - "--enable-force-include-usage"
+  - "--speculative-config.method"
+  - "mtp"
+  - "--speculative-config.num_speculative_tokens"
+  - "1"
+  - "--override-generation-config"
+  - '{"max_new_tokens": 65536}'
+
+rationale: >-
+  Operator-defined baseline (hand-tuned GLM-4.7-FP8 on H100x8): TP=8, fp8 KV
+  cache, MTP self-speculation, prefix+chunked prefill, throughput perf-mode,
+  gpu_mem_util=0.88. The agent's job is to beat this on max_viable_agents
+  without breaking correctness.

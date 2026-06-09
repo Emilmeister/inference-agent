@@ -734,7 +734,7 @@ async def analyzer_node(state: AgentState) -> dict:
         }
     )
 
-    return {
+    out: dict = {
         "experiment_history": [summary],
         "experiments_count": exp_count,
         "best_agentic_max_viable_c": best_agentic_c,
@@ -755,3 +755,11 @@ async def analyzer_node(state: AgentState) -> dict:
         "stop_reason": stop_reason,
         "current_result": enriched_result,
     }
+
+    # Capture the baseline summary the moment it is measured this session, so
+    # the planner anchors on it from experiment #2 onward (before any DB
+    # round-trip) and impact tracking has a reference point.
+    if summary.is_baseline:
+        out["baseline_summary"] = summary
+
+    return out

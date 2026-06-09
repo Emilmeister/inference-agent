@@ -683,6 +683,7 @@ async def executor_node(state: AgentState) -> dict:
                     model=config.model_name,
                     hardware=hardware,
                     config=experiment,
+                    is_baseline=experiment.is_baseline,
                     status=ExperimentStatus.FAILED,
                     error=error_msg,
                     errors=[ExperimentError(
@@ -719,6 +720,7 @@ async def executor_node(state: AgentState) -> dict:
                 model=config.model_name,
                 hardware=hardware,
                 config=experiment,
+                is_baseline=experiment.is_baseline,
                 status=ExperimentStatus.FAILED,
                 error=error_msg,
                 errors=startup_errors,
@@ -771,6 +773,7 @@ async def executor_node(state: AgentState) -> dict:
                 model=config.model_name,
                 hardware=hardware,
                 config=experiment,
+                is_baseline=experiment.is_baseline,
                 status=ExperimentStatus.FAILED_CORRECTNESS,
                 error="Correctness gate failed: " + "; ".join(
                     f"{name}={getattr(smoke_results, name)}"
@@ -904,6 +907,7 @@ async def executor_node(state: AgentState) -> dict:
             model=config.model_name,
             hardware=hardware,
             config=experiment,
+            is_baseline=experiment.is_baseline,
             status=status,
             error="; ".join(e.message for e in all_errors) if all_errors else None,
             errors=all_errors,

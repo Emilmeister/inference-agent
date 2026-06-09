@@ -78,6 +78,18 @@ class AgentState(TypedDict, total=False):
     # Next optimization direction
     next_optimization_goal: Annotated[OptimizationGoal, _replace]
 
+    # Baseline anchor (operator-defined, from baseline.yaml).
+    #   baseline_pending — True until the baseline has been injected as the
+    #     anchor experiment. history_loader clears it when a baseline already
+    #     exists in the DB for this hardware/model (don't re-run it every
+    #     session). The router after history_loader sends the run to the
+    #     baseline_injector while this is True, else to the planner.
+    #   baseline_summary — the measured baseline (from the DB or the current
+    #     session) used by the planner as the anchor block and by best_*
+    #     impact tracking. None until a baseline has been measured.
+    baseline_pending: Annotated[bool, _replace]
+    baseline_summary: Annotated[ExperimentSummary | None, _replace]
+
     # Validation
     skip_executor: Annotated[bool, _replace]
 
