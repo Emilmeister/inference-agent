@@ -85,6 +85,12 @@ class BaseEngine(abc.ABC):
         # LLM-generated env vars
         for key, val in experiment.extra_env.items():
             args.extend(["-e", f"{key}={val}"])
+        # Restrict GPU visibility to the configured subset. Placed AFTER
+        # extra_env (last -e wins) so a planner-generated CUDA_VISIBLE_DEVICES
+        # cannot widen the box past what the operator allocated in config.
+        cvd = cc.cuda_visible_devices()
+        if cvd is not None:
+            args.extend(["-e", f"CUDA_VISIBLE_DEVICES={cvd}"])
         # Force HF offline mode when we've already prefetched the model.
         # Two reasons:
         #   1. Some engines call huggingface_hub APIs (e.g. model_info) on

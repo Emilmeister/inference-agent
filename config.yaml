@@ -31,6 +31,11 @@ container:
   sglang_image: "lmsysorg/sglang:latest"
   network: "host"
   shm_size: "16g"
+  # Сколько GPU отдать движку, считая с индекса 0 (карты 0..gpu_count-1).
+  # На стенде с 8xH100 поставь, например, 4 — агент будет гонять эксперименты
+  # на первых 4 картах (GPU 0-3), tensor_parallel_size планировщика автоматически
+  # ограничится делителями четырёх. null / отсутствие поля = использовать все карты.
+  gpu_count: null
   # MUST point at the hub/ subdir — HF_HUB_CACHE inside the container
   # defaults to /root/.cache/huggingface/hub. Putting models at the cache
   # root instead means engines look in hub/ and don't see anything.

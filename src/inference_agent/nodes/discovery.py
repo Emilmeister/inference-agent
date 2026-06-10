@@ -384,6 +384,25 @@ async def discovery_node(state: AgentState) -> dict:
         loop.run_in_executor(None, _detect_available_engines),
     )
 
+    # Restrict to the configured GPU subset (first N by index) before anything
+    # downstream reads gpu_count. This keeps the planner's tensor_parallel_size
+    # constraint, the validator's divisibility checks, and the analyzer all
+    # reasoning about the GPUs we actually expose to the container (the engine
+    # gets CUDA_VISIBLE_DEVICES=0..N-1 in engines/base.py).
+    requested_gpu_count = config.container.gpu_count
+    if requested_gpu_count is not None and gpus:
+        if requested_gpu_count > len(gpus):
+            raise RuntimeError(
+                f"container.gpu_count={requested_gpu_count} exceeds detected "
+                f"GPUs ({len(gpus)}). Lower gpu_count or check nvidia-smi."
+            )
+        if requested_gpu_count < len(gpus):
+            logger.info(
+                "Restricting to first %d of %d detected GPUs (container.gpu_count)",
+                requested_gpu_count, len(gpus),
+            )
+            gpus = gpus[:requested_gpu_count]
+
     # Prefetch weights into the host cache (mounted into containers) so
     # subsequent container runs don't each re-download the model.
     #

@@ -51,6 +51,16 @@ class ContainerConfig(BaseModel):
     network: str = "host"
     shm_size: str = "16g"
 
+    # Number of GPUs to expose to engine containers, counted from index 0
+    # (i.e. GPUs 0..gpu_count-1). None = use every GPU nvidia-smi reports.
+    # Lets a shared 8xH100 stand be split: set gpu_count: 4 to benchmark on
+    # half the box. Discovery slices HardwareProfile.gpus to this subset, so
+    # the planner's tensor_parallel_size constraint, validator divisibility
+    # checks, and analyzer all reason about the GPUs we actually expose.
+    # We restrict visibility via CUDA_VISIBLE_DEVICES (honored by vLLM and
+    # SGLang) rather than nerdctl's ambiguous --gpus device= syntax.
+    gpu_count: int | None = Field(default=None, ge=1)
+
     # HuggingFace cache paths.
     #   host_cache_dir: where the AGENT writes prefetched weights on the host.
     #     MUST point at the `hub/` subdir of an HF cache root — that is what
@@ -81,6 +91,17 @@ class ContainerConfig(BaseModel):
         # Allow users to write `~/cache` literally in YAML and have it expand.
         self.host_cache_dir = os.path.expanduser(self.host_cache_dir)
         return self
+
+    def cuda_visible_devices(self) -> str | None:
+        """Comma-separated device indices to expose, or None for all GPUs.
+
+        Matches the "first N GPUs" semantics of `gpu_count`: returns
+        "0,1,...,gpu_count-1". Injected as CUDA_VISIBLE_DEVICES so the engine
+        sees exactly that many GPUs, renumbered 0..N-1.
+        """
+        if self.gpu_count is None:
+            return None
+        return ",".join(str(i) for i in range(self.gpu_count))
 
 
 class StartupConfig(BaseModel):
