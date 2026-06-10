@@ -7,33 +7,37 @@
 # iterates ON these measured numbers (one knob at a time), and the dashboard
 # highlights the agent's impact relative to this run.
 #
-# Source: the hand-tuned production launch command (GLM-4.7-FP8 on H100x8).
-# Flags with dedicated schema fields live in those fields; everything else is
-# passed verbatim through extra_engine_args. Container env vars go in extra_env.
+# Source: the hand-tuned production launch command (MiniMaxAI/MiniMax-M2.5 on
+# H100x4). Flags with dedicated schema fields live in those fields; everything
+# else is passed verbatim through extra_engine_args. Container env vars go in
+# extra_env.
 #
 # NOTE: --reasoning-parser / --tool-call-parser / --enable-auto-tool-choice are
 # NOT repeated here — they are always appended by container.vllm_extra_args in
-# config.yaml. The model id (--model zai-org/GLM-4.7-FP8) and --host/--port are
-# injected by the engine builder; dedup_flags drops accidental duplicates.
+# config.yaml. The model id (--model MiniMaxAI/MiniMax-M2.5) and --host/--port
+# are injected by the engine builder; dedup_flags drops accidental duplicates.
 #
-# DELIBERATELY OMITTED: --served-model-name zai-org/GLM-4.7. The benchmark
-# harness addresses the model by its HF id (config.model_name =
-# "zai-org/GLM-4.7-FP8") in every smoke/benchmark request. Serving it under the
-# alias "zai-org/GLM-4.7" would make every request fail with model-not-found and
-# the baseline would report failed_correctness. The alias is a client-routing
-# concern, irrelevant to the benchmark — the engine itself is byte-identical.
+# DELIBERATELY OMITTED:
+#   --served-model-name MiniMaxAI/MiniMax-M2.5 and the local /models/... path.
+#     The benchmark harness addresses the model by its HF id (config.model_name
+#     = "MiniMaxAI/MiniMax-M2.5") in every smoke/benchmark request and resolves
+#     weights from the mounted HF cache, so the served alias is irrelevant —
+#     the engine itself is byte-identical.
+#   --port 8080. The harness talks to the engine on the builder's default port
+#     (8000); the prod 8080 is a routing detail, not a benchmark knob.
 
 engine: vllm
 
-tensor_parallel_size: 8
-max_model_len: 202752
+tensor_parallel_size: 4
+max_model_len: 196608
 
-gpu_memory_utilization: 0.88
-max_num_seqs: 48
-max_num_batched_tokens: 16384
+gpu_memory_utilization: 0.9
+max_num_seqs: 128
+max_num_batched_tokens: 10240
 
 scheduling_policy: fcfs
-kv_cache_dtype: fp8_e4m3
+quantization: fp8
+dtype: bfloat16
 
 enable_prefix_caching: true
 enable_chunked_prefill: true
@@ -43,42 +47,33 @@ enable_chunked_prefill: true
 extra_env:
   TZ: "Europe/Moscow"
   CUDA_DISABLE_CONTROL: "true"
-  OMP_NUM_THREADS: "124"
-  TORCH_CUDA_ARCH_LIST: "10.0"
-  NCCL_CUMEM_ENABLE: "true"
-  NCCL_P2P_LEVEL: "NVL"
+  OMP_NUM_THREADS: "96"
+  VLLM_FLASH_ATTN_VERSION: "3"
   SAFETENSORS_FAST_GPU: "1"
-  # NCCL_P2P_DISABLE intentionally left out (commented in the source command).
 
 # Flags without a dedicated ExperimentConfig field — passed through verbatim,
-# in the same order as the production command. Includes the GLM MTP
-# self-speculation knobs (no external draft model) and the generation-config
-# override.
+# in the same order as the production command. --enable-expert-parallel is the
+# MoE expert-parallel switch (MiniMax-M2.5 is a MoE model); the
+# compilation-config pins the piecewise CUDA-graph mode from the prod command.
 extra_engine_args:
-  - "--api-server-count"
-  - "1"
   - "--stream-interval"
-  - "2"
+  - "3"
   - "--async-scheduling"
-  - "--trust-remote-code"
   - "--performance-mode"
   - "throughput"
-  - "--enable-expert-parallel"
+  - "--seed"
+  - "1024"
   - "--optimization-level"
   - "3"
+  - "--enable-expert-parallel"
   - "--enable-prompt-tokens-details"
   - "--enable-force-include-usage"
-  # MTP self-speculation в JSON-форме — та же запись, что эмитит планировщик,
-  # чтобы diff во вкладке Compare не показывал ложного расхождения по
-  # спекулятиву (dotted-форма --speculative-config.method давала бы отдельные
-  # строки). Для vLLM эквивалентно.
-  - "--speculative-config"
-  - '{"method": "mtp", "num_speculative_tokens": 1}'
-  - "--override-generation-config"
-  - '{"max_new_tokens": 65536}'
+  - "--compilation-config"
+  - '{"cudagraph_mode": "PIECEWISE"}'
 
 rationale: >-
-  Operator-defined baseline (hand-tuned GLM-4.7-FP8 on H100x8): TP=8, fp8 KV
-  cache, MTP self-speculation, prefix+chunked prefill, throughput perf-mode,
-  gpu_mem_util=0.88. The agent's job is to beat this on max_viable_agents
-  without breaking correctness.
+  Operator-defined baseline (hand-tuned MiniMaxAI/MiniMax-M2.5 on H100x4): TP=4,
+  fp8 quantization, bfloat16, expert-parallel MoE, prefix+chunked prefill,
+  throughput perf-mode, optimization-level 3, piecewise CUDA graphs,
+  gpu_mem_util=0.9, max_num_seqs=128, max_num_batched_tokens=10240. The agent's
+  job is to beat this on the optimization goals without breaking correctness.
