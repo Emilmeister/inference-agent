@@ -34,7 +34,7 @@ agent_llm:
 
 # Container runtime (nerdctl + containerd)
 container:
-  vllm_image: "vllm/vllm-openai:v0.21.0"
+  vllm_image: "vllm/vllm-openai:v0.22.0"
   sglang_image: "lmsysorg/sglang:latest"
   network: "host"
   shm_size: "16g"
