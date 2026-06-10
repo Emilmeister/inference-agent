@@ -56,7 +56,8 @@ the next configuration to benchmark for an LLM inference engine running on a GPU
 ## Top Results from Prior Runs (same hardware + model, loaded from DB)
 These are the best already-measured configurations on this exact hardware/model from \
 previous sessions. Treat them as a strong starting point: prefer iterating ON them \
-(adjusting one knob at a time) over re-running a generic baseline. Skip Rule 1 \
+(adjusting up to {max_params_per_step} parameter(s) at a time) over re-running a \
+generic baseline. Skip Rule 1 \
 (baseline) when prior tops exist — you already have a baseline.
 {loaded_top_history_json}
 
@@ -96,8 +97,14 @@ kv_cache_dtype=auto, scheduling_policy=fcfs. ENABLE prefix caching (it is \
 mandatory under the agentic goal — see Rule 3a — and harmless elsewhere). \
 SKIP THIS RULE ENTIRELY when a `## BASELINE — operator anchor` block is \
 present above: that measured config IS the baseline, you must iterate on it \
-(one knob at a time), NOT emit a fresh generic baseline.
-2. After baselines, analyze trends and improve based on the optimization goal.
+(changing at most {max_params_per_step} parameter(s) at a time), NOT emit a \
+fresh generic baseline.
+2. After baselines, analyze trends and improve based on the optimization goal. \
+Change AT MOST {max_params_per_step} configuration parameter(s) per experiment \
+relative to your starting point (the baseline anchor or the prior top result), \
+and NAME each change plus its expected impact in your rationale. Fewer, isolated \
+deltas make it clear which knob moved the metric; only widen the change set when \
+trends have stalled.
 3. PRIMARY GOAL — "optimize_agentic" (maximize parallel agents under SLO). \
 The headline metric is `agentic.max_viable_concurrency`. Levers, in order \
 of expected impact:
@@ -299,13 +306,17 @@ Generate the next experiment configuration.
 """
 
 
-def _format_baseline_block(baseline: ExperimentSummary | None) -> str:
+def _format_baseline_block(
+    baseline: ExperimentSummary | None,
+    max_params_per_step: int = 1,
+) -> str:
     """Render the measured-baseline anchor block for the planner prompt.
 
     Empty string when no baseline has been measured yet (the agent then plans
     every experiment from scratch as before). When present, the planner is told
-    to iterate ON these exact numbers — change one knob at a time and justify
-    the expected impact relative to the baseline.
+    to iterate ON these exact numbers — change at most `max_params_per_step`
+    parameters per experiment and justify the expected impact relative to the
+    baseline.
     """
     if baseline is None:
         return ""
@@ -331,10 +342,11 @@ def _format_baseline_block(baseline: ExperimentSummary | None) -> str:
         "- raw peak throughput (info): {peak_tp:.1f} tok/s\n"
         "- correctness gate passed: {gate}\n\n"
         "### How to use the baseline\n"
-        "- START from the baseline's exact flags. Change ONE knob per "
-        "experiment and NAME, in your rationale, the expected impact vs "
-        "baseline (e.g. 'raise gpu_memory_utilization 0.88→0.92 to add KV "
-        "budget → more parallel agents').\n"
+        "- START from the baseline's exact flags. Change AT MOST {max_params} "
+        "parameter(s) per experiment and NAME, in your rationale, each change "
+        "plus its expected impact vs baseline (e.g. 'raise "
+        "gpu_memory_utilization 0.88→0.92 to add KV budget → more parallel "
+        "agents').\n"
         "- NEVER silently drop a baseline flag that the model needs to stay "
         "correct (tool-call parser, reasoning parser, trust-remote-code, "
         "generation-config overrides). Removing them is a regression, not an "
@@ -345,6 +357,7 @@ def _format_baseline_block(baseline: ExperimentSummary | None) -> str:
         "different single knob.\n"
     ).format(
         bid=baseline.experiment_id,
+        max_params=max_params_per_step,
         cmd=cmd,
         digest=digest,
         engine=baseline.engine.value,
@@ -666,12 +679,14 @@ async def planner_node(state: AgentState) -> dict:
             if getattr(h, "is_baseline", False):
                 baseline_summary = h
                 break
-    baseline_block = _format_baseline_block(baseline_summary)
+    max_params_per_step = config.experiments.max_params_per_step
+    baseline_block = _format_baseline_block(baseline_summary, max_params_per_step)
 
     prompt = _PROMPT_HEADER.format(
         hardware_json=hardware.model_dump_json(indent=2),
         engine_instruction=engine_instruction,
         optimization_goal=goal.value,
+        max_params_per_step=max_params_per_step,
         baseline_block=baseline_block,
         history_json=json.dumps(history_for_llm, indent=2) if history_for_llm else "No experiments yet.",
         loaded_top_history_json=(

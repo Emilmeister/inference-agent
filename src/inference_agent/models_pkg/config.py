@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from inference_agent.models_pkg.domain import EngineType, ExperimentConfig
 
@@ -194,6 +194,21 @@ class ExperimentsConfig(BaseModel):
     engines: list[EngineType] = Field(
         default_factory=lambda: [EngineType.VLLM, EngineType.SGLANG]
     )
+
+    # How many config parameters the planner may change per experiment relative
+    # to its starting point (the baseline anchor or the prior top result). This
+    # is a SOFT guideline injected into the planner prompt, not a hard validator
+    # constraint — it controls search locality: smaller = more isolated A/B
+    # deltas (easier attribution of which knob moved the metric), larger = the
+    # planner explores in bigger jumps. Must be >= 1.
+    max_params_per_step: int = 2
+
+    @field_validator("max_params_per_step")
+    @classmethod
+    def _at_least_one(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("max_params_per_step must be >= 1")
+        return v
 
 
 class StorageConfig(BaseModel):

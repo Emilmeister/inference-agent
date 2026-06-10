@@ -121,7 +121,7 @@ benchmark:
   # запасом сверху: SGLang-конфиги ловят c=48 без потолка, нужно дать
   # верхние уровни чтобы реальный ceiling нашёлся, а не «уперлись в потолок
   # sweep'а». Дешёвые уровни (бесплатные если предыдущие не viable).
-  agentic_concurrency_levels: [4, 8, 12, 16, 20, 22, 24, 26, 28, 30, 32, 48, 64, 96]
+  agentic_concurrency_levels: [16, 20, 22, 24, 26, 28, 30, 32, 48, 64, 96]
 
   agentic_session_timeout_sec: 5400       # 90 мин на сессию (4 turn × ~17 мин worst case)
   agentic_per_turn_timeout_sec: 1200      # 20 мин на один HTTP turn (запас над 60s TTFT + 960s decode)
@@ -149,6 +149,11 @@ experiments:
   plateau_threshold: 0.02
   plateau_window: 30
   engines: ["vllm", "sglang"]
+  # Сколько параметров конфига планировщик может менять за один эксперимент
+  # относительно стартовой точки (бейзлайн-якорь или прошлый топ). Мягкий
+  # гайдлайн в промпте, не жёсткий валидатор: меньше → изолированные A/B-дельты
+  # (понятно, какой кноб сдвинул метрику), больше → крупнее шаги поиска. Min 1.
+  max_params_per_step: 7
 
 # Storage (logs only; experiment results go through the REST API — см. секцию api)
 storage:
