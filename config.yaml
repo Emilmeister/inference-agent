@@ -138,7 +138,7 @@ benchmark:
   # запасом сверху: SGLang-конфиги ловят c=48 без потолка, нужно дать
   # верхние уровни чтобы реальный ceiling нашёлся, а не «уперлись в потолок
   # sweep'а». Дешёвые уровни (бесплатные если предыдущие не viable).
-  agentic_concurrency_levels: [2, 4, 8, 12, 16, 20, 22, 24, 26, 28, 30, 32, 48, 64, 96]
+  agentic_concurrency_levels: [48, 64, 72, 80, 88, 96]
 
   agentic_session_timeout_sec: 5400       # 90 мин на сессию (4 turn × ~17 мин worst case)
   agentic_per_turn_timeout_sec: 1200      # 20 мин на один HTTP turn (запас над 60s TTFT + 960s decode)
