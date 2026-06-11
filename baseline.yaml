@@ -7,73 +7,64 @@
 # iterates ON these measured numbers (one knob at a time), and the dashboard
 # highlights the agent's impact relative to this run.
 #
-# Source: the hand-tuned production launch command (MiniMaxAI/MiniMax-M2.5 on
+# Source: the hand-tuned production launch command (Qwen/Qwen3-Coder-Next-FP8 on
 # H100x4). Flags with dedicated schema fields live in those fields; everything
 # else is passed verbatim through extra_engine_args. Container env vars go in
 # extra_env.
 #
-# NOTE: --reasoning-parser / --tool-call-parser / --enable-auto-tool-choice are
-# NOT repeated here — they are always appended by container.vllm_extra_args in
-# config.yaml. The model id (--model MiniMaxAI/MiniMax-M2.5) and --host/--port
-# are injected by the engine builder; dedup_flags drops accidental duplicates.
+# NOTE: --tool-call-parser / --enable-auto-tool-choice are NOT repeated here —
+# they are always appended by container.vllm_extra_args in config.yaml.
+# Qwen3-Coder-Next is a non-thinking coder model, so there is NO reasoning
+# parser. The model id (--model Qwen/Qwen3-Coder-Next-FP8) and --host/--port are
+# injected by the engine builder; dedup_flags drops accidental duplicates.
 #
 # DELIBERATELY OMITTED:
-#   --served-model-name MiniMaxAI/MiniMax-M2.5 and the local /models/... path.
+#   --served-model-name Qwen/Qwen3-Coder-Next and the local /models/... path.
 #     The benchmark harness addresses the model by its HF id (config.model_name
-#     = "MiniMaxAI/MiniMax-M2.5") in every smoke/benchmark request and resolves
-#     weights from the mounted HF cache, so the served alias is irrelevant —
-#     the engine itself is byte-identical.
+#     = "Qwen/Qwen3-Coder-Next-FP8") in every smoke/benchmark request and
+#     resolves weights from the mounted HF cache, so the served alias is
+#     irrelevant — the engine itself is byte-identical.
 #   --port 8080. The harness talks to the engine on the builder's default port
 #     (8000); the prod 8080 is a routing detail, not a benchmark knob.
 
 engine: vllm
 
 tensor_parallel_size: 4
-max_model_len: 196608
+max_model_len: 262144
 
-gpu_memory_utilization: 0.9
+gpu_memory_utilization: 0.88
 max_num_seqs: 128
 max_num_batched_tokens: 10240
 
-scheduling_policy: fcfs
 quantization: fp8
 dtype: bfloat16
+attention_backend: FLASH_ATTN
 
 enable_prefix_caching: true
 enable_chunked_prefill: true
 
 # Container environment variables (nerdctl -e KEY=VALUE). Copied verbatim from
-# the production launch env.
+# the production launch env. TORCH_CUDA_ARCH_LIST=9.0 targets H100 (sm_90).
 extra_env:
   TZ: "Europe/Moscow"
   CUDA_DISABLE_CONTROL: "true"
   OMP_NUM_THREADS: "96"
+  NCCL_CUMEM_ENABLE: "true"
+  TORCH_CUDA_ARCH_LIST: "9.0"
   VLLM_FLASH_ATTN_VERSION: "3"
-  SAFETENSORS_FAST_GPU: "1"
 
 # Flags without a dedicated ExperimentConfig field — passed through verbatim,
 # in the same order as the production command. --enable-expert-parallel is the
-# MoE expert-parallel switch (MiniMax-M2.5 is a MoE model); the
-# compilation-config pins the piecewise CUDA-graph mode from the prod command.
+# MoE expert-parallel switch (Qwen3-Coder-Next is a 512-expert MoE).
 extra_engine_args:
-  - "--stream-interval"
-  - "3"
-  - "--async-scheduling"
-  - "--performance-mode"
-  - "throughput"
-  - "--seed"
-  - "1024"
-  - "--optimization-level"
-  - "3"
   - "--enable-expert-parallel"
   - "--enable-prompt-tokens-details"
   - "--enable-force-include-usage"
-  - "--compilation-config"
-  - '{"cudagraph_mode": "PIECEWISE"}'
+  - "--async-scheduling"
 
 rationale: >-
-  Operator-defined baseline (hand-tuned MiniMaxAI/MiniMax-M2.5 on H100x4): TP=4,
-  fp8 quantization, bfloat16, expert-parallel MoE, prefix+chunked prefill,
-  throughput perf-mode, optimization-level 3, piecewise CUDA graphs,
-  gpu_mem_util=0.9, max_num_seqs=128, max_num_batched_tokens=10240. The agent's
-  job is to beat this on the optimization goals without breaking correctness.
+  Operator-defined baseline (hand-tuned Qwen/Qwen3-Coder-Next-FP8 on H100x4):
+  TP=4, native fp8, bfloat16, expert-parallel MoE, FLASH_ATTN backend,
+  prefix+chunked prefill, async scheduling, gpu_mem_util=0.88, max_num_seqs=128,
+  max_num_batched_tokens=10240, ctx=262144. The agent's job is to beat this on
+  the optimization goals without breaking correctness.

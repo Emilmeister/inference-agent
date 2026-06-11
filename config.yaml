@@ -1,24 +1,24 @@
 # Модель для бенчмарка
-model_name: "MiniMaxAI/MiniMax-M2.5"
+model_name: "Qwen/Qwen3-Coder-Next-FP8"
 model_revision: null
 
 # Квантизация фиксируется на уровне всего прогона: один и тот же режим
 # применяется ко ВСЕМ экспериментам, планировщик её не варьирует.
 # Допустимые значения зависят от движка (vLLM/SGLang): fp8, awq, gptq, ...
 #
-# null здесь НЕ значит "без квантизации". Веса MiniMax-M2.5 уже нативно лежат в
-# блочном FP8 (config.json: quant_method=fp8, weight_block_size=[128,128]), и
-# vLLM, и SGLang определяют это автоматически из config.json. Поэтому НЕ
+# null здесь НЕ значит "без квантизации". Веса Qwen3-Coder-Next-FP8 уже нативно
+# лежат в блочном FP8 (config.json: quant_method=fp8, weight_block_size=[128,128]),
+# и vLLM, и SGLang определяют это автоматически из config.json. Поэтому НЕ
 # навязываем --quantization флаг планируемым экспериментам: на SGLang явный
 # --quantization fp8 может перебить автодетект блочной схемы и уронить загрузку
 # весов. Операторский vLLM-бейзлайн передаёт --quantization fp8 явно — это
 # зашито отдельно в baseline.yaml и здесь не дублируется.
-quantization: null
+quantization: fp8
 
 # Контекстное окно фиксируется на уровне run, планировщик его не варьирует.
-# Бейзлайн MiniMax-M2.5 использует 196608. Если хочешь дать планировщику
-# свободу выбора (legacy-поведение) — поставь null.
-max_model_len: 196608
+# Бейзлайн Qwen3-Coder-Next использует 262144 (256K). Если хочешь дать
+# планировщику свободу выбора (legacy-поведение) — поставь null.
+max_model_len: 262144
 
 # LLM агента (для принятия решений — любой OpenAI-совместимый endpoint)
 # api_key читается из переменной окружения OPENAI_API_KEY (или укажи свою через api_key_env).
@@ -39,10 +39,10 @@ container:
   network: "host"
   shm_size: "16g"
   # Сколько GPU отдать движку, считая с индекса 0 (карты 0..gpu_count-1).
-  # Бейзлайн MiniMax-M2.5 использует 4 карты (TP=4), поэтому весь прогон закреплён
-  # на первых 4 GPU стенда 8xH100 (GPU 0-3) — tensor_parallel_size планировщика
-  # автоматически ограничится делителями четырёх {1,2,4}. Поставь 8 / null, если
-  # хочешь, чтобы агент исследовал и конфиги на всех 8 картах.
+  # Бейзлайн Qwen3-Coder-Next использует 4 карты (TP=4), поэтому весь прогон
+  # закреплён на первых 4 GPU стенда 8xH100 (GPU 0-3) — tensor_parallel_size
+  # планировщика автоматически ограничится делителями четырёх {1,2,4}. Поставь
+  # 8 / null, если хочешь, чтобы агент исследовал и конфиги на всех 8 картах.
   gpu_count: 4
   # MUST point at the hub/ subdir — HF_HUB_CACHE inside the container
   # defaults to /root/.cache/huggingface/hub. Putting models at the cache
@@ -50,27 +50,22 @@ container:
   model_cache_dir: "/root/.cache/huggingface/hub"
 
   # Фиксированные аргументы, которые всегда добавляются к nerdctl run
-  # (не перебираются LLM, передаются как есть). Для MiniMax-M2.5 это
-  # обязательные парсеры reasoning/tool-call — без них ломается корректность
-  # (tool calling / reasoning), и эксперимент уходит в failed_correctness.
+  # (не перебираются LLM, передаются как есть). Qwen3-Coder-Next — coder-модель
+  # без reasoning (thinking нет), поэтому reasoning-parser НЕ нужен; обязателен
+  # только tool-call-parser qwen3_coder + enable-auto-tool-choice — без них
+  # ломается tool calling и эксперимент уходит в failed_correctness.
   vllm_extra_args:
     - "--enable-auto-tool-choice"
-    - "--reasoning-parser"
-    - "minimax_m2"
     - "--tool-call-parser"
-    - "minimax_m2"
-  # Always-on флаги SGLang для MiniMax-M2.5 (correctness-критичные, не зависят
-  # от tp-size). Имена парсеров отличаются от vLLM:
-  #   reasoning-parser=minimax-append-think, tool-call-parser=minimax-m2.
-  #   --trust-remote-code обязателен для MiniMax. (SGLang cookbook M2.5.)
+    - "qwen3_coder"
+  # Always-on флаги SGLang для Qwen3-Coder-Next. Имя tool-парсера то же, что у
+  # vLLM — qwen3_coder (SGLang cookbook). Reasoning-parser и --trust-remote-code
+  # не нужны (arch Qwen3NextForCausalLM поддерживается нативно).
   # --mem-fraction-static и --ep НЕ зашиты: первое — отдельное поле, которое
   # варьирует планировщик; второе должно равняться tp-size (см. planner_instructions).
   sglang_extra_args:
-    - "--reasoning-parser"
-    - "minimax-append-think"
     - "--tool-call-parser"
-    - "minimax-m2"
-    - "--trust-remote-code"
+    - "qwen3_coder"
 
 # Поведение при старте движка (healthcheck, pull образа).
 # Бюджет ожидания ограничен двумя часами:
@@ -200,23 +195,24 @@ planner_instructions: |
   в блоке "## BASELINE — operator anchor" и итерирует ОТ него (по одному knob
   за раз). НЕ генерируй generic-бейзлайн заново.
 
-  ВАЖНО про память: хотя quantization в run-конфиге = null, модель MiniMax-M2.5
-  УЖЕ нативно в FP8 (≈половина footprint от bf16) — оба движка определяют это
-  автоматически из config.json. НЕ закладывай bf16-объём весов при оценке KV-cache
-  и batch size, и НЕ добавляй --quantization в extra_engine_args.
+  ВАЖНО про память: хотя quantization в run-конфиге = null, модель
+  Qwen3-Coder-Next-FP8 УЖЕ нативно в FP8 (≈половина footprint от bf16) — оба
+  движка определяют это автоматически из config.json. НЕ закладывай bf16-объём
+  весов при оценке KV-cache и batch size, и НЕ добавляй --quantization в
+  extra_engine_args.
 
   Жёсткие инварианты модели (нельзя выкидывать, иначе ломается корректность).
-  Парсеры reasoning/tool-call и enable-auto-tool-choice / trust-remote-code уже
-  идут из container.{vllm,sglang}_extra_args, поэтому в extra_engine_args их НЕ
-  дублируй (имена отличаются по движкам: vLLM — minimax_m2/minimax_m2; SGLang —
-  minimax-append-think/minimax-m2).
+  tool-call-parser qwen3_coder и enable-auto-tool-choice уже идут из
+  container.{vllm,sglang}_extra_args, поэтому в extra_engine_args их НЕ дублируй
+  (имя tool-парсера одинаковое у обоих движков — qwen3_coder). Reasoning-parser
+  НЕ нужен: Qwen3-Coder-Next — non-thinking coder-модель.
 
-  MiniMax-M2.5 — MoE-модель:
+  Qwen3-Coder-Next — MoE-модель (512 экспертов, 10 активных, 80B/3B-active):
   - Для vLLM: --enable-expert-parallel остаётся включённым (идёт из baseline.yaml
     extra_engine_args); не предлагай его выключить.
   - Для SGLang: expert parallelism включается через --ep <N>, причём N должен
     равняться выбранному tp-size. Если хочешь EP — добавь в extra_engine_args
     ["--ep", "<tp_size>"] ровно с тем же числом, что и tensor_parallel_size.
-    Рекомендованный mem-fraction-static для MiniMax-M2.5 на SGLang — ~0.85
-    (поле mem_fraction_static).
+  - attention_backend FLASH_ATTN — рабочий выбор бейзлайна для vLLM на H100;
+    можно пробовать и другие бэкенды как отдельную ось поиска.
 
