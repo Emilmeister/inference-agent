@@ -1,70 +1,84 @@
-# Operator-defined BASELINE launch config (anchor experiment).
+# Operator-defined BASELINE launch config (anchor experiment) — Qwen3.5-397B-A17B.
 #
-# Shaped like an ExperimentConfig. Loaded by the agent CLI (--baseline, default
-# this file). When present AND no baseline yet exists in the DB for this
+# Shaped like an ExperimentConfig. Loaded by the agent CLI (sibling baseline.yaml
+# of config.yaml). When present AND no baseline yet exists in the DB for this
 # hardware+model, it runs deterministically as experiment #1 — WITHOUT the LLM
-# planner — so the benchmark harness measures a real anchor. The planner then
-# iterates ON these measured numbers (one knob at a time), and the dashboard
-# highlights the agent's impact relative to this run.
+# planner — so the harness measures a real anchor. The planner then iterates ON
+# these measured numbers (one knob at a time), and the dashboard highlights the
+# agent's impact relative to this run.
 #
-# Source: the hand-tuned production launch command (Qwen/Qwen3-Coder-Next-FP8 on
-# H100x4). Flags with dedicated schema fields live in those fields; everything
-# else is passed verbatim through extra_engine_args. Container env vars go in
-# extra_env.
+# Source: prod runtimeSpec (vllm serve, H100x8, TP=8). Flags with dedicated
+# schema fields live in those fields; everything else passes verbatim through
+# extra_engine_args (in the same order as the prod command). Container env vars
+# go in extra_env.
 #
-# NOTE: --tool-call-parser / --enable-auto-tool-choice are NOT repeated here —
-# they are always appended by container.vllm_extra_args in config.yaml.
-# Qwen3-Coder-Next is a non-thinking coder model, so there is NO reasoning
-# parser. The model id (--model Qwen/Qwen3-Coder-Next-FP8) and --host/--port are
-# injected by the engine builder; dedup_flags drops accidental duplicates.
+# NOTE: --reasoning-parser / --tool-call-parser / --enable-auto-tool-choice are
+# NOT repeated here — they are always appended by container.vllm_extra_args in
+# config.yaml.
 #
 # DELIBERATELY OMITTED:
-#   --served-model-name Qwen/Qwen3-Coder-Next and the local /models/... path.
-#     The benchmark harness addresses the model by its HF id (config.model_name
-#     = "Qwen/Qwen3-Coder-Next-FP8") in every smoke/benchmark request and
-#     resolves weights from the mounted HF cache, so the served alias is
-#     irrelevant — the engine itself is byte-identical.
-#   --port 8080. The harness talks to the engine on the builder's default port
-#     (8000); the prod 8080 is a routing detail, not a benchmark knob.
+#   --served-model-name Qwen/Qwen3.5-397B-A17B and the /models/... path. The
+#     harness addresses the model by its HF id (config.model_name) and resolves
+#     weights from the mounted HF cache, so the served alias is irrelevant.
+#   --host 0.0.0.0 / --port 8080 — injected by the engine builder (port 8000).
+#   --scheduling-policy fcfs — already the default scheduling_policy.
 
 engine: vllm
 
-tensor_parallel_size: 4
+tensor_parallel_size: 8
 max_model_len: 262144
 
 gpu_memory_utilization: 0.88
-max_num_seqs: 128
-max_num_batched_tokens: 10240
+max_num_seqs: 64
+max_num_batched_tokens: 16384
 
 quantization: fp8
-dtype: bfloat16
-attention_backend: FLASH_ATTN
+kv_cache_dtype: fp8_e4m3
 
 enable_prefix_caching: true
 enable_chunked_prefill: true
 
-# Container environment variables (nerdctl -e KEY=VALUE). Copied verbatim from
-# the production launch env. TORCH_CUDA_ARCH_LIST=9.0 targets H100 (sm_90).
+# Container environment variables (nerdctl -e KEY=VALUE), copied verbatim from
+# the prod launch env.
 extra_env:
   TZ: "Europe/Moscow"
   CUDA_DISABLE_CONTROL: "true"
   OMP_NUM_THREADS: "96"
   NCCL_CUMEM_ENABLE: "true"
-  TORCH_CUDA_ARCH_LIST: "9.0"
   VLLM_FLASH_ATTN_VERSION: "3"
+  SAFETENSORS_FAST_GPU: "1"
 
-# Flags without a dedicated ExperimentConfig field — passed through verbatim,
-# in the same order as the production command. --enable-expert-parallel is the
-# MoE expert-parallel switch (Qwen3-Coder-Next is a 512-expert MoE).
+# Flags without a dedicated ExperimentConfig field — passed through verbatim, in
+# the same order as the prod command. --enable-expert-parallel = MoE expert
+# parallelism; --speculative-config = MTP speculative decoding.
+#
+# NOTE: the multimodal --mm-* / --limit-mm-per-prompt flags are NOT here — they
+# are fixed in container.vllm_extra_args (config.yaml) so the planner can't vary
+# the multimodal configuration. The builder appends them to every run including
+# this baseline.
 extra_engine_args:
+  - "--stream-interval"
+  - "2"
+  - "--async-scheduling"
+  - "--performance-mode"
+  - "throughput"
   - "--enable-expert-parallel"
+  - "--seed"
+  - "1024"
+  - "--attention-config.flash_attn_version=3"
+  - "--optimization-level"
+  - "3"
+  - "--speculative-config"
+  - '{"method":"qwen3_next_mtp","num_speculative_tokens":1}'
   - "--enable-prompt-tokens-details"
   - "--enable-force-include-usage"
-  - "--async-scheduling"
+  - "--override-generation-config"
+  - '{"max_new_tokens": 65536}'
 
 rationale: >-
-  Operator-defined baseline (hand-tuned Qwen/Qwen3-Coder-Next-FP8 on H100x4):
-  TP=4, native fp8, bfloat16, expert-parallel MoE, FLASH_ATTN backend,
-  prefix+chunked prefill, async scheduling, gpu_mem_util=0.88, max_num_seqs=128,
-  max_num_batched_tokens=10240, ctx=262144. The agent's job is to beat this on
-  the optimization goals without breaking correctness.
+  Operator-defined baseline (prod Qwen3.5-397B-A17B-FP8 on H100x8): TP=8, native
+  fp8, fp8_e4m3 KV cache, expert-parallel MoE, MTP speculative decoding (1 token),
+  prefix+chunked prefill, async scheduling + throughput perf-mode, optimization
+  level 3, gpu_mem_util=0.88, max_num_seqs=64, max_num_batched_tokens=16384,
+  ctx=262144. The agent's job is to beat this on the optimization goals without
+  breaking correctness.

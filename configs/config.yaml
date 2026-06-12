@@ -1,35 +1,25 @@
-# Модель для бенчмарка
-model_name: "Qwen/Qwen3-Coder-Next-FP8"
+# Модель для бенчмарка — Qwen3.5-397B-A17B (MoE, 397B весов / 17B активных),
+# мультимодальная (vision), thinking-модель с reasoning. Веса нативно в FP8.
+model_name: "Qwen/Qwen3.5-397B-A17B-FP8"
 model_revision: null
 
 # Квантизация фиксируется на уровне всего прогона: один и тот же режим
 # применяется ко ВСЕМ экспериментам, планировщик её не варьирует.
-# Допустимые значения зависят от движка (vLLM/SGLang): fp8, awq, gptq, ...
-#
-# null здесь НЕ значит "без квантизации". Веса Qwen3-Coder-Next-FP8 уже нативно
-# лежат в блочном FP8 (config.json: quant_method=fp8, weight_block_size=[128,128]),
-# и vLLM, и SGLang определяют это автоматически из config.json. Поэтому НЕ
-# навязываем --quantization флаг планируемым экспериментам: на SGLang явный
-# --quantization fp8 может перебить автодетект блочной схемы и уронить загрузку
-# весов. Операторский vLLM-бейзлайн передаёт --quantization fp8 явно — это
-# зашито отдельно в baseline.yaml и здесь не дублируется.
+# Веса Qwen3.5-397B-A17B-FP8 нативно в блочном FP8; операторская команда
+# передаёт --quantization fp8 явно — повторяем здесь, чтобы планировщик
+# отталкивался от того же режима.
 quantization: fp8
 
 # Контекстное окно фиксируется на уровне run, планировщик его не варьирует.
-# Бейзлайн Qwen3-Coder-Next использует 262144 (256K). Если хочешь дать
-# планировщику свободу выбора (legacy-поведение) — поставь null.
 max_model_len: 262144
 
 # LLM агента (для принятия решений — любой OpenAI-совместимый endpoint)
 # api_key читается из переменной окружения OPENAI_API_KEY (или укажи свою через api_key_env).
-# Можно также явно положить ключ в api_key (не рекомендуется коммитить).
 agent_llm:
   base_url: "https://api.openai.com/v1"
   model: "gpt-4o-mini"
   api_key_env: "OPENAI_API_KEY"
   temperature: 0.0
-  # "json_schema" — strict structured outputs (рекомендуется для OpenAI и совр. провайдеров)
-  # "json_object" — fallback: схема инлайнится в промпт, провайдер только гарантирует JSON
   structured_output_mode: "json_schema"
 
 # Container runtime (nerdctl + containerd)
@@ -38,181 +28,109 @@ container:
   sglang_image: "lmsysorg/sglang:latest"
   network: "host"
   shm_size: "16g"
-  # Сколько GPU отдать движку, считая с индекса 0 (карты 0..gpu_count-1).
-  # Бейзлайн Qwen3-Coder-Next использует 4 карты (TP=4), поэтому весь прогон
-  # закреплён на первых 4 GPU стенда 8xH100 (GPU 0-3) — tensor_parallel_size
-  # планировщика автоматически ограничится делителями четырёх {1,2,4}. Поставь
-  # 8 / null, если хочешь, чтобы агент исследовал и конфиги на всех 8 картах.
-  gpu_count: 4
-  # MUST point at the hub/ subdir — HF_HUB_CACHE inside the container
-  # defaults to /root/.cache/huggingface/hub. Putting models at the cache
-  # root instead means engines look in hub/ and don't see anything.
+  # TP=8 — модель занимает все 8 карт стенда 8xH100 (GPU 0-7).
+  gpu_count: 8
   model_cache_dir: "/root/.cache/huggingface/hub"
 
-  # Фиксированные аргументы, которые всегда добавляются к nerdctl run
-  # (не перебираются LLM, передаются как есть). Qwen3-Coder-Next — coder-модель
-  # без reasoning (thinking нет), поэтому reasoning-parser НЕ нужен; обязателен
-  # только tool-call-parser qwen3_coder + enable-auto-tool-choice — без них
-  # ломается tool calling и эксперимент уходит в failed_correctness.
+  # Фиксированные аргументы, которые всегда добавляются к каждому vLLM-запуску
+  # (baseline + планировщик), не перебираются LLM.
+  #   1) model-invariant флаги корректности: без reasoning/tool-парсеров ломается
+  #      thinking и tool calling и эксперимент уходит в failed_correctness.
+  #      Qwen3.5 — thinking-модель → reasoning-parser qwen3 обязателен.
+  #   2) флаги мультимодальности (Qwen3.5 — vision-модель): vision-энкодер,
+  #      mm-processor cache и лимиты. Зашиты здесь, чтобы планировщик их НЕ менял
+  #      — мультимодальная конфигурация фиксирована на уровне run.
   vllm_extra_args:
     - "--enable-auto-tool-choice"
     - "--tool-call-parser"
     - "qwen3_coder"
-  # Always-on флаги SGLang для Qwen3-Coder-Next. Имя tool-парсера то же, что у
-  # vLLM — qwen3_coder (SGLang cookbook). Reasoning-parser и --trust-remote-code
-  # не нужны (arch Qwen3NextForCausalLM поддерживается нативно).
-  # --mem-fraction-static и --ep НЕ зашиты: первое — отдельное поле, которое
-  # варьирует планировщик; второе должно равняться tp-size (см. planner_instructions).
-  sglang_extra_args:
-    - "--tool-call-parser"
-    - "qwen3_coder"
+    - "--reasoning-parser"
+    - "qwen3"
+    - "--mm-encoder-tp-mode"
+    - "data"
+    - "--mm-processor-cache-type"
+    - "shm"
+    - "--mm-processor-cache-gb"
+    - "8"
+    - "--limit-mm-per-prompt"
+    - '{"image":5,"video":0}'
+    - "--mm-processor-kwargs"
+    - '{"max_pixels":2073600}'
 
 # Поведение при старте движка (healthcheck, pull образа).
-# Бюджет ожидания ограничен двумя часами:
-#   hard_timeout_sec — абсолютный потолок ожидания /health = 200.
-#   idle_timeout_sec — если в логах контейнера нет нового маркера прогресса
-#     (loading weights, capturing cuda graph, ...) дольше этого времени —
-#     считаем, что движок завис, и абортим.
-# Idle-таймер сбрасывается на каждом новом маркере, поэтому большие модели
-# (60+ GB), которые честно грузятся 20+ минут с диска, успешно стартуют —
-# нужно лишь поднять hard_timeout_sec.
 startup:
-  hard_timeout_sec: 3600       # 60 мин — увеличь если модель большая (60GB+ → 3600+)
-  idle_timeout_sec: 1800        # 30 мин без прогресса в логах = stall
+  hard_timeout_sec: 3600
+  idle_timeout_sec: 1800
   log_scan_interval_sec: 10.0
-  image_pull_timeout_sec: 900  # 15 мин на nerdctl pull образа движка
-  container_run_timeout_sec: 180  # 3 мин на сам `nerdctl run -d` (без healthcheck);
-                                  # бамп если видишь startup_timeout при локально присутствующем образе
+  image_pull_timeout_sec: 900
+  container_run_timeout_sec: 180
 
 # Бенчмарк
 benchmark:
   warmup_requests: 10
-  # Сжатая сетка: один низкий c для latency, два mid/high для throughput,
-  # один на границе насыщения. Промежуточные [4, 16, 128, 512] выкинуты —
-  # 4/16 редко добавляют сигнал поверх 1/64, 512 = stress (не учитывается
-  # в peak_throughput), 128 близко к 64/256.
   concurrency_levels: [1, 16, 64, 256]
-  # Три длины: одна короткая, одна средняя, одна длинная (RAG-сценарии).
-  # Long-context фазы используют отдельный sweep concurrencies (см. runner.py).
   prompt_lengths: [512, 4096, 32768]
   max_output_tokens: 256
   long_context_max_output_tokens: 8192
-  # 30 сек на фазу вместо 60 — пополам общее время. Дисперсия per-request
-  # (cv) уже считается и попадает в score-derate, так что более короткие
-  # окна не дают шумным конфигам выигрывать на малой выборке.
   duration_per_level_sec: 30
   timeout_sec: 600
-  # SLO для balanced-цели: верхняя граница TTFT p95, при которой
-  # конфигурация считается допустимой для прода. Analyzer ищет максимум
-  # throughput среди фаз, укладывающихся в этот порог.
   latency_threshold_ms: 2000
 
-  # Agentic long-context — ПЕРВИЧНАЯ цель оптимизации. Реалистичная
-  # имитация пула code-агентов: каждая параллельная сессия — НЕЗАВИСИМЫЙ
-  # агент со своим уникальным system+tools+memory+skills промптом (~33k)
-  # и своей историей сообщений (~50k). Кросс-сессионного shared-префикса
-  # НЕТ по дизайну — в реальной мульти-агентной нагрузке (разные customer'ы,
-  # разные тулсеты, разные skills loaded) prefix-cache между сессиями не
-  # попадает. Тест мерит intra-session кеширование: turn N переиспользует
-  # KV от turn N-1 в рамках одной сессии.
-  #
-  # Главная метрика — max_viable_agentic_concurrency: сколько параллельных
-  # независимых агентов конфиг тащит, удовлетворяя ВСЕМ SLO одновременно.
-  # Лидерборд best_agentic сортирует по этому числу.
-  #
-  # Бюджет токенов на одну сессию (steady state):
-  #   unique + turns × (max_output + tool_result_max)
-  #   = 83000 + 8 × (4096 + 1536) = 128_056 — пограничный max_model_len.
-  # Раскладка unique: 10k system + 15k tools + 5k memory + 3k skills + 50k messages.
   enable_agentic_long_context: true
 
-  agentic_shared_prefix_tokens: 0        # агенты разные → cross-session shared нет
-  agentic_unique_prompt_tokens: 83000    # 10k system + 15k tools + 5k memory + 3k skills + 50k messages
-  agentic_max_output_tokens: 16000        # cap per turn (code-агенты пишут крупные блоки)
+  agentic_shared_prefix_tokens: 0
+  agentic_unique_prompt_tokens: 83000
+  agentic_max_output_tokens: 16000
   agentic_tool_result_min_tokens: 1024
   agentic_tool_result_max_tokens: 1536
   agentic_turns_per_session: 4
 
-  # Полный sweep: executor проходит по уровням и останавливается после двух
-  # подряд not-viable фаз. Под H100×8 / 122B FP8 — рабочий диапазон с
-  # запасом сверху: SGLang-конфиги ловят c=48 без потолка, нужно дать
-  # верхние уровни чтобы реальный ceiling нашёлся, а не «уперлись в потолок
-  # sweep'а». Дешёвые уровни (бесплатные если предыдущие не viable).
   agentic_concurrency_levels: [48, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136]
 
-  agentic_session_timeout_sec: 5400       # 90 мин на сессию (4 turn × ~17 мин worst case)
-  agentic_per_turn_timeout_sec: 1200      # 20 мин на один HTTP turn (запас над 60s TTFT + 960s decode)
+  agentic_session_timeout_sec: 5400
+  agentic_per_turn_timeout_sec: 1200
 
-  # SLO под агентский workflow, где «модель думает несколько секунд» — нормально.
-  # Фаза viable только если ВСЕ условия выполнены:
-  #   TTFT p95 ≤ 60000 ms        — допустимая пауза перед первым токеном
-  #   tpot p95 ≤ 100 ms            — ~10 tok/s — комфортная скорость чтения
-  #   session error rate ≤ 5%     — реальные таймауты, не «прошло-почти»
-  # ВНИМАНИЕ: TTFT SLO + tpot SLO × max_output должны помещаться в
-  # per_turn_timeout: 60 + 0.060 × 16000 = 1020s ≤ 1200s.
-  # И на уровне сессии: 4 turn × 1020s = 4080s ≤ session_timeout 5400s.
-  # Иначе legal-SLO turn'ы падают в timeout раньше, чем успевают нарушить SLO,
-  # и попадают в error_rate вместо честного нарушения tpot/ttft p95.
   agentic_ttft_p95_slo_ms: 60000
   agentic_tpot_p95_slo_ms: 100
   agentic_session_error_rate_slo: 0.05
-  agentic_e2e_p95_slo_ms: 0               # 0 → авто = 0.8 * session_timeout (= 4320s)
+  agentic_e2e_p95_slo_ms: 0
 
   agentic_concurrency_ceiling_search: false
 
-# Эксперименты
+# Эксперименты. Только vLLM: операторские команды vLLM-овые, а имена
+# reasoning/tool-парсеров (qwen3 / qwen3_coder) — vLLM-специфичные.
 experiments:
   max_experiments: 100
   plateau_threshold: 0.02
   plateau_window: 30
-  engines: ["vllm", "sglang"]
-  # Сколько параметров конфига планировщик может менять за один эксперимент
-  # относительно стартовой точки (бейзлайн-якорь или прошлый топ). Мягкий
-  # гайдлайн в промпте, не жёсткий валидатор: меньше → изолированные A/B-дельты
-  # (понятно, какой кноб сдвинул метрику), больше → крупнее шаги поиска. Min 1.
+  engines: ["vllm"]
   max_params_per_step: 7
 
 # Storage (logs only; experiment results go through the REST API — см. секцию api)
 storage:
   logs_dir: "./logs"
 
-# Inference-api REST сервис. Агент сам в Postgres не ходит — все записи и
-# чтения проходят через этот сервис.
-# Поля можно переопределить env-переменными AGENT_API_<UPPER>:
-#   AGENT_API_BASE_URL, AGENT_API_TOKEN, AGENT_API_TOKEN_ENV, AGENT_API_TIMEOUT_SEC.
-# Токен по умолчанию читается из INFERENCE_API_TOKEN.
+# Inference-api REST сервис.
 api:
   base_url: "http://localhost:8080"
   token_env: "INFERENCE_API_TOKEN"
   timeout_sec: 30.0
 
 # Инструкции для LLM планировщика на естественном языке.
-# Пиши сюда на какие параметры обратить внимание, что попробовать,
-# что пропустить и т.д.
 planner_instructions: |
   Бейзлайн вынесен в отдельный baseline.yaml и прогоняется как измеренный
   эксперимент #1 — планировщик получает его точную команду и реальные метрики
   в блоке "## BASELINE — operator anchor" и итерирует ОТ него (по одному knob
   за раз). НЕ генерируй generic-бейзлайн заново.
 
-  ВАЖНО про память: хотя quantization в run-конфиге = null, модель
-  Qwen3-Coder-Next-FP8 УЖЕ нативно в FP8 (≈половина footprint от bf16) — оба
-  движка определяют это автоматически из config.json. НЕ закладывай bf16-объём
-  весов при оценке KV-cache и batch size, и НЕ добавляй --quantization в
-  extra_engine_args.
+  Qwen3.5-397B-A17B-FP8 — MoE (397B весов, 17B активных), мультимодальная
+  (vision) thinking-модель. Веса нативно в FP8 (≈половина footprint от bf16) —
+  vLLM определяет это автоматически. quantization=fp8 фиксирован, не меняй.
 
-  Жёсткие инварианты модели (нельзя выкидывать, иначе ломается корректность).
-  tool-call-parser qwen3_coder и enable-auto-tool-choice уже идут из
-  container.{vllm,sglang}_extra_args, поэтому в extra_engine_args их НЕ дублируй
-  (имя tool-парсера одинаковое у обоих движков — qwen3_coder). Reasoning-parser
-  НЕ нужен: Qwen3-Coder-Next — non-thinking coder-модель.
-
-  Qwen3-Coder-Next — MoE-модель (512 экспертов, 10 активных, 80B/3B-active):
-  - Для vLLM: --enable-expert-parallel остаётся включённым (идёт из baseline.yaml
-    extra_engine_args); не предлагай его выключить.
-  - Для SGLang: expert parallelism включается через --ep <N>, причём N должен
-    равняться выбранному tp-size. Если хочешь EP — добавь в extra_engine_args
-    ["--ep", "<tp_size>"] ровно с тем же числом, что и tensor_parallel_size.
-  - attention_backend FLASH_ATTN — рабочий выбор бейзлайна для vLLM на H100;
-    можно пробовать и другие бэкенды как отдельную ось поиска.
-
+  Жёсткие инварианты (нельзя выкидывать, иначе ломается корректность):
+  reasoning-parser qwen3, tool-call-parser qwen3_coder и enable-auto-tool-choice
+  уже идут из container.vllm_extra_args — в extra_engine_args их НЕ дублируй.
+  --enable-expert-parallel остаётся включённым (идёт из baseline.yaml
+  extra_engine_args) — не предлагай его выключить (MoE expert parallelism).
+  MTP speculative decoding (--speculative-config qwen3_next_mtp) — рабочий
+  выбор бейзлайна; можно варьировать num_speculative_tokens как ось поиска.

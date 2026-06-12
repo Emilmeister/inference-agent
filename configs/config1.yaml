@@ -1,0 +1,114 @@
+# Модель для бенчмарка — Qwen3.6-35B-A3B (MoE, 35B весов / 3B активных),
+# thinking-модель с reasoning. Веса нативно в FP8.
+model_name: "Qwen/Qwen3.6-35B-A3B-FP8"
+model_revision: null
+
+# Квантизация фиксируется на уровне всего прогона, планировщик её не варьирует.
+quantization: fp8
+
+# Контекстное окно фиксируется на уровне run, планировщик его не варьирует.
+max_model_len: 262144
+
+# LLM агента (для принятия решений — любой OpenAI-совместимый endpoint)
+agent_llm:
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4o-mini"
+  api_key_env: "OPENAI_API_KEY"
+  temperature: 0.0
+  structured_output_mode: "json_schema"
+
+# Container runtime (nerdctl + containerd)
+container:
+  vllm_image: "vllm/vllm-openai:v0.22.0"
+  sglang_image: "lmsysorg/sglang:latest"
+  network: "host"
+  shm_size: "16g"
+  # TP=4 — модель закреплена на первых 4 картах стенда 8xH100 (GPU 0-3).
+  gpu_count: 4
+  model_cache_dir: "/root/.cache/huggingface/hub"
+
+  # Model-invariant флаги корректности, добавляются к каждому vLLM-запуску
+  # (baseline + планировщик). Qwen3.6 — thinking-модель → reasoning-parser
+  # qwen3 обязателен; tool calling — qwen3_coder + enable-auto-tool-choice.
+  vllm_extra_args:
+    - "--enable-auto-tool-choice"
+    - "--tool-call-parser"
+    - "qwen3_coder"
+    - "--reasoning-parser"
+    - "qwen3"
+
+# Поведение при старте движка (healthcheck, pull образа).
+startup:
+  hard_timeout_sec: 3600
+  idle_timeout_sec: 1800
+  log_scan_interval_sec: 10.0
+  image_pull_timeout_sec: 900
+  container_run_timeout_sec: 180
+
+# Бенчмарк
+benchmark:
+  warmup_requests: 10
+  concurrency_levels: [1, 16, 64, 256]
+  prompt_lengths: [512, 4096, 32768]
+  max_output_tokens: 256
+  long_context_max_output_tokens: 8192
+  duration_per_level_sec: 30
+  timeout_sec: 600
+  latency_threshold_ms: 2000
+
+  enable_agentic_long_context: true
+
+  agentic_shared_prefix_tokens: 0
+  agentic_unique_prompt_tokens: 83000
+  agentic_max_output_tokens: 16000
+  agentic_tool_result_min_tokens: 1024
+  agentic_tool_result_max_tokens: 1536
+  agentic_turns_per_session: 4
+
+  agentic_concurrency_levels: [48, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136]
+
+  agentic_session_timeout_sec: 5400
+  agentic_per_turn_timeout_sec: 1200
+
+  agentic_ttft_p95_slo_ms: 60000
+  agentic_tpot_p95_slo_ms: 100
+  agentic_session_error_rate_slo: 0.05
+  agentic_e2e_p95_slo_ms: 0
+
+  agentic_concurrency_ceiling_search: false
+
+# Эксперименты. Только vLLM (см. config.yaml).
+experiments:
+  max_experiments: 100
+  plateau_threshold: 0.02
+  plateau_window: 30
+  engines: ["vllm"]
+  max_params_per_step: 7
+
+# Storage (logs only)
+storage:
+  logs_dir: "./logs"
+
+# Inference-api REST сервис.
+api:
+  base_url: "http://localhost:8080"
+  token_env: "INFERENCE_API_TOKEN"
+  timeout_sec: 30.0
+
+# Инструкции для LLM планировщика.
+planner_instructions: |
+  Бейзлайн вынесен в baseline1.yaml и прогоняется как измеренный эксперимент #1 —
+  планировщик получает его точную команду и реальные метрики и итерирует ОТ него
+  (по одному knob за раз). НЕ генерируй generic-бейзлайн заново.
+
+  Qwen3.6-35B-A3B-FP8 — MoE (35B весов, 3B активных), thinking-модель. Веса
+  нативно в FP8 — vLLM определяет это автоматически. quantization=fp8 фиксирован.
+  dtype=bfloat16 (как в бейзлайне).
+
+  Жёсткие инварианты (нельзя выкидывать): reasoning-parser qwen3, tool-call-parser
+  qwen3_coder и enable-auto-tool-choice идут из container.vllm_extra_args — в
+  extra_engine_args их НЕ дублируй. --enable-expert-parallel остаётся включённым
+  (MoE) — не выключай. MTP speculative decoding (--speculative-config
+  qwen3_next_mtp, 2 токена) — рабочий выбор бейзлайна; num_speculative_tokens
+  можно варьировать как ось поиска. 3B активных параметров → модель быстрая,
+  ожидай высокую viable concurrency.

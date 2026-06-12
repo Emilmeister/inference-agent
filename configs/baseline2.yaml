@@ -1,0 +1,59 @@
+# Operator-defined BASELINE launch config (anchor experiment) — openai/gpt-oss-120b.
+#
+# Shaped like an ExperimentConfig. Sibling baseline of config2.yaml (paired by
+# numeric suffix). Runs deterministically as experiment #1 — WITHOUT the LLM
+# planner — so the harness measures a real anchor. Flags with dedicated schema
+# fields live in those fields; everything else passes verbatim through
+# extra_engine_args (same order as the prod command). Env vars go in extra_env.
+#
+# NOTE: --reasoning-parser / --tool-call-parser / --enable-auto-tool-choice are
+# always appended by container.vllm_extra_args in config2.yaml — NOT repeated here.
+#
+# DELIBERATELY OMITTED:
+#   --served-model-name openai/gpt-oss-120b and the /models/... path (harness
+#     addresses by HF id from the mounted cache).
+#   --host 0.0.0.0 / --port 8080 — injected by the engine builder (port 8000).
+#   --quantization — gpt-oss is mxfp4 native, vLLM autodetects; the prod command
+#     passes no --quantization, so we leave it unset.
+
+engine: vllm
+
+tensor_parallel_size: 4
+max_model_len: 131072
+
+gpu_memory_utilization: 0.85
+max_num_batched_tokens: 10240
+
+# Prod command omits --enable-prefix-caching because vLLM V1 (v0.22) has it ON by
+# default. We set it true explicitly: it is a no-op for the engine but REQUIRED
+# to pass the agent's agentic prefix-cache gate (validator), so the anchor isn't
+# skipped under the agentic optimization goal.
+enable_prefix_caching: true
+enable_chunked_prefill: true
+
+# Container environment variables — copied verbatim from the prod launch env.
+extra_env:
+  TZ: "Europe/Moscow"
+  CUDA_DISABLE_CONTROL: "true"
+  OMP_NUM_THREADS: "32"
+  NCCL_CUMEM_ENABLE: "true"
+  TORCH_CUDA_ARCH_LIST: "9.0"
+  VLLM_FLASH_ATTN_VERSION: "3"
+  VLLM_USE_FLASHINFER_SAMPLER: "0"
+
+# Flags without a dedicated ExperimentConfig field — passed verbatim, in the same
+# order as the prod command. --exclude_tools_when_tool_choice_none is a gpt-oss
+# tool-behaviour flag from the prod command.
+extra_engine_args:
+  - "--optimization-level"
+  - "3"
+  - "--enable-prompt-tokens-details"
+  - "--enable-force-include-usage"
+  - "--exclude_tools_when_tool_choice_none"
+
+rationale: >-
+  Operator-defined baseline (prod openai/gpt-oss-120b on H100x4): TP=4, mxfp4
+  native (no explicit quantization), chunked prefill, prefix caching (vLLM V1
+  default), optimization level 3, gpu_mem_util=0.85,
+  max_num_batched_tokens=10240, ctx=131072. The agent's job is to beat this on
+  the optimization goals without breaking correctness.
