@@ -72,7 +72,7 @@ benchmark:
   agentic_tool_result_max_tokens: 1536
   agentic_turns_per_session: 4
 
-  agentic_concurrency_levels: [48, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136]
+  agentic_concurrency_levels: [16, 32, 48, 64, 80, 96, 112]
 
   agentic_session_timeout_sec: 5400
   agentic_per_turn_timeout_sec: 1200
