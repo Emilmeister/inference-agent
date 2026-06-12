@@ -88,7 +88,7 @@ fi
 # make the imports fail.
 PYPATH="${REPO_ROOT}/src:${HOME}/.local/lib/python3.10/site-packages"
 
-nohup sudo -E PYTHONPATH="$PYPATH" "$AGENT_BIN" -c "$CONFIG" -v > log 2>&1 &
+nohup sudo -E PYTHONPATH="$PYPATH" "$AGENT_BIN" -v > log 2>&1 &
 NEW_PID=$!
 disown "$NEW_PID" 2>/dev/null || true
 

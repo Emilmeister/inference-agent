@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import subprocess
+import time
 
 from huggingface_hub import hf_hub_download, snapshot_download
 
@@ -50,18 +51,60 @@ def _detect_gpus() -> list[GPUInfo]:
         return []
 
 
-def _detect_nvlink() -> bool:
-    """Check if NVLink is available."""
-    try:
-        result = subprocess.run(
-            ["nvidia-smi", "topo", "-m"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return "NV" in result.stdout
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return False
+def _detect_nvlink(attempts: int = 3, timeout_sec: float = 20.0) -> bool:
+    """Check if NVLink is available between GPUs via `nvidia-smi topo -m`.
+
+    For a fixed stand NVLink presence is a hardware CONSTANT, but the topo probe
+    can be slow/contended while GPUs are busy (e.g. a large model is loading in a
+    just-launched container). A transient failure here is dangerous, not
+    cosmetic: `nvlink_available` is part of the exact HardwareProfile match key
+    that history/baseline lookups use, so one flaky probe silently flipping it to
+    False makes the agent think it's on different hardware — it then ignores all
+    prior experiments and re-runs the baseline, splitting the DB into two
+    incompatible nvlink=true/false profiles.
+
+    So we (a) retry with a generous timeout, (b) only trust a probe that actually
+    succeeded (rc==0, non-empty output) — a clean run with no "NV" links is a
+    legitimate False, but a timeout / non-zero exit is a FAILED probe, not
+    evidence of "no NVLink", and (c) log loudly on total failure instead of
+    quietly returning False.
+    """
+    last_err: str | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "topo", "-m"],
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+            )
+        except subprocess.TimeoutExpired:
+            last_err = f"timeout after {timeout_sec}s"
+        except FileNotFoundError:
+            # nvidia-smi missing is not transient — retrying won't help.
+            logger.warning("nvidia-smi not found — assuming nvlink_available=False")
+            return False
+        else:
+            if result.returncode == 0 and result.stdout.strip():
+                # Probe succeeded: trust its verdict (legitimate True or False).
+                return "NV" in result.stdout
+            last_err = (
+                f"exit={result.returncode}, empty_stdout={not result.stdout.strip()}"
+            )
+        if attempt < attempts:
+            logger.debug(
+                "nvlink probe attempt %d/%d failed (%s) — retrying",
+                attempt, attempts, last_err,
+            )
+            time.sleep(1.0)
+    logger.warning(
+        "NVLink detection failed after %d attempts (%s). Falling back to "
+        "nvlink_available=False — if this stand actually has NVLink, the run "
+        "will MISS prior experiments/baseline (history matches on nvlink). "
+        "Re-run when the GPUs are less busy.",
+        attempts, last_err,
+    )
+    return False
 
 
 def _read_model_config(model_name: str, revision: str | None = None) -> dict:

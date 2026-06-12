@@ -46,7 +46,7 @@ nerdctl pull lmsysorg/sglang:latest
 
 ### Конфигурация
 
-Отредактируйте `config.yaml`:
+Отредактируйте `configs/config.yaml`:
 
 ```yaml
 # Модель для бенчмарка
@@ -68,8 +68,19 @@ experiments:
 
 ```bash
 export AGENT_LLM_API_KEY=sk-...
-inference-agent -c config.yaml -v
+inference-agent -v                        # серия: все configs/config[N].yaml по очереди
+inference-agent -c configs/config.yaml -v # одна конкретная пара config+baseline
 ```
+
+#### Прогон нескольких моделей подряд
+
+`inference-agent` без `-c` сканирует папку `configs/` и прогоняет все
+`config[N].yaml` **последовательно** в порядке числового суффикса: `config.yaml`,
+`config1.yaml`, `config2.yaml`, … Каждый конфиг — отдельная модель: прогон
+останавливается штатно (Pareto / `max_experiments`), после чего стартует следующий.
+Каждому `config[N].yaml` сопоставляется sibling `baseline[N].yaml` по суффиксу
+(опционален). Чтобы добавить модель — положите рядом `config1.yaml` и (по желанию)
+`baseline1.yaml`. Папку можно переопределить флагом `--configs-dir`.
 
 #### Переопределение `agent_llm` через переменные окружения
 
@@ -98,7 +109,7 @@ inference-agent -c config.yaml -v
 export AGENT_LLM_BASE_URL="https://foundation-models.api.cloud.ru/v1"
 export AGENT_LLM_MODEL="GigaChat/GigaChat-Max"
 export AGENT_LLM_API_KEY="$CLOUDRU_API_KEY"
-inference-agent -c config.yaml -v
+inference-agent -v
 ```
 
 Агент:
@@ -256,7 +267,7 @@ Long context фазы пропускаются если модель не под
 
 ```
 inference-agent/
-├── config.yaml
+├── configs/                            # config[N].yaml + baseline[N].yaml (серия)
 ├── pyproject.toml
 ├── PLAN.md                              # полная спецификация
 ├── CLAUDE.md                            # инструкции для Claude Code

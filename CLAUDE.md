@@ -57,9 +57,26 @@ tests/                 — unit + integration tests (integration через test
 streamlit_app/
   app.py               — Streamlit dashboard, источник данных — inference-api
   api.py               — sync REST-клиент с теми же сигнатурами, что были у db.py
-config.yaml            — конфиг агента (секция `api` вместо прежней `database`)
+configs/               — пары конфигов агента, прогоняются последовательно
+  config.yaml          — конфиг агента (секция `api` вместо прежней `database`)
+  baseline.yaml        — операторский baseline-якорь для config.yaml
+  config[N].yaml       — доп. модели (config1.yaml, config2.yaml, ...)
+  baseline[N].yaml     — baseline для config[N].yaml (опционален)
 api.config.yaml        — конфиг REST-сервиса (server/auth/database)
 ```
+
+## Multi-model series
+
+`inference-agent` без `-c` сканирует папку `configs/` (флаг `--configs-dir`, дефолт
+`configs`), находит все `config[N].yaml` и прогоняет их **последовательно** в порядке
+числового суффикса: `config.yaml` → `config1.yaml` → `config2.yaml` → … Каждый
+конфиг — отдельный полный прогон графа (своя модель), который останавливается штатно
+по Pareto или `max_experiments`, и только потом стартует следующий. Каждому
+`config[N].yaml` сопоставляется sibling `baseline[N].yaml` по тому же суффиксу;
+отсутствие baseline-файла → прогон без якоря. Падение одной модели логируется, её
+контейнеры чистятся, серия продолжается со следующей; в конце печатается сводка
+исходов. `Ctrl+C` останавливает всю серию. `inference-agent -c configs/config1.yaml`
+запускает ровно одну пару (baseline — sibling по суффиксу, либо явный `--baseline`).
 
 ## Key conventions
 
@@ -116,7 +133,8 @@ export OPENAI_API_KEY=sk-...
 export AGENT_API_BASE_URL=http://localhost:8080
 # INFERENCE_API_TOKEN уже экспортирован выше — token_env=INFERENCE_API_TOKEN
 # по умолчанию.
-inference-agent -c config.yaml -v
+inference-agent -v                       # серия: все configs/config[N].yaml по очереди
+inference-agent -c configs/config.yaml -v  # одна конкретная пара
 
 # Tests
 pip install -e ".[dev]"

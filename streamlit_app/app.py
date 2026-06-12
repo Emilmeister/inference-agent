@@ -8,6 +8,7 @@ Run: `streamlit run streamlit_app/app.py`
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pandas as pd
@@ -1973,7 +1974,7 @@ with tabs[9]:
                         hide_index=True,
                     )
 
-        # ── 6. Agentic side-by-side: per-c metrics ────────────────────────
+        # ── 6. Agentic side-by-side by concurrency (two configs) ──────────
         st.subheader("Agentic — side-by-side by concurrency")
         ag_pair = pair_phases[
             pair_phases["workload_id"] == "agentic_long_context"
@@ -1984,17 +1985,269 @@ with tabs[9]:
                 "в обеих конфигурациях, чтобы появилась эта сводка."
             )
         else:
-            ag_pair["config"] = ag_pair["experiment_id"].map({id_a: "A", id_b: "B"})
-            ag_cols = [
-                "config", "concurrency", "num_requests",
-                "output_tokens_per_sec", "ttft_p95", "tpot_p95",
-                "e2e_p95", "errors", "error_rate",
+            # Two grouped bars per concurrency level — one per compared config
+            # (A vs B), mirroring the global "throughput by concurrency" chart
+            # but WITHOUT the baseline-anchor overlay: here the two bars already
+            # ARE the chosen configs.
+            def _cfg_label(tag: str, row) -> str:
+                eng = str(row.get("engine", "?"))
+                star = " ⭐" if bool(row.get("is_baseline", False)) else ""
+                return f"{tag} · {eng}{star}"
+
+            label_a = _cfg_label("A", row_a)
+            label_b = _cfg_label("B", row_b)
+            # Disambiguate if both labels collapse to the same string (same
+            # engine, neither baseline) so the two series stay distinct.
+            if label_a == label_b:
+                label_a += f" ({str(id_a)[:6]})"
+                label_b += f" ({str(id_b)[:6]})"
+
+            ag_pair["concurrency"] = pd.to_numeric(
+                ag_pair["concurrency"], errors="coerce"
+            )
+            ag_pair = ag_pair.dropna(subset=["concurrency"])
+            ag_pair["config"] = ag_pair["experiment_id"].map(
+                {id_a: label_a, id_b: label_b}
+            )
+            # Categorical x keeps the A/B pair aligned even where one config
+            # skipped a concurrency level.
+            ag_pair["concurrency_label"] = ag_pair["concurrency"].astype(int).astype(str)
+            conc_order = [
+                str(c) for c in sorted(ag_pair["concurrency"].astype(int).unique())
             ]
-            ag_cols = [c for c in ag_cols if c in ag_pair.columns]
-            st.dataframe(
-                ag_pair[ag_cols].sort_values(["concurrency", "config"]),
+            color_map = {label_a: "#1f4e8c", label_b: "#7fb3e6"}  # dark / light blue
+            cat_orders = {"concurrency_label": conc_order, "config": [label_a, label_b]}
+
+            # Chart 1 — agentic throughput (output tokens/sec) per concurrency.
+            fig_ag_tp = px.bar(
+                ag_pair,
+                x="concurrency_label",
+                y="output_tokens_per_sec",
+                color="config",
+                barmode="group",
+                color_discrete_map=color_map,
+                category_orders=cat_orders,
+                hover_data=[
+                    c for c in ("experiment_id", "ttft_p95", "error_rate")
+                    if c in ag_pair.columns
+                ],
+                labels={
+                    "output_tokens_per_sec": "Output tokens/sec (aggregate over sessions)",
+                    "concurrency_label": "Concurrent agentic sessions",
+                    "config": "config",
+                },
+            )
+            st.plotly_chart(fig_ag_tp, use_container_width=True)
+
+            # Chart 2 — same two bars, but latency. Metric selectable (p95).
+            lat_options = {
+                "TTFT p95 (ms)": "ttft_p95",
+                "TPOT p95 (ms)": "tpot_p95",
+                "E2E p95 (ms)": "e2e_p95",
+            }
+            lat_options = {
+                k: v for k, v in lat_options.items() if v in ag_pair.columns
+            }
+            if lat_options:
+                lat_label = st.radio(
+                    "Latency-метрика",
+                    list(lat_options.keys()),
+                    horizontal=True,
+                    key="compare_agentic_latency_metric",
+                )
+                lat_col = lat_options[lat_label]
+                fig_ag_lat = px.bar(
+                    ag_pair,
+                    x="concurrency_label",
+                    y=lat_col,
+                    color="config",
+                    barmode="group",
+                    color_discrete_map=color_map,
+                    category_orders=cat_orders,
+                    hover_data=[
+                        c for c in ("experiment_id", "output_tokens_per_sec", "error_rate")
+                        if c in ag_pair.columns
+                    ],
+                    labels={
+                        lat_col: lat_label,
+                        "concurrency_label": "Concurrent agentic sessions",
+                        "config": "config",
+                    },
+                )
+                st.plotly_chart(fig_ag_lat, use_container_width=True)
+
+            # ── 6b. Total throughput split prefill+decode, by concurrency ──
+            # The runner defines total_tokens_per_sec = (input+output)/wall_time
+            # and output_tokens_per_sec = output/wall_time, so the prefill (input)
+            # rate is exactly total - output — no extra API field needed. Stacked
+            # bar: prefill (bottom) + decode (top) = total height; two side-by-side
+            # stacks per concurrency level (offsetgroup A vs B).
+            st.subheader("Total throughput — prefill + decode by concurrency")
+            st.caption(
+                "Высота столбика = общий throughput (input+output ток/с). Нижний "
+                "сегмент — prefill (обработка промпта/контекста), верхний — decode "
+                "(генерация). ⚠️ В агентном сценарии prefill-объём включает "
+                "закэшированные префиксы (prefix caching), т.е. это *логический* "
+                "вход, а не фактический prefill-compute — при высоком prefix hit "
+                "rate он завышен. Для decode такой оговорки нет."
+            )
+            split = ag_pair.copy()
+            split["prefill_tps"] = (
+                split["total_tokens_per_sec"] - split["output_tokens_per_sec"]
+            ).clip(lower=0)
+            seg_colors = {
+                (label_a, "prefill"): "#1f4e8c", (label_a, "decode"): "#e8820c",
+                (label_b, "prefill"): "#7fb3e6", (label_b, "decode"): "#f6c177",
+            }
+            fig_split = go.Figure()
+            for cfg in (label_a, label_b):
+                sub = split[split["config"] == cfg].sort_values("concurrency")
+                if sub.empty:
+                    continue
+                total_cd = sub["total_tokens_per_sec"]
+                for stage, ycol in (("prefill", "prefill_tps"), ("decode", "output_tokens_per_sec")):
+                    fig_split.add_trace(go.Bar(
+                        x=sub["concurrency_label"],
+                        y=sub[ycol],
+                        name=f"{cfg} · {stage}",
+                        offsetgroup=cfg,
+                        legendgroup=cfg,
+                        marker_color=seg_colors[(cfg, stage)],
+                        customdata=total_cd,
+                        hovertemplate=(
+                            "%{x} agents<br>" + stage + " %{y:.0f} tok/s"
+                            "<br>total %{customdata:.0f} tok/s<extra>" + cfg + "</extra>"
+                        ),
+                    ))
+            fig_split.update_layout(
+                barmode="stack",
+                xaxis_title="Concurrent agentic sessions",
+                yaxis_title="Tokens/sec (prefill + decode = total)",
+                legend_title_text="config · stage",
+            )
+            fig_split.update_xaxes(categoryorder="array", categoryarray=conc_order)
+            st.plotly_chart(fig_split, use_container_width=True)
+
+            # ── 6c. Degradation by concurrency: ttft / tpot / error vs agents ──
+            # Speed-of-degradation view. Viable phases come from concurrency_results
+            # (already in ag_pair). The FIRST non-viable level is stored separately
+            # as a ceiling probe — only its error_rate is structured; ttft/tpot live
+            # inside its `reason` string (e.g. "ttft_p95=65918ms > slo=60000ms"), so
+            # we parse those out to plot the degraded point with its real measured
+            # value and mark it ✖ not viable. SLO line = parsed threshold or the
+            # run-config default.
+            st.subheader("Деградация по concurrency — ttft / tpot / error vs agents")
+            st.caption(
+                "Где конфиг ломается. Линии — viable-фазы (прошли SLO); маркер ✖ — "
+                "первый NOT_VIABLE уровень (ceiling), с которого начинается деградация "
+                "и свип останавливается. Пунктир — порог SLO. ttft/tpot non-viable "
+                "точки распарсены из reason ceiling-пробы (метрика-нарушитель), "
+                "error_rate — структурно."
+            )
+
+            SLO_DEFAULTS = {"ttft_p95": 60000.0, "tpot_p95": 100.0, "error_rate": 0.05}
+
+            def _ceiling_rows(payload: dict, cfg_label: str) -> list[dict]:
+                out = []
+                for p in (payload.get("ceiling_probe_phases") or []):
+                    if p.get("workload_id") != "agentic_long_context":
+                        continue
+                    reason = p.get("reason", "") or ""
+                    parsed = {
+                        m.group(1): float(m.group(2))
+                        for m in re.finditer(r"(ttft_p95|tpot_p95)=([\d.]+)ms", reason)
+                    }
+                    slo = {
+                        m.group(1): float(m.group(2))
+                        for m in re.finditer(
+                            r"(ttft_p95|tpot_p95)=[\d.]+ms > slo=([\d.]+)ms", reason
+                        )
+                    }
+                    err_slo = re.search(r"error_rate=[\d.]+% > slo=([\d.]+)%", reason)
+                    out.append({
+                        "config": cfg_label,
+                        "concurrency": p.get("concurrency"),
+                        "ttft_p95": parsed.get("ttft_p95"),
+                        "tpot_p95": parsed.get("tpot_p95"),
+                        "error_rate": p.get("error_rate"),
+                        "slo_ttft_p95": slo.get("ttft_p95"),
+                        "slo_tpot_p95": slo.get("tpot_p95"),
+                        "slo_error_rate": (
+                            float(err_slo.group(1)) / 100 if err_slo else None
+                        ),
+                        "reason": reason,
+                    })
+                return out
+
+            ceil_df = pd.DataFrame(
+                _ceiling_rows(payload_a, label_a) + _ceiling_rows(payload_b, label_b)
+            )
+            slo_col_for = {
+                "ttft_p95": "slo_ttft_p95",
+                "tpot_p95": "slo_tpot_p95",
+                "error_rate": "slo_error_rate",
+            }
+
+            def _degradation_fig(metric: str, y_title: str, as_pct: bool) -> go.Figure:
+                fig = go.Figure()
+                # SLO threshold: prefer value parsed from a ceiling reason, else default.
+                slo_val = SLO_DEFAULTS[metric]
+                slo_col = slo_col_for[metric]
+                if (
+                    not ceil_df.empty
+                    and slo_col in ceil_df
+                    and ceil_df[slo_col].notna().any()
+                ):
+                    slo_val = float(ceil_df[slo_col].dropna().iloc[0])
+                scale = 100.0 if as_pct else 1.0
+                for cfg in (label_a, label_b):
+                    sub = ag_pair[
+                        (ag_pair["config"] == cfg) & (ag_pair[metric].notna())
+                    ].sort_values("concurrency")
+                    if not sub.empty:
+                        fig.add_trace(go.Scatter(
+                            x=sub["concurrency"], y=sub[metric] * scale,
+                            mode="lines+markers", name=cfg,
+                            line=dict(color=color_map[cfg], width=2),
+                            marker=dict(size=7, color=color_map[cfg]),
+                        ))
+                    if not ceil_df.empty:
+                        csub = ceil_df[
+                            (ceil_df["config"] == cfg) & (ceil_df[metric].notna())
+                        ]
+                        if not csub.empty:
+                            fig.add_trace(go.Scatter(
+                                x=csub["concurrency"], y=csub[metric] * scale,
+                                mode="markers", name=f"{cfg} ✖ not viable",
+                                marker=dict(
+                                    size=15, symbol="x", color=color_map[cfg],
+                                    line=dict(color="crimson", width=2),
+                                ),
+                                hovertext=csub["reason"], hoverinfo="text+x+y",
+                            ))
+                fig.add_hline(
+                    y=slo_val * scale, line_dash="dash", line_color="crimson",
+                    annotation_text=f"SLO {slo_val * scale:g}{'%' if as_pct else ''}",
+                    annotation_position="top left",
+                )
+                fig.update_layout(
+                    xaxis_title="Concurrent agentic sessions",
+                    yaxis_title=y_title,
+                    legend_title_text="config",
+                )
+                return fig
+
+            st.plotly_chart(
+                _degradation_fig("ttft_p95", "TTFT p95 (ms)", as_pct=False),
                 use_container_width=True,
-                hide_index=True,
+            )
+            st.plotly_chart(
+                _degradation_fig("tpot_p95", "TPOT p95 (ms)", as_pct=False),
+                use_container_width=True,
+            )
+            st.plotly_chart(
+                _degradation_fig("error_rate", "Session error rate (%)", as_pct=True),
+                use_container_width=True,
             )
 
             # ── 7. Agentic turn-by-turn overlay, cold/warm split ──────────
