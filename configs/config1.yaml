@@ -79,9 +79,9 @@ benchmark:
 
 # Эксперименты. Только vLLM (см. config.yaml).
 experiments:
-  max_experiments: 100
+  max_experiments: 15
   plateau_threshold: 0.02
-  plateau_window: 30
+  plateau_window: 5
   engines: ["vllm"]
   max_params_per_step: 7
 
