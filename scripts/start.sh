@@ -14,8 +14,8 @@
 #      story: must be loaded into the shell before sudo.
 #
 # Usage:
-#   ./scripts/start.sh                 # uses config.yaml in the repo root
-#   ./scripts/start.sh path/to/config.yaml
+#   ./scripts/start.sh                       # series: every configs/config[N].yaml in turn
+#   ./scripts/start.sh configs/config1.yaml  # run one specific config pair
 #
 # Output:
 #   The previous `log` (if any) is rotated to `log.<timestamp>` and the new
@@ -26,9 +26,18 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-CONFIG="${1:-config.yaml}"
-if [[ ! -f "$CONFIG" ]]; then
-    echo "start.sh: config not found: $CONFIG" >&2
+# No arg → series mode: the agent scans configs/ and runs config.yaml,
+# config1.yaml, config2.yaml, ... sequentially (each its own full run, paired
+# with its sibling baseline[N].yaml). An explicit path → single-config run.
+CONFIG="${1:-}"
+CONFIGS_DIR="${CONFIGS_DIR:-configs}"
+if [[ -n "$CONFIG" ]]; then
+    if [[ ! -f "$CONFIG" ]]; then
+        echo "start.sh: config not found: $CONFIG" >&2
+        exit 2
+    fi
+elif ! compgen -G "$CONFIGS_DIR/config*.yaml" >/dev/null; then
+    echo "start.sh: no config*.yaml found in $CONFIGS_DIR/ (pass an explicit config path to run one)" >&2
     exit 2
 fi
 
@@ -88,7 +97,13 @@ fi
 # make the imports fail.
 PYPATH="${REPO_ROOT}/src:${HOME}/.local/lib/python3.10/site-packages"
 
-nohup sudo -E PYTHONPATH="$PYPATH" "$AGENT_BIN" -v > log 2>&1 &
+# Series mode passes no -c (the agent scans configs/); a single run forwards -c.
+AGENT_ARGS=(-v)
+if [[ -n "$CONFIG" ]]; then
+    AGENT_ARGS+=(-c "$CONFIG")
+fi
+
+nohup sudo -E PYTHONPATH="$PYPATH" "$AGENT_BIN" "${AGENT_ARGS[@]}" > log 2>&1 &
 NEW_PID=$!
 disown "$NEW_PID" 2>/dev/null || true
 
