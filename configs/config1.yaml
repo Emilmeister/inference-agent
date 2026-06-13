@@ -70,7 +70,7 @@ benchmark:
   agentic_max_output_tokens: 16000
   agentic_tool_result_min_tokens: 1024
   agentic_tool_result_max_tokens: 1536
-  agentic_turns_per_session: 2
+  agentic_turns_per_session: 1
 
   agentic_concurrency_levels: [1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100]
 
