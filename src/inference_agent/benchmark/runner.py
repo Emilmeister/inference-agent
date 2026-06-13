@@ -650,6 +650,39 @@ def build_shared_prefix(shared_prefix_tokens: int, seed: int | None) -> str:
     return _generate_prompt(shared_prefix_tokens, rng)
 
 
+def _aggregate_session_throughputs(
+    per_session_results: list[list[dict]],
+) -> tuple[float, float, float, float]:
+    """Straggler-robust agentic throughput = Σ over sessions of (tokensᵢ / tᵢ).
+
+    Returns ``(output_tps, input_tps, total_tps, requests_tps)``. ``tᵢ`` is the
+    session's active generation time — the sum of its turns' e2e latencies
+    (turns run back-to-back, so this is the real wall span spent generating,
+    excluding any simulated tool gaps).
+
+    Why not ``Σtokens / wall_time``: wall_time is the SLOWEST session's
+    completion, so one tail straggler (invisible in p95 latencies) deflates the
+    whole phase and produces spurious throughput dips. Crediting each session at
+    its OWN rate makes a straggler one small term instead of a global divisor.
+    In the uniform (equal-tᵢ) case this is algebraically identical to
+    ``Σtokens / wall_time``, so the aggregate scale is preserved — only the
+    straggler artifact is removed. Sessions with ``tᵢ <= 0`` contribute nothing.
+    """
+    out_tps = in_tps = total_tps = req_tps = 0.0
+    for session_results in per_session_results:
+        o_i = sum(r["output_tokens"] for r in session_results)
+        in_i = sum(r["input_tokens"] for r in session_results)
+        succ_i = sum(1 for r in session_results if not r.get("error"))
+        t_i = sum(r["e2e_latency_ms"] for r in session_results) / 1000.0
+        if t_i <= 0:
+            continue
+        out_tps += o_i / t_i
+        in_tps += in_i / t_i
+        total_tps += (o_i + in_i) / t_i
+        req_tps += succ_i / t_i
+    return out_tps, in_tps, total_tps, req_tps
+
+
 async def run_agentic_long_context_phase(
     api_base_url: str,
     model_name: str,
@@ -737,8 +770,6 @@ async def run_agentic_long_context_phase(
     tpot_list: list[float] = []
     itl_list: list[float] = []
     e2e_list: list[float] = []
-    total_output_tokens = 0
-    total_input_tokens = 0
     errors = 0
     error_details: list[str] = []
     turn_metrics: list[AgenticTurnMetric] = []
@@ -765,17 +796,21 @@ async def run_agentic_long_context_phase(
         itl_list.extend(r["itl_ms_list"])
         if r["e2e_latency_ms"] > 0:
             e2e_list.append(r["e2e_latency_ms"])
-        total_output_tokens += r["output_tokens"]
-        total_input_tokens += r["input_tokens"]
 
     total_requests = len(flat)
-    successful = total_requests - errors
 
     ttft_stats = _compute_percentiles(ttft_list)
     tpot_stats = _compute_percentiles(tpot_list)
     itl_stats = _compute_percentiles(itl_list)
     e2e_stats = _compute_percentiles(e2e_list)
     error_rate = errors / total_requests if total_requests > 0 else 0.0
+
+    # Straggler-robust throughput: Σ over sessions of (tokensᵢ / active_timeᵢ),
+    # instead of Σtokens / wall_time which a single tail straggler deflates.
+    # See _aggregate_session_throughputs for the rationale.
+    out_tps, in_tps, total_tps, req_tps = _aggregate_session_throughputs(
+        per_session_results
+    )
 
     # SLO gate. None = no SLO requested (legacy callers); otherwise we mark
     # the phase non-viable on the first failed condition. Viable phases
@@ -801,12 +836,10 @@ async def run_agentic_long_context_phase(
         tpot_ms=tpot_stats,
         itl_ms=itl_stats,
         e2e_latency_ms=e2e_stats,
-        requests_per_sec=successful / wall_time if wall_time > 0 else 0,
-        input_tokens_per_sec=total_input_tokens / wall_time if wall_time > 0 else 0,
-        output_tokens_per_sec=total_output_tokens / wall_time if wall_time > 0 else 0,
-        total_tokens_per_sec=(total_input_tokens + total_output_tokens) / wall_time
-        if wall_time > 0
-        else 0,
+        requests_per_sec=req_tps,
+        input_tokens_per_sec=in_tps,
+        output_tokens_per_sec=out_tps,
+        total_tokens_per_sec=total_tps,
         errors=errors,
         error_rate=error_rate,
         error_details=error_details[:10],
@@ -818,9 +851,9 @@ async def run_agentic_long_context_phase(
     viable_tag = "VIABLE" if result.viable else f"NOT-VIABLE({','.join(slo_violations)})"
     logger.info(
         "Agentic phase complete: c=%d, sessions=%d, turns/session=%d, "
-        "total_turns=%d, throughput=%.1f tok/s, ttft_p95=%.0f ms, "
-        "tpot_p95=%.1f ms, errors=%d → %s",
-        concurrency, concurrency, turns, total_requests,
+        "total_turns=%d, wall=%.1fs, throughput=%.1f tok/s (Σ per-session, "
+        "straggler-robust), ttft_p95=%.0f ms, tpot_p95=%.1f ms, errors=%d → %s",
+        concurrency, concurrency, turns, total_requests, wall_time,
         result.output_tokens_per_sec, result.ttft_ms.p95, result.tpot_ms.p95,
         errors, viable_tag,
     )

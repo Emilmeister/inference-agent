@@ -13,6 +13,7 @@ Configuration (env):
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -142,6 +143,44 @@ def list_distinct_engines() -> list[str]:
 # ── Summaries ──────────────────────────────────────────────────────────────
 
 
+_SPEC_CFG_RE = re.compile(r"--speculative-config\s+(\{[^{}]*\})")
+_SPEC_METHOD_RE = re.compile(r'"(?:method|model)"\s*:\s*"([^"]+)"')
+_SPEC_NTOK_RE = re.compile(r'"num_speculative_tokens"\s*:\s*(\d+)')
+
+
+def _derive_speculative(algo: Any, container_command: Any) -> Any:
+    """Resolve the speculative-decoding label for display.
+
+    The structured `speculative_algorithm` field is only set when a config used
+    the dedicated speculative fields (`speculative_algorithm` +
+    `speculative_draft_model`) — typically planner runs. Baselines and any config
+    passing `--speculative-config {...}` through extra_engine_args (notably MTP,
+    which has no draft model and can't use the structured slot) leave it
+    None/"none", so the projection shows "none" even though speculation is on.
+    Fall back to the method declared in the actual launch command. Applied at the
+    data layer so EVERY table/selector (Full Comparison, inspector, Impact,
+    search) reflects it, not just one view.
+    """
+    empty = (
+        algo is None
+        or (isinstance(algo, float) and pd.isna(algo))
+        or str(algo).strip().lower() in ("", "none", "null")
+    )
+    if not empty:
+        return algo
+    blob = _SPEC_CFG_RE.search(str(container_command or ""))
+    if not blob:
+        return algo
+    method = _SPEC_METHOD_RE.search(blob.group(1))
+    if not method:
+        return algo
+    ntok = _SPEC_NTOK_RE.search(blob.group(1))
+    label = method.group(1)
+    if ntok:
+        label += f" (n={ntok.group(1)})"
+    return label
+
+
 def _summary_params(filters: Filters) -> dict[str, Any]:
     params: dict[str, Any] = {}
     if filters.hardware is not None:
@@ -183,6 +222,14 @@ def list_experiment_summaries(filters: Filters) -> pd.DataFrame:
         (df["gpu_memory_total_mb"] > 0) & (df["gpu_memory_peak_mb"] > 0),
         0.0,
     )
+    # Backfill speculative_algorithm from the launch command when the structured
+    # field is empty (e.g. MTP passed via --speculative-config). One place →
+    # every consumer of the summary df shows the real method, not "none".
+    if "speculative_algorithm" in df.columns and "container_command" in df.columns:
+        df["speculative_algorithm"] = [
+            _derive_speculative(a, c)
+            for a, c in zip(df["speculative_algorithm"], df["container_command"])
+        ]
     return df
 
 
