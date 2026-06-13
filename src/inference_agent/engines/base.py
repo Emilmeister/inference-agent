@@ -4,10 +4,20 @@ from __future__ import annotations
 
 import abc
 import logging
+import os
 
 from inference_agent.models import AgentConfig, ExperimentConfig
 
 logger = logging.getLogger(__name__)
+
+# Host proxy env vars forwarded into every engine container so vLLM / SGLang
+# reach the network through the same proxy the agent uses on locked-down VMs.
+# Both spellings are forwarded — libraries disagree on which case they read —
+# and NO_PROXY so internal/localhost traffic bypasses the proxy.
+_PROXY_ENV_VARS = (
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "no_proxy",
+)
 
 
 def dedup_flags(args: list[str]) -> list[str]:
@@ -85,6 +95,14 @@ class BaseEngine(abc.ABC):
         # LLM-generated env vars
         for key, val in experiment.extra_env.items():
             args.extend(["-e", f"{key}={val}"])
+        # Forward host proxy settings (HTTP_PROXY / HTTPS_PROXY / NO_PROXY, both
+        # cases) into the container. Placed AFTER extra_env so the operator's
+        # real proxy wins over any planner-set value, and only emitted for vars
+        # actually present in the agent's environment — no-op off-proxy.
+        for var in _PROXY_ENV_VARS:
+            val = os.environ.get(var)
+            if val:
+                args.extend(["-e", f"{var}={val}"])
         # Restrict GPU visibility to the configured subset. Placed AFTER
         # extra_env (last -e wins) so a planner-generated CUDA_VISIBLE_DEVICES
         # cannot widen the box past what the operator allocated in config.

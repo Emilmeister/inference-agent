@@ -141,7 +141,12 @@ SELECT
     COALESCE((p.value->'e2e_latency_ms'->>'p95')::float, 0) AS e2e_p95,
     COALESCE((p.value->'e2e_latency_ms'->>'cv')::float, 0) AS e2e_cv,
     COALESCE((p.value->>'errors')::int, 0) AS errors,
-    COALESCE((p.value->>'error_rate')::float, 0) AS error_rate
+    COALESCE((p.value->>'error_rate')::float, 0) AS error_rate,
+    COALESCE((p.value->>'viable')::boolean, true) AS viable,
+    COALESCE(
+        ARRAY(SELECT jsonb_array_elements_text(p.value->'slo_violations')),
+        ARRAY[]::text[]
+    ) AS slo_violations
 FROM experiments e
 CROSS JOIN LATERAL jsonb_array_elements(
     COALESCE(e.data->'benchmark'->'concurrency_results', '[]'::jsonb)

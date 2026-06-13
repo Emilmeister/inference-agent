@@ -627,9 +627,12 @@ async def analyzer_node(state: AgentState) -> dict:
 
     # Agentic ceiling-probe view: deliberate sweep, NOT failures.
     probed = sorted({p.concurrency for p in result.ceiling_probe_phases})
+    # Non-viable agentic phases now also live in concurrency_results (so their
+    # metrics persist), so filter on r.viable here — only SLO-passing levels are
+    # "viable" for the LLM summary.
     viable = sorted({
         r.concurrency for r in result.benchmark.concurrency_results
-        if r.workload_id == "agentic_long_context"
+        if r.workload_id == "agentic_long_context" and r.viable
     })
     if probed or viable:
         latest_payload["agentic"] = {

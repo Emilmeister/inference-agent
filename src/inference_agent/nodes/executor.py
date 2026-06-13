@@ -516,6 +516,16 @@ async def _run_all_phases(
                         errors=result.errors,
                         reason=reason,
                     ))
+                    # Persist the FULL non-viable phase too (result.viable=False),
+                    # not just the lossy CeilingProbeInfo summary. This keeps its
+                    # measured percentile metrics (ttft/tpot/throughput/e2e) in
+                    # benchmark.concurrency_results → the DB → the dashboard, so
+                    # the ceiling level shows real numbers on the charts instead
+                    # of values regex-parsed from `reason`. Aggregation stays
+                    # honest: _compute_agentic_metrics and the LLM-facing "viable"
+                    # sets all filter on result.viable, so a non-viable phase
+                    # never counts toward max_viable / peak / leaderboards.
+                    concurrency_results.append(result)
                     agentic_ceiling_lock = concurrency
                     logger.info(
                         "  Agentic ceiling locked at c=%d (%s) — terminating "

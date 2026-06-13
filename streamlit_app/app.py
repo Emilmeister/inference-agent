@@ -2018,7 +2018,15 @@ with tabs[9]:
             color_map = {label_a: "#1f4e8c", label_b: "#7fb3e6"}  # dark / light blue
             cat_orders = {"concurrency_label": conc_order, "config": [label_a, label_b]}
 
-            # Chart 1 — agentic throughput (output tokens/sec) per concurrency.
+            # Chart 1 — СУММАРНАЯ agentic throughput (output tokens/sec) per
+            # concurrency: общий output по всем параллельным сессиям. Растёт с
+            # числом пользователей до насыщения.
+            st.caption(
+                "**Суммарная пропускная способность** — общий output (ток/с) по всем "
+                "параллельным сессиям. Растёт с concurrency. Пропускная способность "
+                "*на пользователя* — отдельным графиком ниже (не вторая ось, чтобы "
+                "обе шкалы читались)."
+            )
             fig_ag_tp = px.bar(
                 ag_pair,
                 x="concurrency_label",
@@ -2028,16 +2036,50 @@ with tabs[9]:
                 color_discrete_map=color_map,
                 category_orders=cat_orders,
                 hover_data=[
-                    c for c in ("experiment_id", "ttft_p95", "error_rate")
+                    c for c in ("experiment_id", "ttft_p95", "error_rate", "viable")
                     if c in ag_pair.columns
                 ],
                 labels={
-                    "output_tokens_per_sec": "Output tokens/sec (aggregate over sessions)",
+                    "output_tokens_per_sec": "Суммарная пропускная способность, ток/с",
                     "concurrency_label": "Concurrent agentic sessions",
                     "config": "config",
                 },
             )
             st.plotly_chart(fig_ag_tp, use_container_width=True)
+
+            # Chart 1b — пропускная способность НА ПОЛЬЗОВАТЕЛЯ (per-stream):
+            # output_tokens_per_sec / concurrency. Зеркало суммарной: с ростом
+            # concurrency совокупный throughput растёт, а доля каждого
+            # пользователя падает. Отдельный график (НЕ вторая ось у предыдущего),
+            # как и просили — иначе одна из шкал нечитаема.
+            st.caption(
+                "**На пользователя (per-stream)** — суммарный throughput, делённый на "
+                "число параллельных сессий: сколько ток/с получает один пользователь. "
+                "Падает с ростом concurrency."
+            )
+            ag_pair_pu = ag_pair.copy()
+            ag_pair_pu["tok_per_user"] = (
+                ag_pair_pu["output_tokens_per_sec"] / ag_pair_pu["concurrency"]
+            )
+            fig_ag_pu = px.bar(
+                ag_pair_pu,
+                x="concurrency_label",
+                y="tok_per_user",
+                color="config",
+                barmode="group",
+                color_discrete_map=color_map,
+                category_orders=cat_orders,
+                hover_data=[
+                    c for c in ("experiment_id", "output_tokens_per_sec", "ttft_p95", "viable")
+                    if c in ag_pair_pu.columns
+                ],
+                labels={
+                    "tok_per_user": "Ток/с на пользователя (per-stream)",
+                    "concurrency_label": "Concurrent agentic sessions",
+                    "config": "config",
+                },
+            )
+            st.plotly_chart(fig_ag_pu, use_container_width=True)
 
             # Chart 2 — same two bars, but latency. Metric selectable (p95).
             lat_options = {
@@ -2065,7 +2107,7 @@ with tabs[9]:
                     color_discrete_map=color_map,
                     category_orders=cat_orders,
                     hover_data=[
-                        c for c in ("experiment_id", "output_tokens_per_sec", "error_rate")
+                        c for c in ("experiment_id", "output_tokens_per_sec", "error_rate", "viable")
                         if c in ag_pair.columns
                     ],
                     labels={
@@ -2200,9 +2242,17 @@ with tabs[9]:
                 ):
                     slo_val = float(ceil_df[slo_col].dropna().iloc[0])
                 scale = 100.0 if as_pct else 1.0
+                # The viable line: NOT_VIABLE phases now also live in ag_pair
+                # (persisted with full metrics), but the ceiling level is drawn
+                # separately as a ✖ marker below — so keep the line to viable
+                # phases only and don't double-plot the breach point.
+                line_pool = (
+                    ag_pair[ag_pair["viable"].fillna(True).astype(bool)]
+                    if "viable" in ag_pair.columns else ag_pair
+                )
                 for cfg in (label_a, label_b):
-                    sub = ag_pair[
-                        (ag_pair["config"] == cfg) & (ag_pair[metric].notna())
+                    sub = line_pool[
+                        (line_pool["config"] == cfg) & (line_pool[metric].notna())
                     ].sort_values("concurrency")
                     if not sub.empty:
                         fig.add_trace(go.Scatter(
@@ -2442,7 +2492,17 @@ with tabs[10]:
         else:
             col1.metric("Max parallel agents (best config)", "n/a")
 
-        peak_tp = agentic_phases_df["output_tokens_per_sec"].max() if not agentic_phases_df.empty else 0.0
+        # Peak over VIABLE phases only — non-viable (SLO-breach) phases are now
+        # in agentic_phases_df too, but a phase that broke SLO shouldn't be
+        # credited as the peak agentic throughput.
+        _viable_for_peak = (
+            agentic_phases_df[agentic_phases_df["viable"].fillna(True).astype(bool)]
+            if "viable" in agentic_phases_df.columns else agentic_phases_df
+        )
+        peak_tp = (
+            _viable_for_peak["output_tokens_per_sec"].max()
+            if not _viable_for_peak.empty else 0.0
+        )
         col2.metric("Peak agentic throughput", _format_metric(peak_tp, " tok/s", precision=1))
 
         if not turns_df.empty:
@@ -2491,12 +2551,44 @@ with tabs[10]:
         # experiments. px.bar without aggregation stacks those rows' y values,
         # producing bars that are the SUM of all matching runs — misleading.
         # Pick the winning row (max output_tokens_per_sec) per (concurrency,
-        # engine) so the bar represents the best config at that concurrency.
+        # engine) so the bar represents the best VIABLE config at that
+        # concurrency. NOT_VIABLE phases (SLO-breach ceiling levels) are now
+        # persisted too, so split them out: bars come from viable phases, while
+        # non-viable phases are overlaid as ✖ markers — their metrics are shown
+        # but they never win the "best" bar.
         st.subheader("Agentic throughput by concurrency — best config per engine")
-        winners_idx = agentic_phases_df.groupby(["concurrency", "engine"])[
+        if "viable" in agentic_phases_df.columns:
+            viable_mask = agentic_phases_df["viable"].fillna(True).astype(bool)
+        else:
+            viable_mask = pd.Series(True, index=agentic_phases_df.index)
+        viable_phases = agentic_phases_df[viable_mask]
+        nonviable_phases = agentic_phases_df[~viable_mask].copy()
+        best_pool = viable_phases if not viable_phases.empty else agentic_phases_df
+        winners_idx = best_pool.groupby(["concurrency", "engine"])[
             "output_tokens_per_sec"
         ].idxmax()
-        agentic_best = agentic_phases_df.loc[winners_idx].copy()
+        agentic_best = best_pool.loc[winners_idx].copy()
+
+        def _add_nonviable_overlay(fig, ycol: str) -> None:
+            """Overlay NOT_VIABLE phases as ✖ markers on an agentic chart."""
+            if nonviable_phases.empty or ycol not in nonviable_phases.columns:
+                return
+            hov = nonviable_phases.get("slo_violations")
+            fig.add_trace(go.Scatter(
+                x=nonviable_phases["concurrency"],
+                y=nonviable_phases[ycol],
+                mode="markers",
+                name="✖ not viable (SLO breach)",
+                marker=dict(size=14, symbol="x", color="crimson",
+                            line=dict(color="darkred", width=1)),
+                customdata=(hov.apply(lambda v: "; ".join(v) if isinstance(v, (list, tuple)) else "")
+                            if hov is not None else None),
+                hovertemplate=(
+                    "%{x} agents<br>%{y:.1f}"
+                    + ("<br>%{customdata}" if hov is not None else "")
+                    + "<extra>not viable</extra>"
+                ),
+            ))
         fig_tp = px.bar(
             agentic_best,
             x="concurrency",
@@ -2527,6 +2619,7 @@ with tabs[10]:
                     marker=dict(size=11, symbol="star",
                                 line=dict(color="black", width=1)),
                 ))
+        _add_nonviable_overlay(fig_tp, "output_tokens_per_sec")
         st.plotly_chart(fig_tp, use_container_width=True)
         with st.expander("Show all runs (not just best per concurrency)"):
             st.caption(
@@ -2542,6 +2635,61 @@ with tabs[10]:
                 labels={"output_tokens_per_sec": "Output tokens/sec (aggregate)"},
             )
             st.plotly_chart(fig_all, use_container_width=True)
+
+        # ── Per-user throughput by concurrency — best config per engine ──────
+        # Same best-per-engine bars as above, but output_tokens_per_sec divided
+        # by the number of parallel sessions: how many tok/s a SINGLE user gets.
+        # Aggregate rises with concurrency, per-user falls. Kept on a SEPARATE
+        # chart (not a second axis on the aggregate one) so each scale stays
+        # readable.
+        st.subheader("Пропускная способность на пользователя — best config per engine")
+        st.caption(
+            "Тот же best-per-engine срез, но throughput делён на число параллельных "
+            "сессий — сколько ток/с получает ОДИН пользователь (per-stream). "
+            "Совокупный растёт с concurrency, на пользователя падает. Отдельный "
+            "график (не вторая ось у графика выше), чтобы обе шкалы читались."
+        )
+        agentic_best_pu = agentic_best.copy()
+        agentic_best_pu["tok_per_user"] = (
+            agentic_best_pu["output_tokens_per_sec"] / agentic_best_pu["concurrency"]
+        )
+        if not nonviable_phases.empty:
+            nonviable_phases["tok_per_user"] = (
+                nonviable_phases["output_tokens_per_sec"] / nonviable_phases["concurrency"]
+            )
+        fig_pu = px.bar(
+            agentic_best_pu,
+            x="concurrency",
+            y="tok_per_user",
+            color="engine",
+            barmode="group",
+            hover_data=["experiment_id", "ttft_p95", "errors"],
+            labels={
+                "tok_per_user": "Ток/с на пользователя (per-stream)",
+                "concurrency": "Concurrent agentic sessions",
+            },
+        )
+        # Overlay the baseline's own per-user curve, mirroring the aggregate chart.
+        if base_summary is not None:
+            base_id = str(base_summary.get("experiment_id", ""))
+            base_pu = agentic_phases_df[
+                agentic_phases_df["experiment_id"].astype(str) == base_id
+            ].sort_values("concurrency").copy()
+            if not base_pu.empty:
+                base_pu["tok_per_user"] = (
+                    base_pu["output_tokens_per_sec"] / base_pu["concurrency"]
+                )
+                fig_pu.add_trace(go.Scatter(
+                    x=base_pu["concurrency"],
+                    y=base_pu["tok_per_user"],
+                    mode="lines+markers",
+                    name="⭐ Baseline (anchor)",
+                    line=dict(color="gold", width=3),
+                    marker=dict(size=11, symbol="star",
+                                line=dict(color="black", width=1)),
+                ))
+        _add_nonviable_overlay(fig_pu, "tok_per_user")
+        st.plotly_chart(fig_pu, use_container_width=True)
 
         # ── TTFT vs turn_idx — split into cold (turn 0) and warm (turn 1+) ──
         # Объединять их на одном Y нельзя: cold prefill 83k токенов даёт

@@ -535,10 +535,13 @@ class ExperimentSummary(BaseModel):
         # benchmark.concurrency_results) and SLO-bound probes (in
         # ceiling_probe_phases). Lets the LLM see "tried [8,16,32,64,128],
         # viable [8,16], ceiling [32,64,128]" — clean ceiling signal.
+        # Non-viable agentic phases also live in concurrency_results now (their
+        # metrics are persisted), so filter on r.viable — only SLO-passing
+        # levels are "viable"; the ceiling levels come from ceiling_probe_phases.
         viable_agentic_c = sorted({
             r.concurrency
             for r in result.benchmark.concurrency_results
-            if r.workload_id == "agentic_long_context"
+            if r.workload_id == "agentic_long_context" and r.viable
         })
         ceiling_agentic_c = sorted({
             p.concurrency for p in result.ceiling_probe_phases

@@ -1,67 +1,59 @@
-# Operator-defined BASELINE launch config (anchor experiment) — Qwen3.6-35B-A3B.
+# Operator-defined BASELINE launch config (anchor experiment) — openai/gpt-oss-120b.
 #
-# Shaped like an ExperimentConfig. Sibling baseline of config1.yaml (paired by
+# Shaped like an ExperimentConfig. Sibling baseline of config2.yaml (paired by
 # numeric suffix). Runs deterministically as experiment #1 — WITHOUT the LLM
 # planner — so the harness measures a real anchor. Flags with dedicated schema
 # fields live in those fields; everything else passes verbatim through
 # extra_engine_args (same order as the prod command). Env vars go in extra_env.
 #
 # NOTE: --reasoning-parser / --tool-call-parser / --enable-auto-tool-choice are
-# always appended by container.vllm_extra_args in config1.yaml — NOT repeated here.
+# always appended by container.vllm_extra_args in config2.yaml — NOT repeated here.
 #
 # DELIBERATELY OMITTED:
-#   --served-model-name Qwen/Qwen3.6-35B-A3B and the /models/... path (harness
+#   --served-model-name openai/gpt-oss-120b and the /models/... path (harness
 #     addresses by HF id from the mounted cache).
 #   --host 0.0.0.0 / --port 8080 — injected by the engine builder (port 8000).
-#   --scheduling-policy fcfs — already the default scheduling_policy.
+#   --quantization — gpt-oss is mxfp4 native, vLLM autodetects; the prod command
+#     passes no --quantization, so we leave it unset.
 
 engine: vllm
 
 tensor_parallel_size: 4
-max_model_len: 262144
+max_model_len: 131072
 
-gpu_memory_utilization: 0.88
-max_num_seqs: 128
+gpu_memory_utilization: 0.85
 max_num_batched_tokens: 10240
 
-quantization: fp8
-dtype: bfloat16
-
+# Prod command omits --enable-prefix-caching because vLLM V1 (v0.22) has it ON by
+# default. We set it true explicitly: it is a no-op for the engine but REQUIRED
+# to pass the agent's agentic prefix-cache gate (validator), so the anchor isn't
+# skipped under the agentic optimization goal.
 enable_prefix_caching: true
 enable_chunked_prefill: true
 
 # Container environment variables — copied verbatim from the prod launch env.
-# NOTE: VLLM_FLASH_ATTN_VERSION=2 here (the 397B baseline uses 3).
 extra_env:
   TZ: "Europe/Moscow"
   CUDA_DISABLE_CONTROL: "true"
-  OMP_NUM_THREADS: "96"
+  OMP_NUM_THREADS: "32"
   NCCL_CUMEM_ENABLE: "true"
-  VLLM_FLASH_ATTN_VERSION: "2"
+  TORCH_CUDA_ARCH_LIST: "9.0"
+  VLLM_FLASH_ATTN_VERSION: "3"
+  VLLM_USE_FLASHINFER_SAMPLER: "0"
 
 # Flags without a dedicated ExperimentConfig field — passed verbatim, in the same
-# order as the prod command. --enable-expert-parallel = MoE expert parallelism;
-# --speculative-config = MTP speculative decoding (2 tokens).
+# order as the prod command. --exclude_tools_when_tool_choice_none is a gpt-oss
+# tool-behaviour flag from the prod command.
 extra_engine_args:
-  - "--stream-interval"
-  - "3"
-  - "--async-scheduling"
-  - "--performance-mode"
-  - "throughput"
-  - "--seed"
-  - "1024"
   - "--optimization-level"
   - "3"
-  - "--enable-expert-parallel"
   - "--enable-prompt-tokens-details"
   - "--enable-force-include-usage"
-  - "--speculative-config"
-  - '{"method":"qwen3_next_mtp","num_speculative_tokens":2}'
+  - "--exclude_tools_when_tool_choice_none"
 
 rationale: >-
-  Operator-defined baseline (prod Qwen3.6-35B-A3B-FP8 on H100x4): TP=4, native
-  fp8, bfloat16, expert-parallel MoE, MTP speculative decoding (2 tokens),
-  prefix+chunked prefill, async scheduling + throughput perf-mode, optimization
-  level 3, gpu_mem_util=0.88, max_num_seqs=128, max_num_batched_tokens=10240,
-  ctx=262144. The agent's job is to beat this on the optimization goals without
-  breaking correctness.
+  Operator-defined baseline (prod openai/gpt-oss-120b on H100x4): TP=4, mxfp4
+  native (no explicit quantization), chunked prefill, prefix caching (vLLM V1
+  default), optimization level 3, gpu_mem_util=0.85,
+  max_num_batched_tokens=10240, ctx=131072. The agent's job is to beat this on
+  the optimization goals without breaking correctness.

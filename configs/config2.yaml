@@ -1,15 +1,13 @@
-# Модель для бенчмарка — openai/gpt-oss-120b (MoE, ~120B весов, mxfp4 native),
-# reasoning-модель (parser openai_gptoss).
-model_name: "openai/gpt-oss-120b"
+# Модель для бенчмарка — Qwen3.6-35B-A3B (MoE, 35B весов / 3B активных),
+# thinking-модель с reasoning. Веса нативно в FP8.
+model_name: "Qwen/Qwen3.6-35B-A3B-FP8"
 model_revision: null
 
-# Веса gpt-oss нативно в mxfp4 — vLLM определяет это автоматически из config.json,
-# прод-команда НЕ передаёт --quantization. Поэтому здесь null: планировщик не
-# навязывает --quantization, движок autodetect'ит mxfp4.
-quantization: null
+# Квантизация фиксируется на уровне всего прогона, планировщик её не варьирует.
+quantization: fp8
 
 # Контекстное окно фиксируется на уровне run, планировщик его не варьирует.
-max_model_len: 131072
+max_model_len: 262144
 
 # LLM агента (для принятия решений — любой OpenAI-совместимый endpoint)
 agent_llm:
@@ -29,15 +27,15 @@ container:
   gpu_count: 4
   model_cache_dir: "/root/.cache/huggingface/hub"
 
-  # Model-invariant флаги корректности, добавляются к каждому vLLM-запуску.
-  # gpt-oss — reasoning-модель → reasoning-parser openai_gptoss; tool calling —
-  # tool-call-parser openai + enable-auto-tool-choice.
+  # Model-invariant флаги корректности, добавляются к каждому vLLM-запуску
+  # (baseline + планировщик). Qwen3.6 — thinking-модель → reasoning-parser
+  # qwen3 обязателен; tool calling — qwen3_coder + enable-auto-tool-choice.
   vllm_extra_args:
     - "--enable-auto-tool-choice"
     - "--tool-call-parser"
-    - "openai"
+    - "qwen3_coder"
     - "--reasoning-parser"
-    - "openai_gptoss"
+    - "qwen3"
 
 # Поведение при старте движка (healthcheck, pull образа).
 startup:
@@ -60,25 +58,20 @@ benchmark:
 
   enable_agentic_long_context: true
 
-  # ВНИМАНИЕ: max_model_len здесь 131072 (вдвое меньше, чем у Qwen-конфигов с
-  # 262144). Поэтому agentic-промпт уменьшен, чтобы влезть в окно с запасом:
-  #   unique + turns × (max_output + tool_result_max) на последнем turn
-  #   = 50000 + 3 × (16000 + 1536) + 16000 = 118608 < 131072.
-  # Если поднимешь max_model_len — можно вернуть unique к 83000 (как у Qwen).
   agentic_shared_prefix_tokens: 0
-  agentic_unique_prompt_tokens: 50000
+  agentic_unique_prompt_tokens: 83000
   agentic_max_output_tokens: 16000
   agentic_tool_result_min_tokens: 1024
   agentic_tool_result_max_tokens: 1536
-  agentic_turns_per_session: 4
+  agentic_turns_per_session: 2
 
-  agentic_concurrency_levels: [16, 32, 48, 64, 80, 96, 112]
+  agentic_concurrency_levels: [1, 5, 10, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100]
 
   agentic_session_timeout_sec: 5400
   agentic_per_turn_timeout_sec: 1200
 
-  agentic_ttft_p95_slo_ms: 60000
-  agentic_tpot_p95_slo_ms: 100
+  agentic_ttft_p95_slo_ms: 30000
+  agentic_tpot_p95_slo_ms: 33
   agentic_session_error_rate_slo: 0.05
   agentic_e2e_p95_slo_ms: 0
 
@@ -104,16 +97,18 @@ api:
 
 # Инструкции для LLM планировщика.
 planner_instructions: |
-  Бейзлайн вынесен в baseline2.yaml и прогоняется как измеренный эксперимент #1 —
+  Бейзлайн вынесен в baseline1.yaml и прогоняется как измеренный эксперимент #1 —
   планировщик получает его точную команду и реальные метрики и итерирует ОТ него
   (по одному knob за раз). НЕ генерируй generic-бейзлайн заново.
 
-  openai/gpt-oss-120b — MoE-модель, веса нативно в mxfp4 (vLLM autodetect). НЕ
-  добавляй --quantization (quantization фиксирован в null). Reasoning-модель.
+  Qwen3.6-35B-A3B-FP8 — MoE (35B весов, 3B активных), thinking-модель. Веса
+  нативно в FP8 — vLLM определяет это автоматически. quantization=fp8 фиксирован.
+  dtype=bfloat16 (как в бейзлайне).
 
-  Жёсткие инварианты (нельзя выкидывать): reasoning-parser openai_gptoss,
-  tool-call-parser openai и enable-auto-tool-choice идут из
-  container.vllm_extra_args — в extra_engine_args их НЕ дублируй. Prefix caching
-  в vLLM V1 включён по умолчанию; бейзлайн держит enable_prefix_caching=true
-  (обязательно для agentic-цели) — не выключай. --enable-expert-parallel прод-
-  команда НЕ передаёт; можешь попробовать его как отдельную ось поиска.
+  Жёсткие инварианты (нельзя выкидывать): reasoning-parser qwen3, tool-call-parser
+  qwen3_coder и enable-auto-tool-choice идут из container.vllm_extra_args — в
+  extra_engine_args их НЕ дублируй. --enable-expert-parallel остаётся включённым
+  (MoE) — не выключай. MTP speculative decoding (--speculative-config
+  qwen3_next_mtp, 2 токена) — рабочий выбор бейзлайна; num_speculative_tokens
+  можно варьировать как ось поиска. 3B активных параметров → модель быстрая,
+  ожидай высокую viable concurrency.

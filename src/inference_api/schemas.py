@@ -153,6 +153,11 @@ class ExperimentPhaseRow(BaseModel):
     e2e_cv: float = 0.0
     errors: int = 0
     error_rate: float = 0.0
+    # False for agentic phases that breached the SLO (the ceiling level). These
+    # are now persisted with full metrics so the dashboard can plot them, marked
+    # distinctly from viable phases.
+    viable: bool = True
+    slo_violations: list[str] = Field(default_factory=list)
 
 
 class AgenticTurnRow(BaseModel):

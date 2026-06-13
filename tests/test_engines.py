@@ -118,6 +118,36 @@ class TestVLLMEngine:
         assert "HF_HUB_OFFLINE" not in flat
         assert "TRANSFORMERS_OFFLINE" not in flat
 
+
+class TestProxyForwarding:
+    def test_proxy_env_forwarded_to_vllm(self, monkeypatch):
+        monkeypatch.setenv("HTTP_PROXY", "http://proxy:3128")
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy:3128")
+        monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
+        args = VLLMEngine(_make_config()).build_container_args(
+            _make_experiment(EngineType.VLLM)
+        )
+        assert "-e" in args
+        assert "HTTP_PROXY=http://proxy:3128" in args
+        assert "HTTPS_PROXY=http://proxy:3128" in args
+        assert "NO_PROXY=localhost,127.0.0.1" in args
+
+    def test_proxy_env_forwarded_to_sglang(self, monkeypatch):
+        monkeypatch.setenv("https_proxy", "http://proxy:8080")
+        args = SGLangEngine(_make_config()).build_container_args(
+            _make_experiment(EngineType.SGLANG)
+        )
+        assert "https_proxy=http://proxy:8080" in args
+
+    def test_no_proxy_env_when_unset(self, monkeypatch):
+        for var in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+                    "http_proxy", "https_proxy", "no_proxy"):
+            monkeypatch.delenv(var, raising=False)
+        args = VLLMEngine(_make_config()).build_container_args(
+            _make_experiment(EngineType.VLLM)
+        )
+        assert not any("PROXY" in a.upper() for a in args)
+
     def test_offline_env_overrides_llm_extra_env(self):
         # LLM tries to disable offline mode via extra_env — our env must win,
         # i.e. appear AFTER the LLM's. Last `-e` wins in `nerdctl run`.
