@@ -9,6 +9,7 @@ from inference_agent.models import (
 )
 from inference_agent.models import PlannerOutput
 from inference_agent.nodes.planner import (
+    _PROMPT_HEADER,
     _build_experiment_config,
     _estimate_safe_context,
     _get_forced_engine,
@@ -16,6 +17,27 @@ from inference_agent.nodes.planner import (
     _load_curated_docs,
     _should_disable_speculative,
 )
+
+
+class TestFp8KvDirective:
+    """The fp8 KV-cache rule is ALWAYS in the planner prompt (Rule 0b),
+    independent of the run's weights, and must never retrofit the baseline."""
+
+    def test_rule_always_present_in_prompt_template(self):
+        assert "0b. KV CACHE DTYPE" in _PROMPT_HEADER
+        assert "kv_cache_dtype=fp8" in _PROMPT_HEADER
+
+    def test_rule_scopes_to_planner_configs_only(self):
+        # The baseline is injected verbatim (baseline_injector, no LLM), so the
+        # rule must scope to the planner's own emitted configs, not the baseline.
+        assert "the configs you emit" in _PROMPT_HEADER
+        assert "run verbatim and never passes" in _PROMPT_HEADER
+
+    def test_rule_does_not_break_template_formatting(self):
+        # No stray braces introduced by the literal rule text.
+        import re
+        placeholders = set(re.findall(r"{(\w+)}", _PROMPT_HEADER))
+        assert "fp8_kv_directive" not in placeholders
 
 
 def _make_hardware(

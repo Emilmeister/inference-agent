@@ -92,6 +92,14 @@ NOT include max_model_len in your rationale as a tunable knob. Treat it as \
 a hardware/product constraint. The schema field `max_model_len` will be \
 overridden with the fixed value regardless of what you emit; you may emit \
 any plausible value to satisfy the JSON schema.
+0b. KV CACHE DTYPE — fp8 weights: if this run's quantization is fp8 (see \
+Rule 0), DEFAULT `kv_cache_dtype=fp8` (fp8_e4m3) on the experiments YOU \
+generate — it roughly halves KV-cache memory and raises agentic max viable \
+concurrency at negligible quality cost. Switch to `kv_cache_dtype=auto` only \
+as a deliberate, NAMED A/B knob to measure the tradeoff. This shapes ONLY the \
+configs you emit: the operator baseline is run verbatim and never passes \
+through you, so start from its measured kv_cache_dtype and change it only as \
+an explicit, named knob.
 1. For BASELINES: use default params — no speculative decoding, \
 kv_cache_dtype=auto, scheduling_policy=fcfs. ENABLE prefix caching (it is \
 mandatory under the agentic goal — see Rule 3a — and harmless elsewhere). \
