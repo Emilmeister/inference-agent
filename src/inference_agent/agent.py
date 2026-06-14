@@ -9,6 +9,7 @@ from langgraph.graph import END, StateGraph
 from inference_agent.api_client import ExperimentApiClient
 from inference_agent.nodes.analyzer import analyzer_node
 from inference_agent.nodes.baseline_injector import baseline_injector_node
+from inference_agent.nodes.crash_diagnostician import crash_diagnostician_node
 from inference_agent.nodes.discovery import discovery_node
 from inference_agent.nodes.executor import executor_node
 from inference_agent.nodes.history_loader import make_history_loader_node
@@ -62,16 +63,18 @@ def build_graph(client: ExperimentApiClient) -> StateGraph:
     graph.add_node("planner", planner_node)
     graph.add_node("validator", validator_node)
     graph.add_node("executor", executor_node)
+    graph.add_node("crash_diagnostician", crash_diagnostician_node)
     graph.add_node("reporter", make_reporter_node(client))
     graph.add_node("analyzer", analyzer_node)
 
     graph.set_entry_point("discovery")
 
     # Flow: discovery → history_loader → (baseline_injector | planner) →
-    # validator → executor → analyzer → reporter → loop. The first iteration
-    # may inject the operator baseline (deterministic, no LLM); every later
-    # iteration plans via the LLM. If validation fails, skip executor and go
-    # directly to analyzer.
+    # validator → executor → crash_diagnostician → analyzer → reporter → loop.
+    # The first iteration may inject the operator baseline (deterministic, no
+    # LLM); every later iteration plans via the LLM. If validation fails, skip
+    # executor and go directly to analyzer. crash_diagnostician is a no-op
+    # unless the executor produced a container-crash result.
     graph.add_edge("discovery", "history_loader")
     graph.add_conditional_edges(
         "history_loader",
@@ -93,7 +96,8 @@ def build_graph(client: ExperimentApiClient) -> StateGraph:
         },
     )
 
-    graph.add_edge("executor", "analyzer")
+    graph.add_edge("executor", "crash_diagnostician")
+    graph.add_edge("crash_diagnostician", "analyzer")
     graph.add_edge("analyzer", "reporter")
 
     graph.add_conditional_edges(

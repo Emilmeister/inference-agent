@@ -2018,14 +2018,20 @@ with tabs[9]:
             color_map = {label_a: "#1f4e8c", label_b: "#7fb3e6"}  # dark / light blue
             cat_orders = {"concurrency_label": conc_order, "config": [label_a, label_b]}
 
-            # Chart 1 — СУММАРНАЯ agentic throughput (output tokens/sec) per
-            # concurrency: общий output по всем параллельным сессиям. Растёт с
-            # числом пользователей до насыщения.
+            # Chart 1 — DECODE (output tokens/sec) throughput per concurrency,
+            # summed across parallel sessions. NB: output/decode ONLY — does NOT
+            # include the (huge, prefix-cache-inflated) prefill/input. That's the
+            # separate "Total prefill+decode" chart below, which is dominated by
+            # input and can rank configs oppositely. Названо явно, чтобы их не
+            # путали (см. подпись).
             st.caption(
-                "**Суммарная пропускная способность** — общий output (ток/с) по всем "
-                "параллельным сессиям. Растёт с concurrency. Пропускная способность "
-                "*на пользователя* — отдельным графиком ниже (не вторая ось, чтобы "
-                "обе шкалы читались)."
+                "**Пропускная способность генерации (decode)** — output ток/с, "
+                "сгенерированные по всем параллельным сессиям. Это реальная скорость "
+                "генерации, БЕЗ prefill-входа. ⚠️ Не путать с графиком «Total "
+                "prefill+decode» ниже: там добавлен input (prefill), он в ~10–18× "
+                "больше output и раздут prefix-кэшем, поэтому тот график может "
+                "ранжировать конфиги наоборот. Растёт с concurrency. На пользователя "
+                "— отдельным графиком ниже."
             )
             fig_ag_tp = px.bar(
                 ag_pair,
@@ -2035,12 +2041,13 @@ with tabs[9]:
                 barmode="group",
                 color_discrete_map=color_map,
                 category_orders=cat_orders,
+                title="Пропускная способность генерации (decode) — output ток/с по сессиям",
                 hover_data=[
                     c for c in ("experiment_id", "ttft_p95", "error_rate", "viable")
                     if c in ag_pair.columns
                 ],
                 labels={
-                    "output_tokens_per_sec": "Суммарная пропускная способность, ток/с",
+                    "output_tokens_per_sec": "Decode throughput (output ток/с)",
                     "concurrency_label": "Concurrent agentic sessions",
                     "config": "config",
                 },

@@ -375,6 +375,23 @@ class ExperimentScores(BaseModel):
     is_agentic_pareto_optimal: bool = False
 
 
+class CrashDiagnosis(BaseModel):
+    """LLM-distilled root cause + fix for a crashed engine container.
+
+    Produced by the crash_diagnostician node from the FULL container logs of a
+    failed start/healthcheck, so the planner and analyzer receive a concise,
+    actionable diagnosis instead of raw multiproc stderr. `config_fixable`
+    distinguishes a knob the planner can change (e.g. lower gpu_memory_util,
+    drop an unsupported flag) from an external/infra problem (missing image,
+    driver mismatch) that retrying with a different config won't solve.
+    """
+
+    summary: str = ""        # one-line essence of why the container fell
+    root_cause: str = ""     # what failed and why, in plain terms
+    fix: str = ""            # concrete change to try (flag/config), or why it's unfixable
+    config_fixable: bool = False  # True → planner can fix via config; False → infra/external
+
+
 class ExperimentResult(BaseModel):
     experiment_id: str
     timestamp: str = Field(
@@ -404,6 +421,10 @@ class ExperimentResult(BaseModel):
     failure_classification: str | None = None  # startup_crash | healthcheck_timeout | oom | correctness_failure | runtime_crash | benchmark_error
     correctness_gate_passed: bool = False
     post_benchmark_correctness: SmokeTestResult | None = None  # re-check after load
+
+    # LLM-distilled root cause + fix for a container crash (set by the
+    # crash_diagnostician node from the full logs). None for non-crash results.
+    crash_diagnosis: CrashDiagnosis | None = None
 
     # True when this is the operator-defined baseline run (from baseline.yaml),
     # used as the anchor the agent improves upon. Surfaced to the dashboard and
