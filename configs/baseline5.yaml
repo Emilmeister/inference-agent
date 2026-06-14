@@ -1,0 +1,74 @@
+# Operator-defined BASELINE launch config (anchor experiment) — zai-org/GLM-4.7-FP8.
+#
+# Shaped like an ExperimentConfig. Sibling baseline of config5.yaml (paired by
+# numeric suffix). Runs deterministically as experiment #1 — WITHOUT the LLM
+# planner — so the harness measures a real anchor. Flags with dedicated schema
+# fields live in those fields; everything else passes verbatim through
+# extra_engine_args (same order as the prod command). Env vars go in extra_env.
+#
+# NOTE: --reasoning-parser / --tool-call-parser / --enable-auto-tool-choice are
+# always appended by container.vllm_extra_args in config5.yaml — NOT repeated here.
+#
+# DELIBERATELY OMITTED:
+#   --served-model-name zai-org/GLM-4.7 and the /models/... path (harness
+#     addresses by HF id from the mounted cache).
+#   --host 0.0.0.0 / --port 8080 — injected by the engine builder (port 8000).
+#   --scheduling-policy fcfs — already the default scheduling_policy.
+#   --quantization — GLM-4.7-FP8 is fp8 native, vLLM autodetects; the prod command
+#     passes no --quantization, so we leave it unset.
+
+engine: vllm
+
+tensor_parallel_size: 8
+max_model_len: 202752
+
+gpu_memory_utilization: 0.88
+max_num_seqs: 48
+max_num_batched_tokens: 16384
+
+kv_cache_dtype: fp8_e4m3
+
+enable_prefix_caching: true
+enable_chunked_prefill: true
+
+# Container environment variables — copied verbatim from the prod launch env.
+extra_env:
+  TZ: "Europe/Moscow"
+  CUDA_DISABLE_CONTROL: "true"
+  OMP_NUM_THREADS: "124"
+  TORCH_CUDA_ARCH_LIST: "10.0"
+  NCCL_CUMEM_ENABLE: "true"
+  NCCL_P2P_LEVEL: "NVL"
+  SAFETENSORS_FAST_GPU: "1"
+
+# Flags without a dedicated ExperimentConfig field — passed verbatim, in the same
+# order as the prod command. --enable-expert-parallel = MoE expert parallelism;
+# --speculative-config.method mtp = MTP speculative decoding (1 token).
+extra_engine_args:
+  - "--api-server-count"
+  - "1"
+  - "--stream-interval"
+  - "2"
+  - "--async-scheduling"
+  - "--trust-remote-code"
+  - "--performance-mode"
+  - "throughput"
+  - "--enable-expert-parallel"
+  - "--optimization-level"
+  - "3"
+  - "--enable-prompt-tokens-details"
+  - "--enable-force-include-usage"
+  - "--speculative-config.method"
+  - "mtp"
+  - "--speculative-config.num_speculative_tokens"
+  - "1"
+  - "--override-generation-config"
+  - '{"max_new_tokens": 65536}'
+
+rationale: >-
+  Operator-defined baseline (prod zai-org/GLM-4.7-FP8 on H100x8): TP=8, fp8 native
+  (no explicit quantization), fp8_e4m3 KV cache, expert-parallel MoE, MTP
+  speculative decoding (1 token), prefix+chunked prefill, async scheduling +
+  throughput perf-mode, optimization level 3, trust-remote-code, gpu_mem_util=0.88,
+  max_num_seqs=48, max_num_batched_tokens=16384, ctx=202752. The agent's job is to
+  beat this on the optimization goals without breaking correctness.
