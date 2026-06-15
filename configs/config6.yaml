@@ -67,7 +67,7 @@ benchmark:
   agentic_tool_result_max_tokens: 1536
   agentic_turns_per_session: 1
 
-  agentic_concurrency_levels: [1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100]
+  agentic_concurrency_levels: [2, 4, 6, 8, 10, 12, 14, 15, 16, 18, 20, 22, 24, 26, 28, 30]
 
   agentic_session_timeout_sec: 5400
   agentic_per_turn_timeout_sec: 1200
@@ -111,3 +111,5 @@ planner_instructions: |
   container.vllm_extra_args — в extra_engine_args их НЕ дублируй.
   --enable-expert-parallel остаётся включённым (MoE) — не выключай.
   --compilation-config с cudagraph_mode PIECEWISE — рабочий выбор бейзлайна.
+  
+  Первым делом попробуй использовать kv-cache-dtype=fp8

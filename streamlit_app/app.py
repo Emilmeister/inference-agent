@@ -2548,6 +2548,30 @@ with tabs[10]:
                 "agentic_peak_throughput": "peak_tok/s",
                 "prefix_hit_rate": "prefix_cache_hit",
             })
+            # Peak TOTAL throughput (prefill + decode) per experiment — the SAME
+            # metric as the "Total throughput — prefill+decode by concurrency"
+            # chart: total_tokens_per_sec = (input+output)/wall_time. We take the
+            # peak across the experiment's viable agentic phases (parallels the
+            # existing peak_tok/s, which is decode-only). Since total >= decode
+            # pointwise, peak_total_tok/s is always >= peak_tok/s.
+            total_peak: dict[str, float] = {}
+            if (not agentic_phases_df.empty
+                    and "total_tokens_per_sec" in agentic_phases_df.columns):
+                tp_src = agentic_phases_df
+                if "viable" in tp_src.columns:
+                    vmask = tp_src["viable"].fillna(True).astype(bool)
+                    if vmask.any():
+                        tp_src = tp_src[vmask]
+                total_peak = {
+                    str(k): v for k, v in
+                    tp_src.groupby("experiment_id")["total_tokens_per_sec"]
+                    .max().items()
+                }
+            leaderboard.insert(
+                leaderboard.columns.get_loc("peak_tok/s") + 1,
+                "peak_total_tok/s",
+                leaderboard["experiment_id"].astype(str).map(total_peak),
+            )
             st.dataframe(leaderboard, use_container_width=True, hide_index=True)
         else:
             st.info("No experiments passed the agentic SLO gates yet.")
