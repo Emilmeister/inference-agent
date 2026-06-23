@@ -12,15 +12,15 @@
 2. **`inference-api`** — FastAPI-сервис: владеет Postgres-подключением, прогоняет alembic-миграции и обслуживает запросы и от агента, и от Streamlit-дашборда. Ставится через `pip install -e ".[api]"`.
 
 ```
-┌─────────────────┐   HTTP + Bearer   ┌────────────────┐   asyncpg   ┌──────────┐
-│ inference-agent │ ────────────────▶ │  inference-api │ ──────────▶ │ Postgres │
-│ (GPU VM)        │  POST/GET /experiments  │ (FastAPI)  │             │          │
-└─────────────────┘                   └────────────────┘             └──────────┘
-                                              ▲ HTTP
-                                              │
-                                      ┌───────┴────────┐
-                                      │ Streamlit dash │
-                                      └────────────────┘
+┌─────────────────┐   HTTP + Bearer      ┌────────────────┐   asyncpg   ┌──────────┐
+│ inference-agent │ ───────────────────▶ │  inference-api │ ──────────▶ │ Postgres │
+│ (GPU VM)        │POST/GET /experiments │    (FastAPI)   │             │          │
+└─────────────────┘                      └────────────────┘             └──────────┘
+                                                 ▲ HTTP
+                                                 │
+                                         ┌───────┴────────┐
+                                         │ Streamlit dash │
+                                         └────────────────┘
 ```
 
 ## Возможности
