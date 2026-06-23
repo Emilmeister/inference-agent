@@ -1,0 +1,83 @@
+# =============================================================================
+# ПРИМЕР BASELINE-ЯКОРЯ (baseline[N].yaml) — со всеми полями ExperimentConfig
+# =============================================================================
+#
+# Operator-defined БЕЙЗЛАЙН — конкретная стартовая конфигурация запуска движка.
+# Имеет форму доменной модели `ExperimentConfig`.
+#
+# Зачем нужен: когда задан И в БД ещё нет бейзлайна для этой пары железо+модель,
+# агент прогоняет ЭТУ конфигурацию ДЕТЕРМИНИРОВАННО как эксперимент #1 — БЕЗ
+# LLM-планировщика — чтобы получить реальный «якорь». Дальше планировщик
+# итерирует ОТ измеренных чисел, а дашборд подсвечивает вклад агента
+# относительно бейзлайна. Если файла нет → планировщик планирует всё, включая
+# первый «бейзлайн» (legacy-поведение).
+#
+# Пэйринг: baseline.yaml ↔ config.yaml, baseline1.yaml ↔ config1.yaml, ...
+# (по числовому суффиксу). Для одиночного `-c` можно указать явно: --baseline.
+#
+# ПРАВИЛО: флаг с выделенным полем схемы кладётся в это поле; всё остальное —
+# дословно в extra_engine_args; env-переменные — в extra_env. Не дублируй сюда
+# флаги, которые уже всегда добавляются через container.vllm_extra_args.
+
+# Обязательное поле — какой движок запускаем.
+engine: vllm   # vllm | sglang
+
+# experiment_id генерируется автоматически, если не задан — обычно не указывают.
+
+# ── Параллелизм ──────────────────────────────────────────────────────────────
+tensor_parallel_size: 4       # шардинг по картам (TP); должен делить gpu_count
+pipeline_parallel_size: 1     # pipeline parallelism (vLLM)
+data_parallel_size: 1         # data parallelism (vLLM)
+
+# ── Контекст и память ────────────────────────────────────────────────────────
+max_model_len: 32768          # окно контекста; null = из config.json модели
+gpu_memory_utilization: 0.90  # vLLM: доля VRAM под KV-cache (0..1)
+mem_fraction_static: null     # SGLang-аналог; null = дефолт движка
+
+# ── Батчинг ──────────────────────────────────────────────────────────────────
+max_num_seqs: null            # vLLM: макс. параллельных последовательностей
+max_running_requests: null    # SGLang-аналог
+max_num_batched_tokens: null  # vLLM: бюджет токенов на итерацию шедулинга
+max_prefill_tokens: null      # SGLang-аналог
+scheduling_policy: "fcfs"     # политика шедулинга
+
+# ── Квантизация / типы ───────────────────────────────────────────────────────
+quantization: null            # fp8 | awq | gptq | ... | null (autodetect/none)
+dtype: "auto"                 # auto | float16 | bfloat16
+kv_cache_dtype: "auto"        # auto | fp8_e5m2 | fp8_e4m3
+
+# ── Фичи ─────────────────────────────────────────────────────────────────────
+enable_chunked_prefill: true  # чанкованный prefill (сглаживает TTFT под нагрузкой)
+chunked_prefill_size: null    # SGLang: размер чанка prefill
+enable_prefix_caching: true   # переиспользование KV общего префикса (ОБЯЗАТЕЛЬНО
+                              # для agentic-цели — иначе валидатор скипнет якорь)
+enforce_eager: false          # vLLM: отключить CUDA graphs (медленнее, но проще)
+attention_backend: null       # оба движка: --attention-backend (FLASHINFER, ...)
+
+# ── Speculative decoding ─────────────────────────────────────────────────────
+speculative_algorithm: null   # EAGLE3 | NEXTN | ... | null
+speculative_draft_model: null # repo id draft-модели
+speculative_num_steps: null   # число спекулятивных шагов
+
+# ── SGLang-специфика ─────────────────────────────────────────────────────────
+num_continuous_decode_steps: 1
+dp_size: null                 # SGLang data parallelism
+
+# ── Прочие флаги без выделенного поля — дословно, в порядке прод-команды ──────
+extra_engine_args:
+  - "--enable-prompt-tokens-details"
+  - "--enable-force-include-usage"
+
+# ── Переменные окружения контейнера (копируются как есть из прод-запуска) ─────
+extra_env:
+  TZ: "Europe/Moscow"
+  OMP_NUM_THREADS: "32"
+  NCCL_CUMEM_ENABLE: "true"
+
+# Человеко-читаемое обоснование бейзлайна (попадает в дашборд/историю).
+rationale: >-
+  Operator-defined baseline (prod-команда на H100x4): TP=4, chunked prefill,
+  prefix caching, gpu_mem_util=0.90, ctx=32768. Задача агента — побить это по
+  целям оптимизации, не сломав корректность.
+
+# is_baseline выставляется автоматически (True для этого якоря) — не указывают.

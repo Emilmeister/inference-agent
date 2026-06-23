@@ -1,0 +1,51 @@
+# =============================================================================
+# ПРИМЕР КОНФИГА REST-СЕРВИСА (inference-api) — со всеми полями
+# =============================================================================
+#
+# inference-api — FastAPI-сервис, который ВЛАДЕЕТ Postgres-подключением,
+# прогоняет alembic-миграции при старте и обслуживает запросы и от агента, и от
+# дашборда. Агент и дашборд в Postgres напрямую НЕ ходят.
+#
+# Запуск:   pip install -e ".[api]" && inference-api -c api.config.yaml
+#
+# Любое поле можно переопределить env-переменной (env имеет приоритет над YAML):
+#   server:   INFERENCE_API_SERVER_HOST / _PORT / _LOG_LEVEL
+#   auth:     INFERENCE_API_TOKEN (или INFERENCE_API_TOKEN_ENV с другим именем)
+#   database: DATABASE_HOST / _PORT / _DATABASE / _USER / _PASSWORD /
+#             _PASSWORD_ENV / _POOL_SIZE / _POOL_MAX_OVERFLOW /
+#             _POOL_TIMEOUT_SEC / _ECHO / _HTTP_PROXY / _HTTPS_PROXY
+
+# ── Bind-адрес uvicorn ───────────────────────────────────────────────────────
+server:
+  host: "0.0.0.0"      # на каком интерфейсе слушать
+  port: 8080           # порт сервиса (агент по умолчанию ходит сюда)
+  log_level: "info"    # debug | info | warning | error
+
+# ── Аутентификация: один статичный Bearer-токен ──────────────────────────────
+# Сервис НЕ стартует без токена. Тот же токен должен знать агент (api.token /
+# INFERENCE_API_TOKEN) и дашборд (INFERENCE_API_TOKEN).
+auth:
+  # token: "..."          # можно задать напрямую, но НЕ коммить в git
+  token_env: "INFERENCE_API_TOKEN"   # лучше — имя env-переменной с токеном
+
+# ── Postgres ─────────────────────────────────────────────────────────────────
+database:
+  host: "localhost"
+  port: 5432
+  database: "inference_agent"
+  user: "inference_agent"
+  # Пароль: напрямую (password) либо через имя env-переменной (password_env).
+  password_env: "DB_PASSWORD"
+
+  # Пул соединений SQLAlchemy.
+  pool_size: 5
+  pool_max_overflow: 10
+  pool_timeout_sec: 30
+
+  echo: false            # true → логировать весь SQL (шумно, для отладки)
+
+  # Опционально: HTTP CONNECT proxy для Postgres за прокси (Postgres — TCP, не
+  # HTTP, поэтому поднимается локальный TCP-форвардер). Если не заданы — берутся
+  # стандартные HTTP_PROXY / HTTPS_PROXY из окружения.
+  # http_proxy: "http://proxy.internal:3128"
+  # https_proxy: "http://proxy.internal:3128"
