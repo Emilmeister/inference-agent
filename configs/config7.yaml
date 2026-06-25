@@ -134,9 +134,9 @@ benchmark:
 
 # Эксперименты. Только vLLM.
 experiments:
-  max_experiments: 30
+  max_experiments: 50
   plateau_threshold: 0.02
-  plateau_window: 5
+  plateau_window: 10
   engines: ["vllm"]
   max_params_per_step: 10
 

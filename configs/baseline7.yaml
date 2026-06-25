@@ -1,22 +1,20 @@
 # Operator-defined BASELINE launch config (anchor experiment) — MiniMaxAI/MiniMax-M3-MXFP8.
 #
-# Воспроизводит реальную прод-команду:
-#   docker run --gpus all --privileged --ipc=host -p 8000:8000 \
-#     -v ~/.cache/huggingface:/root/.cache/huggingface \
-#     vllm/vllm-openai:minimax-m3 MiniMaxAI/MiniMax-M3-MXFP8 \
-#     --block-size 128 --enable-expert-parallel --tensor-parallel-size 8 \
-#     --max-num-batched-tokens 8192 --gpu-memory-utilization 0.95 \
-#     --max-num-seqs 256 --max-model-len auto \
-#     --tool-call-parser minimax_m3 --enable-auto-tool-choice \
-#     --reasoning-parser minimax_m3 \
-#     --speculative-config '{"method": "eagle3", "model": "Inferact/MiniMax-M3-EAGLE3", "num_speculative_tokens": 3, "attention_backend": "FLASH_ATTN"}' \
-#     --mm-encoder-attn-backend FLASHINFER --mm-processor-cache-type shm \
-#     --mm-encoder-tp-mode data
+# ИСТОЧНИК: лучший прогон, НАЙДЕННЫЙ АГЕНТОМ (эксперимент 5d4a77fd40fb), промоутнут
+# в baseline-якорь. Прод-команда больше не воспроизводится дословно — стартовали от
+# неё, но fp8 KV/EAGLE3 не влезли на стенд (см. ниже), а агент нашёл рабочую и
+# быструю конфигурацию под agentic-цель. Полная найденная команда:
+#   ... --tensor-parallel-size 8 --dtype bfloat16 --gpu-memory-utilization 0.96 \
+#       --max-model-len 200000 --max-num-seqs 16 --max-num-batched-tokens 16384 \
+#       --enable-chunked-prefill --enable-prefix-caching --block-size 128 \
+#       --enable-expert-parallel --max-cudagraph-capture-size 8 \
+#       --performance-mode interactivity \
+#       (+ парсеры/mm-флаги из config7.container.vllm_extra_args)
 #
 # Shaped like an ExperimentConfig. Sibling baseline of config7.yaml (paired by
 # numeric suffix). Runs deterministically as experiment #1 — WITHOUT the LLM
 # planner. Flags with dedicated schema fields live in those fields; everything
-# else passes verbatim through extra_engine_args (same order as the prod command).
+# else passes verbatim through extra_engine_args (same order as the found command).
 #
 # NOTE: эти флаги ВСЕГДА добавляются из container.vllm_extra_args в config7.yaml —
 # здесь НЕ дублируются: --tool-call-parser / --reasoning-parser /
@@ -50,9 +48,12 @@ tensor_parallel_size: 8
 #     в null И добавь "--max-model-len", "auto" в начало extra_engine_args.
 max_model_len: 200000
 
-gpu_memory_utilization: 0.95
-max_num_seqs: 256
-max_num_batched_tokens: 8192
+# Найденные агентом значения. max_num_seqs=16 — низкий (agentic-нагрузка
+# малоконкурентна), что вместе с --max-cudagraph-capture-size 8 резко уменьшает
+# память на захват CUDA-графов (та фаза раньше падала) и освобождает её под KV.
+gpu_memory_utilization: 0.96
+max_num_seqs: 16
+max_num_batched_tokens: 16384
 
 # Веса предквантованы в MXFP8 (config.json: quant_method=mxfp8) → vLLM autodetect,
 # --quantization НЕ передаём. dtype вычислений — bfloat16 (как torch_dtype модели;
@@ -80,24 +81,31 @@ enable_chunked_prefill: true
 # освобождаем эту память → 200k bf16 влезает. (Выбор оператора: 200k важнее
 # ускорения декода.)
 #
-# Flags without a dedicated ExperimentConfig field — verbatim, в порядке прод-команды.
-#   --block-size 128            — размер KV-блока
-#   --enable-expert-parallel    — expert parallelism для MoE (128 экспертов)
+# Flags without a dedicated ExperimentConfig field — verbatim, в порядке найденной команды.
+#   --block-size 128                 — размер KV-блока
+#   --enable-expert-parallel         — expert parallelism для MoE (128 экспертов)
+#   --max-cudagraph-capture-size 8   — кэп размера CUDA-графов (с max_num_seqs=16
+#                                      убирает OOM на захвате графов, экономит VRAM)
+#   --performance-mode interactivity — латентностный режим (под agentic-цель)
 # Мультимодальные флаги (--mm-encoder-* + mm-лимиты) сюда НЕ кладём — они
 # model-invariant и живут в config7.container.vllm_extra_args (единый источник).
 extra_engine_args:
   - "--block-size"
   - "128"
   - "--enable-expert-parallel"
+  - "--max-cudagraph-capture-size"
+  - "8"
+  - "--performance-mode"
+  - "interactivity"
 
 rationale: >-
-  Operator baseline (прод MiniMaxAI/MiniMax-M3-MXFP8 на H100x8, адаптировано под
-  стенд): TP=8, нативный MXFP8 (vLLM autodetect, без --quantization), bfloat16
-  compute, bf16 KV (fp8 невозможен — ядро M3), expert-parallel MoE (128 экспертов
-  top-4), block-size=128, мультимодальный энкодер на FLASHINFER + shm-кэш + data-TP
-  (из config7.vllm_extra_args, с mm-лимитами против startup-OOM), prefix+chunked
-  prefill (V1 default), gpu_mem_util=0.95, max_num_seqs=256,
-  max_num_batched_tokens=8192, контекст 200000. ОТЛИЧИЕ ОТ ПРОДА: EAGLE3 spec-decode
-  снят — на 8xH100 с bf16 KV он не помещается вместе с окном 200k (выбор оператора:
-  200k важнее ускорения декода). Задача агента — побить это по целям оптимизации,
-  не сломав корректность.
+  Agent-found best config (эксперимент 5d4a77fd40fb), промоутнут в baseline-якорь.
+  MiniMaxAI/MiniMax-M3-MXFP8 на H100x8: TP=8, нативный MXFP8 (autodetect, без
+  --quantization), bfloat16 compute, bf16 KV (fp8 невозможен — ядро M3),
+  expert-parallel MoE (128 экспертов top-4), block-size=128, gpu_mem_util=0.96,
+  max_num_seqs=16, max_num_batched_tokens=16384, max-cudagraph-capture-size=8,
+  performance-mode=interactivity, контекст 200000, мультимодальный энкодер +
+  mm-лимиты из config7.vllm_extra_args, prefix+chunked prefill. БЕЗ EAGLE3
+  spec-decode (не помещается с bf16 KV на 200k). Это первая конфигурация, которая
+  стабильно стартовала и прошла бенчмарк; задача агента — итерировать ОТ неё и
+  побить по целям оптимизации, не сломав корректность.
