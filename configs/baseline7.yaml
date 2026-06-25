@@ -18,8 +18,13 @@
 # planner. Flags with dedicated schema fields live in those fields; everything
 # else passes verbatim through extra_engine_args (same order as the prod command).
 #
-# NOTE: --tool-call-parser / --reasoning-parser / --enable-auto-tool-choice are
-# always appended by container.vllm_extra_args in config7.yaml — NOT repeated here.
+# NOTE: эти флаги ВСЕГДА добавляются из container.vllm_extra_args в config7.yaml —
+# здесь НЕ дублируются: --tool-call-parser / --reasoning-parser /
+# --enable-auto-tool-choice, мультимодальный энкодер (--mm-encoder-attn-backend
+# FLASHINFER, --mm-processor-cache-type shm, --mm-encoder-tp-mode data) И mm-лимиты
+# (--limit-mm-per-prompt, --mm-processor-kwargs), которые кэпят worst-case видео,
+# чтобы профилировщик не падал в startup OOM. Mm-настройки — единый источник в
+# config7, т.к. они model-invariant и нужны и якорю, и планируемым экспериментам.
 #
 # NOT EXPRESSIBLE в схеме рантайма (см. сводку в config7.yaml):
 #   --privileged, --ipc=host — у nerdctl-обёртки их нет; --ipc=host частично
@@ -37,12 +42,13 @@ engine: vllm
 tensor_parallel_size: 8
 
 # Прод запускает с `--max-model-len auto` (= нативные 1M токенов модели).
-# Здесь окно ФИКСИРОВАНО на 131072, чтобы baseline-якорь был сопоставим с
-# планируемыми экспериментами (top-level max_model_len в config7 = 131072) и
-# чтобы KV-бюджет не уходил на нереалистичный 1M контекст.
+# Здесь окно ФИКСИРОВАНО на 200000 — РОВНО как top-level max_model_len в config7,
+# чтобы baseline-якорь был сопоставим с планируемыми экспериментами, и чтобы
+# KV-бюджет не уходил на нереалистичный 1M контекст. Если меняешь окно — меняй
+# синхронно в обоих файлах.
 #   → Чтобы воспроизвести прод буквально (auto): поставь здесь `max_model_len:`
 #     в null И добавь "--max-model-len", "auto" в начало extra_engine_args.
-max_model_len: 131072
+max_model_len: 200000
 
 gpu_memory_utilization: 0.95
 max_num_seqs: 256
@@ -69,27 +75,23 @@ enable_chunked_prefill: true
 #   --block-size 128            — размер KV-блока
 #   --enable-expert-parallel    — expert parallelism для MoE (128 экспертов)
 #   --speculative-config        — EAGLE3 draft (Inferact/MiniMax-M3-EAGLE3, 3 токена)
-#   --mm-encoder-*              — мультимодальный энкодер (в текстовом бенче не задействован)
+# Мультимодальные флаги (--mm-encoder-* + mm-лимиты) сюда НЕ кладём — они
+# model-invariant и живут в config7.container.vllm_extra_args (единый источник).
 extra_engine_args:
   - "--block-size"
   - "128"
   - "--enable-expert-parallel"
   - "--speculative-config"
   - '{"method": "eagle3", "model": "Inferact/MiniMax-M3-EAGLE3", "num_speculative_tokens": 3, "attention_backend": "FLASH_ATTN"}'
-  - "--mm-encoder-attn-backend"
-  - "FLASHINFER"
-  - "--mm-processor-cache-type"
-  - "shm"
-  - "--mm-encoder-tp-mode"
-  - "data"
 
 rationale: >-
   Operator-defined baseline = прод-команда MiniMaxAI/MiniMax-M3-MXFP8 на H100x8:
   TP=8, нативный MXFP8 (vLLM autodetect, без --quantization), bfloat16 compute,
   expert-parallel MoE (128 экспертов top-4), block-size=128, EAGLE3 spec-decode
   (Inferact/MiniMax-M3-EAGLE3, 3 draft-токена, FLASH_ATTN), мультимодальный
-  энкодер на FLASHINFER + shm-кэш + data-TP, prefix+chunked prefill (V1 default),
+  энкодер на FLASHINFER + shm-кэш + data-TP (из config7.vllm_extra_args, с
+  mm-лимитами против startup-OOM), prefix+chunked prefill (V1 default),
   gpu_mem_util=0.95, max_num_seqs=256, max_num_batched_tokens=8192. Контекст
-  зафиксирован на 131072 (прод: auto=1M) для сопоставимости якоря с планируемыми
+  зафиксирован на 200000 (прод: auto=1M) для сопоставимости якоря с планируемыми
   экспериментами. Задача агента — побить это по целям оптимизации, не сломав
   корректность.
