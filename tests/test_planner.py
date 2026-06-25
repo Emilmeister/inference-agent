@@ -24,8 +24,10 @@ class TestFp8KvDirective:
     independent of the run's weights, and must never retrofit the baseline."""
 
     def test_rule_always_present_in_prompt_template(self):
+        # Rule 0b is now dynamic: the fp8 default (non-fixed) vs FIXED message is
+        # injected via the {fixed_kv_cache_dtype} placeholder by planner_node.
         assert "0b. KV CACHE DTYPE" in _PROMPT_HEADER
-        assert "kv_cache_dtype=fp8" in _PROMPT_HEADER
+        assert "{fixed_kv_cache_dtype}" in _PROMPT_HEADER
 
     def test_rule_scopes_to_planner_configs_only(self):
         # The baseline is injected verbatim (baseline_injector, no LLM), so the
@@ -393,6 +395,36 @@ class TestBuildExperimentConfigSanitization:
         exp = _build_experiment_config(out, self._hw(), cfg)
         assert exp.quantization == "fp8"
         assert exp.attention_backend == "FLASH_ATTN"
+
+    def test_kv_cache_dtype_follows_llm_when_not_fixed(self):
+        """With no run-level fix, the LLM's kv_cache_dtype choice is honored."""
+        from inference_agent.models import AgentConfig
+        cfg = AgentConfig()  # kv_cache_dtype defaults to None (not fixed)
+        assert _build_experiment_config(
+            self._output(kv_cache_dtype="fp8"), self._hw(), cfg
+        ).kv_cache_dtype == "fp8"
+        assert _build_experiment_config(
+            self._output(kv_cache_dtype="auto"), self._hw(), cfg
+        ).kv_cache_dtype == "auto"
+
+    def test_kv_cache_dtype_fixed_from_agent_config(self):
+        """When fixed at run level, the planner forces it onto every experiment —
+        even if the LLM emits auto — so recorded config == what actually ran."""
+        from inference_agent.models import AgentConfig
+        cfg = AgentConfig(kv_cache_dtype="fp8")
+        out = self._output(kv_cache_dtype="auto")  # LLM tries to override
+        exp = _build_experiment_config(out, self._hw(), cfg)
+        assert exp.kv_cache_dtype == "fp8"
+
+    def test_kv_cache_dtype_strips_extra_engine_args_override(self):
+        """LLM cannot smuggle a different --kv-cache-dtype via extra_engine_args."""
+        from inference_agent.models import AgentConfig
+        cfg = AgentConfig(kv_cache_dtype="fp8")
+        out = self._output(extra_engine_args=["--kv-cache-dtype", "fp8_e5m2"])
+        exp = _build_experiment_config(out, self._hw(), cfg)
+        assert "--kv-cache-dtype" not in exp.extra_engine_args
+        assert "fp8_e5m2" not in exp.extra_engine_args
+        assert exp.kv_cache_dtype == "fp8"
 
     def test_quantization_strips_extra_engine_args_override(self):
         """LLM cannot smuggle a different --quantization through

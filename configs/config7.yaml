@@ -20,6 +20,13 @@ quantization: null
 # см. baseline7.yaml.)
 max_model_len: 200000
 
+# KV-кэш фиксируется в fp8 на весь прогон — планировщик НЕ может вернуть его в
+# auto (16-бит). На 200k 16-бит KV не влезает (нужно 9.21 ГиБ при 6.64 доступных,
+# engine не стартует); fp8 режет вдвое и обязателен, чтобы окно 200k вообще
+# поднялось. Зеркало quantization: planner форсит это значение на каждый
+# эксперимент. baseline7 держит fp8 в своём поле отдельно (через planner не идёт).
+kv_cache_dtype: fp8
+
 # LLM агента (для принятия решений — любой OpenAI-совместимый endpoint)
 agent_llm:
   base_url: "https://api.openai.com/v1"
@@ -162,6 +169,6 @@ planner_instructions: |
   пробовать без spec-decode для сравнения. Мультимодальные --mm-* это флаги мультимодальности,
   их отключать нельзя
 
-  Что стоит попробовать первым:
-  - kv-cache-dtype=fp8 (освобождает VRAM под KV, важно при TP=8 и большой модели);
-  - подкрутить max_num_batched_tokens / max_num_seqs под agentic-нагрузку.
+  kv_cache_dtype зафиксирован в fp8 на уровне run (как quantization) — НЕ варьируй
+  его и не возвращай в auto. Что стоит покрутить под agentic-нагрузку:
+  max_num_batched_tokens, max_num_seqs, num_speculative_tokens, block-size.

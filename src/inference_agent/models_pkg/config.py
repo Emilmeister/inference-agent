@@ -275,6 +275,14 @@ class AgentConfig(BaseModel):
     # (user explicitly chose this context window).
     max_model_len: int | None = None
 
+    # kv_cache_dtype fixed across all experiments — same contract as
+    # `quantization`. When set (e.g. "fp8" / "fp8_e4m3" / "fp8_e5m2") the
+    # planner cannot vary it: every planned experiment gets this exact value
+    # (engine flag forced, recorded config == what actually ran), and the LLM
+    # is told it is fixed. None → legacy behavior: the planner defaults per its
+    # Rule 0b and may A/B auto vs fp8.
+    kv_cache_dtype: str | None = None
+
     agent_llm: AgentLLMConfig = Field(default_factory=AgentLLMConfig)
     container: ContainerConfig = Field(default_factory=ContainerConfig)
     startup: StartupConfig = Field(default_factory=StartupConfig)
