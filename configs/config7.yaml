@@ -49,6 +49,16 @@ container:
   # enable-auto-tool-choice. Имена парсеров подтверждены прод-командой.
   # --trust-remote-code НЕ добавляем: прод его не передаёт (образ minimax-m3 уже
   # содержит код модели).
+  #
+  # МУЛЬТИМОДАЛЬНОСТЬ СОХРАНЕНА, но worst-case видео ограничен — иначе startup
+  # OOM: профилировщик строит дамми-видео на ~192k vision-токенов (дефолты
+  # video_processor: max_frames=768, max_pixels=602112), и data-mode all_gather
+  # по 8 рангам просит 17.6 ГиБ поверх 54.5 ГиБ весов + EAGLE3 → не влезает в
+  # 80 ГБ. limit-mm + mm-processor-kwargs кэпят видео до ~4k токенов (32 кадра @
+  # 256 патчей), профилировка проходит, текст остаётся 200k, картинки/видео
+  # по-прежнему обслуживаются (боевой деплой 428B на 8xH100 и так обязан задавать
+  # эти лимиты). ПРОВЕРИТЬ на первом старте: строка лога "Encoder cache ... budget
+  # of N tokens" должна упасть с 192000 до ~единиц тысяч.
   vllm_extra_args:
     - "--enable-auto-tool-choice"
     - "--tool-call-parser"
@@ -61,6 +71,10 @@ container:
     - "shm"
     - "--mm-encoder-tp-mode"
     - "data"
+    - "--limit-mm-per-prompt"
+    - '{"image": 4, "video": 1}'
+    - "--mm-processor-kwargs"
+    - '{"max_frames": 32, "max_pixels": 200704}'
 
 # Поведение при старте движка (healthcheck, pull образа). 428B в 31 шарде
 # грузятся долго — таймауты щедрые.
