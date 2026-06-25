@@ -20,12 +20,11 @@ quantization: null
 # см. baseline7.yaml.)
 max_model_len: 200000
 
-# KV-кэш фиксируется в fp8 на весь прогон — планировщик НЕ может вернуть его в
-# auto (16-бит). На 200k 16-бит KV не влезает (нужно 9.21 ГиБ при 6.64 доступных,
-# engine не стартует); fp8 режет вдвое и обязателен, чтобы окно 200k вообще
-# поднялось. Зеркало quantization: planner форсит это значение на каждый
-# эксперимент. baseline7 держит fp8 в своём поле отдельно (через planner не идёт).
-kv_cache_dtype: fp8
+# KV-кэш ЗАФИКСИРОВАН на auto (= bf16) на весь прогон. fp8 для MiniMax-M3
+# НЕВОЗМОЖЕН: его fused-ядро аттеншна требует bf16 KV и падает с
+# "kv_cache dtype must match qkv (bf16 cache only)". Фиксируем auto, чтобы
+# планировщик НЕ пробовал fp8/fp8_e4m3/fp8_e5m2 и не ловил этот краш снова.
+kv_cache_dtype: auto
 
 # LLM агента (для принятия решений — любой OpenAI-совместимый endpoint)
 agent_llm:
@@ -164,11 +163,13 @@ planner_instructions: |
   --enable-expert-parallel остаётся включённым (MoE) — не выключай. Бейзлайн
   держит prefix caching включённым (обязателен для agentic-цели) — не выключай.
 
-  Бейзлайн использует EAGLE3 spec-decode (--speculative-config) и block-size=128 —
-  это рабочие оси поиска: можешь варьировать num_speculative_tokens, block-size,
-  пробовать без spec-decode для сравнения. Мультимодальные --mm-* это флаги мультимодальности,
-  их отключать нельзя
+  SPECULATIVE DECODING ВЫКЛЮЧЕН и должен остаться выключенным: на 8xH100 с bf16 KV
+  (fp8 невозможен) draft-модель + её KV/графы не помещаются вместе с окном 200k.
+  НЕ добавляй --speculative-config / speculative_* — это съест память, нужную под
+  KV, и движок не стартует. block-size=128 — рабочая ось (можешь варьировать).
+  Мультимодальные --mm-* — это флаги мультимодальности, их отключать нельзя.
 
-  kv_cache_dtype зафиксирован в fp8 на уровне run (как quantization) — НЕ варьируй
-  его и не возвращай в auto. Что стоит покрутить под agentic-нагрузку:
-  max_num_batched_tokens, max_num_seqs, num_speculative_tokens, block-size.
+  kv_cache_dtype зафиксирован на auto (= bf16). НЕ пробуй fp8/fp8_e4m3/fp8_e5m2:
+  fused-ядро аттеншна MiniMax-M3 требует bf16 KV и жёстко падает на fp8. Что
+  стоит покрутить под agentic-нагрузку: max_num_batched_tokens, max_num_seqs,
+  num_speculative_tokens, block-size, gpu_memory_utilization.

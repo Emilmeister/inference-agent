@@ -60,14 +60,11 @@ max_num_batched_tokens: 8192
 quantization: null
 dtype: bfloat16
 
-# fp8 KV-кэш — НЕ из прод-команды (прод идёт с --max-model-len auto и vLLM сам
-# обрезает окно до влезающего ~144k при 16-бит KV). Нам нужно фиксированные 200k,
-# а на них 16-бит KV требует 9.21 ГиБ/карту при 6.64 доступных → engine не
-# стартует. fp8 вдвое режет KV (≈4.6 ГиБ на 200k), поднимает влезающий максимум
-# до ~288k → 200k проходит, при этом EAGLE3 и мультимодальность сохранены.
-# MXFP8-модель + fp8 KV — естественная пара (предупреждения про некалиброванный
-# q_scale некритичны для бенча; correctness-gate проверит tool/json).
-kv_cache_dtype: fp8
+# KV-кэш ТОЛЬКО bf16 (auto). fp8 НЕВОЗМОЖЕН: fused-ядро аттеншна MiniMax-M3
+# (fused_minimax_m3_qknorm_rope_kv_insert) жёстко требует bf16 KV и падает с
+# "kv_cache dtype must match qkv (bf16 cache only)". Поэтому --kv-cache-dtype не
+# передаём (auto = bf16, как прод).
+kv_cache_dtype: auto
 
 # Прод не передаёт эти флаги явно — в vLLM V1 prefix caching и chunked prefill
 # включены по умолчанию. enable_prefix_caching=true держим явно: для движка это
@@ -76,31 +73,31 @@ kv_cache_dtype: fp8
 enable_prefix_caching: true
 enable_chunked_prefill: true
 
-# Speculative decoding EAGLE3 — задаётся целиком как JSON через --speculative-config
-# (dedicated-поля схемы не умеют method/attention_backend), поэтому идёт в
-# extra_engine_args ниже, а speculative_* поля оставлены пустыми.
-
+# EAGLE3 spec-decode УБРАН (был в прод-команде через --speculative-config).
+# Причина: на 8xH100 с bf16 KV (fp8 невозможен — ядро M3) контекст 200k и EAGLE3
+# не помещаются вместе — draft-веса + его KV/графы съедают ~3.5-6 ГиБ, которых не
+# хватает для KV на 200k (нужно 9.21 ГиБ при 6.64 доступных). Сняв draft,
+# освобождаем эту память → 200k bf16 влезает. (Выбор оператора: 200k важнее
+# ускорения декода.)
+#
 # Flags without a dedicated ExperimentConfig field — verbatim, в порядке прод-команды.
 #   --block-size 128            — размер KV-блока
 #   --enable-expert-parallel    — expert parallelism для MoE (128 экспертов)
-#   --speculative-config        — EAGLE3 draft (Inferact/MiniMax-M3-EAGLE3, 3 токена)
 # Мультимодальные флаги (--mm-encoder-* + mm-лимиты) сюда НЕ кладём — они
 # model-invariant и живут в config7.container.vllm_extra_args (единый источник).
 extra_engine_args:
   - "--block-size"
   - "128"
   - "--enable-expert-parallel"
-  - "--speculative-config"
-  - '{"method": "eagle3", "model": "Inferact/MiniMax-M3-EAGLE3", "num_speculative_tokens": 3, "attention_backend": "FLASH_ATTN"}'
 
 rationale: >-
-  Operator-defined baseline = прод-команда MiniMaxAI/MiniMax-M3-MXFP8 на H100x8:
-  TP=8, нативный MXFP8 (vLLM autodetect, без --quantization), bfloat16 compute,
-  expert-parallel MoE (128 экспертов top-4), block-size=128, EAGLE3 spec-decode
-  (Inferact/MiniMax-M3-EAGLE3, 3 draft-токена, FLASH_ATTN), мультимодальный
-  энкодер на FLASHINFER + shm-кэш + data-TP (из config7.vllm_extra_args, с
-  mm-лимитами против startup-OOM), prefix+chunked prefill (V1 default),
-  gpu_mem_util=0.95, max_num_seqs=256, max_num_batched_tokens=8192. Контекст
-  зафиксирован на 200000 (прод: auto=1M) для сопоставимости якоря с планируемыми
-  экспериментами. Задача агента — побить это по целям оптимизации, не сломав
-  корректность.
+  Operator baseline (прод MiniMaxAI/MiniMax-M3-MXFP8 на H100x8, адаптировано под
+  стенд): TP=8, нативный MXFP8 (vLLM autodetect, без --quantization), bfloat16
+  compute, bf16 KV (fp8 невозможен — ядро M3), expert-parallel MoE (128 экспертов
+  top-4), block-size=128, мультимодальный энкодер на FLASHINFER + shm-кэш + data-TP
+  (из config7.vllm_extra_args, с mm-лимитами против startup-OOM), prefix+chunked
+  prefill (V1 default), gpu_mem_util=0.95, max_num_seqs=256,
+  max_num_batched_tokens=8192, контекст 200000. ОТЛИЧИЕ ОТ ПРОДА: EAGLE3 spec-decode
+  снят — на 8xH100 с bf16 KV он не помещается вместе с окном 200k (выбор оператора:
+  200k важнее ускорения декода). Задача агента — побить это по целям оптимизации,
+  не сломав корректность.
