@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import statistics
@@ -50,6 +51,58 @@ from inference_agent.utils.logging import clear_experiment_context, set_experime
 from inference_agent.utils.metrics import extract_kv_cache_metrics, fetch_prometheus_metrics
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_speculative_draft_model(experiment: "ExperimentConfig") -> str | None:
+    """Resolve the speculative-decoding draft model id that must be prefetched.
+
+    A draft model can reach the engine two ways, and BOTH must be prefetched
+    before launch (engines run with HF_HUB_OFFLINE=1):
+
+      1. The dedicated `speculative_draft_model` schema field (planner path).
+      2. Inside a raw ``--speculative-config '{"model": "...", ...}'`` flag in
+         `extra_engine_args` — the modern vLLM format that also carries
+         ``method`` / ``attention_backend``, which the dedicated fields can't
+         express. Operator baselines use this form.
+
+    The dedicated field wins when set. Otherwise we scan extra_engine_args for
+    ``--speculative-config`` (both ``--flag value`` and ``--flag=value`` forms)
+    and pull the ``model`` key out of its JSON payload. Malformed JSON or a
+    missing ``model`` key returns None with a warning rather than crashing —
+    startup will surface the real problem.
+    """
+    if experiment.speculative_draft_model:
+        draft = experiment.speculative_draft_model.strip()
+        if draft and draft.lower() not in ("none", "null", ""):
+            return draft
+
+    args = experiment.extra_engine_args or []
+    payload: str | None = None
+    for i, arg in enumerate(args):
+        if arg == "--speculative-config":
+            if i + 1 < len(args):
+                payload = args[i + 1]
+            break
+        if arg.startswith("--speculative-config="):
+            payload = arg.split("=", 1)[1]
+            break
+
+    if payload is None:
+        return None
+
+    try:
+        spec = json.loads(payload)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning(
+            "Could not parse --speculative-config JSON for draft-model prefetch: %r",
+            payload,
+        )
+        return None
+
+    model = spec.get("model") if isinstance(spec, dict) else None
+    if isinstance(model, str) and model.strip():
+        return model.strip()
+    return None
 
 
 async def _capture_failure_logs(
@@ -715,12 +768,15 @@ async def executor_node(state: AgentState) -> dict:
     # ── Step 0: Prefetch external speculative draft model ─────────────
     # Engines run with HF_HUB_OFFLINE=1 (so the patched config.json is used
     # instead of being overwritten by HF re-validation), so any draft model
-    # the planner picked must be in the host cache before container start.
+    # must be in the host cache before container start — whether the planner
+    # set it via speculative_draft_model or an operator baseline embedded it in
+    # a raw --speculative-config JSON (resolve_speculative_draft_model covers
+    # both).
     # snapshot_download is idempotent — if the draft is already cached this
     # is a no-op. A failed download (bad repo ID, auth, network) surfaces
     # here as a clean `prefetch_failed` failure instead of a 20-minute
     # container hang during engine startup.
-    draft_model = experiment.speculative_draft_model
+    draft_model = resolve_speculative_draft_model(experiment)
     if draft_model and config.startup.prefetch_model:
         logger.info("Prefetching speculative_draft_model: %s", draft_model)
         loop = asyncio.get_event_loop()

@@ -1,0 +1,153 @@
+# Модель для бенчмарка — MiniMaxAI/MiniMax-M3-MXFP8 (MoE VL, ~428B всего / ~23B
+# активных, 128 экспертов top-4). Thinking-модель с reasoning (<think>), agentic
+# tool calling (<tool_call><invoke>), мультимодальная (image/video — в бенчмарке
+# гоняем только текст). Веса предквантованы в MXFP8 (config.json содержит
+# quantization_config: quant_method=mxfp8, dynamic activations, weight_block [1,32];
+# lm_head / embeddings / vision_tower / MoE-gate оставлены в исходной точности).
+model_name: "MiniMaxAI/MiniMax-M3-MXFP8"
+model_revision: null
+
+# Квантизация фиксируется на уровне всего прогона, планировщик её не варьирует.
+# Веса УЖЕ в MXFP8 — vLLM определяет это автоматически из quantization_config,
+# прод НЕ передаёт --quantization. Поэтому null: планировщик не навязывает
+# --quantization, движок autodetect'ит mxfp8 (аналогично gpt-oss с mxfp4).
+quantization: null
+
+# Контекстное окно фиксируется на уровне run, планировщик его не варьирует.
+# Прод запускает с --max-model-len auto (нативные 1M, max_position_embeddings=
+# 1048576), но полный 1M-KV не помещается на стенд и делает якорь несопоставимым
+# с планируемыми экспериментами — фиксируем 200000. (Как вернуть прод-auto —
+# см. baseline7.yaml.)
+max_model_len: 200000
+
+# LLM агента (для принятия решений — любой OpenAI-совместимый endpoint)
+agent_llm:
+  base_url: "https://api.openai.com/v1"
+  model: "gpt-4o-mini"
+  api_key_env: "OPENAI_API_KEY"
+  temperature: 0.0
+  structured_output_mode: "json_schema"
+
+# Container runtime (nerdctl + containerd)
+container:
+  # Прод-образ MiniMax (содержит код архитектуры M3 → --trust-remote-code НЕ нужен).
+  vllm_image: "vllm/vllm-openai:minimax-m3"
+  sglang_image: "lmsysorg/sglang:latest"
+  network: "host"
+  # Прод-команда запускается с --ipc=host (и --privileged). Обёртка nerdctl этого
+  # не выражает — приближаем большим /dev/shm под NCCL/TP=8 + EAGLE3. --privileged
+  # просто не воспроизводится (обычно для бенча не требуется).
+  shm_size: "32g"
+  # TP=8 — модель занимает весь стенд 8xH100 (GPU 0-7), как прод `--gpus all`.
+  # 428B в MXFP8 ≈ 53 ГБ/карту весов; на 4 картах (320 ГБ) не помещается.
+  gpu_count: 8
+  model_cache_dir: "/root/.cache/huggingface/hub"
+
+  # Model-invariant флаги корректности, добавляются к каждому vLLM-запуску
+  # (baseline + планировщик). MiniMax-M3 — thinking-модель → reasoning-parser
+  # minimax_m3 обязателен; tool calling — tool-call-parser minimax_m3 +
+  # enable-auto-tool-choice. Имена парсеров подтверждены прод-командой.
+  # --trust-remote-code НЕ добавляем: прод его не передаёт (образ minimax-m3 уже
+  # содержит код модели).
+  vllm_extra_args:
+    - "--enable-auto-tool-choice"
+    - "--tool-call-parser"
+    - "minimax_m3"
+    - "--reasoning-parser"
+    - "minimax_m3"
+    - "--mm-encoder-attn-backend"
+    - "FLASHINFER"
+    - "--mm-processor-cache-type"
+    - "shm"
+    - "--mm-encoder-tp-mode"
+    - "data"
+
+# Поведение при старте движка (healthcheck, pull образа). 428B в 31 шарде
+# грузятся долго — таймауты щедрые.
+#
+# EAGLE3: baseline7 использует spec-decode с draft-моделью Inferact/MiniMax-M3-
+# EAGLE3, зашитой в --speculative-config. Executor автоматически префетчит draft
+# перед стартом (resolve_speculative_draft_model парсит и dedicated-поле, и JSON
+# из --speculative-config) — ручной hf download НЕ нужен. Если draft недоступен
+# (опечатка в repo id / нет доступа), эксперимент падает быстро как
+# prefetch_failed, а не виснет на 20 минут при старте движка.
+startup:
+  hard_timeout_sec: 3600
+  idle_timeout_sec: 1800
+  log_scan_interval_sec: 10.0
+  image_pull_timeout_sec: 900
+  container_run_timeout_sec: 180
+
+# Бенчмарк
+benchmark:
+  warmup_requests: 10
+  concurrency_levels: [1, 16, 64, 256]
+  prompt_lengths: [512, 4096, 32768]
+  max_output_tokens: 256
+  long_context_max_output_tokens: 8192
+  duration_per_level_sec: 30
+  timeout_sec: 600
+  latency_threshold_ms: 2000
+
+  enable_agentic_long_context: true
+
+  # Sizing под окно 131072: unique(83000) + max_output(16000) = 99000 < 131072
+  # с запасом ~32K. Если поднимешь max_model_len — можно увеличить unique.
+  agentic_shared_prefix_tokens: 0
+  agentic_unique_prompt_tokens: 83000
+  agentic_max_output_tokens: 16000
+  agentic_tool_result_min_tokens: 1024
+  agentic_tool_result_max_tokens: 1536
+  agentic_turns_per_session: 1
+
+  agentic_concurrency_levels: [2, 4, 6, 8, 10, 12, 14, 15, 16, 18, 20, 22, 24, 26, 28, 30]
+
+  agentic_session_timeout_sec: 5400
+  agentic_per_turn_timeout_sec: 1200
+
+  agentic_ttft_p95_slo_ms: 30000
+  agentic_tpot_p95_slo_ms: 33
+  agentic_session_error_rate_slo: 0.05
+  agentic_e2e_p95_slo_ms: 0
+
+  agentic_concurrency_ceiling_search: false
+
+# Эксперименты. Только vLLM.
+experiments:
+  max_experiments: 30
+  plateau_threshold: 0.02
+  plateau_window: 5
+  engines: ["vllm"]
+  max_params_per_step: 10
+
+# Storage (logs only)
+storage:
+  logs_dir: "./logs"
+
+# Inference-api REST сервис.
+api:
+  base_url: "http://localhost:8080"
+  token_env: "INFERENCE_API_TOKEN"
+  timeout_sec: 30.0
+
+# Инструкции для LLM планировщика.
+planner_instructions: |
+  MiniMaxAI/MiniMax-M3-MXFP8 — большая MoE thinking-модель (~428B всего / ~23B
+  активных, 128 экспертов top-4). Веса предквантованы в MXFP8 — vLLM autodetect'ит
+  из config.json. НЕ добавляй --quantization (quantization фиксирован в null).
+  max_model_len=200000 зафиксирован.
+
+  Жёсткие инварианты (нельзя выкидывать): reasoning-parser minimax_m3,
+  tool-call-parser minimax_m3 и --enable-auto-tool-choice идут из
+  container.vllm_extra_args — в extra_engine_args их НЕ дублируй.
+  --enable-expert-parallel остаётся включённым (MoE) — не выключай. Бейзлайн
+  держит prefix caching включённым (обязателен для agentic-цели) — не выключай.
+
+  Бейзлайн использует EAGLE3 spec-decode (--speculative-config) и block-size=128 —
+  это рабочие оси поиска: можешь варьировать num_speculative_tokens, block-size,
+  пробовать без spec-decode для сравнения. Мультимодальные --mm-* это флаги мультимодальности,
+  их отключать нельзя
+
+  Что стоит попробовать первым:
+  - kv-cache-dtype=fp8 (освобождает VRAM под KV, важно при TP=8 и большой модели);
+  - подкрутить max_num_batched_tokens / max_num_seqs под agentic-нагрузку.
