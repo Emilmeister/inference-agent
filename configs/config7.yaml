@@ -118,9 +118,9 @@ benchmark:
   agentic_max_output_tokens: 16000
   agentic_tool_result_min_tokens: 1024
   agentic_tool_result_max_tokens: 1536
-  agentic_turns_per_session: 1
+  agentic_turns_per_session: 3
 
-  agentic_concurrency_levels: [2, 4, 6, 8, 10, 12, 14, 15, 16, 18, 20, 22, 24, 26, 28, 30]
+  agentic_concurrency_levels: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 15, 16, 18, 20, 22, 24, 26, 28, 30]
 
   agentic_session_timeout_sec: 5400
   agentic_per_turn_timeout_sec: 1200
@@ -170,6 +170,4 @@ planner_instructions: |
   Мультимодальные --mm-* — это флаги мультимодальности, их отключать нельзя.
 
   kv_cache_dtype зафиксирован на auto (= bf16). НЕ пробуй fp8/fp8_e4m3/fp8_e5m2:
-  fused-ядро аттеншна MiniMax-M3 требует bf16 KV и жёстко падает на fp8. Что
-  стоит покрутить под agentic-нагрузку: max_num_batched_tokens, max_num_seqs,
-  num_speculative_tokens, block-size, gpu_memory_utilization.
+  fused-ядро аттеншна MiniMax-M3 требует bf16 KV и жёстко падает на fp8.
