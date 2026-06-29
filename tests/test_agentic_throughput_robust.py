@@ -12,19 +12,37 @@ from __future__ import annotations
 from inference_agent.benchmark.runner import _aggregate_session_throughputs
 
 
-def _turn(out: int, inp: int, e2e_ms: float, error: str | None = None) -> dict:
-    return {"output_tokens": out, "input_tokens": inp, "e2e_latency_ms": e2e_ms, "error": error}
+def _turn(
+    out: int, inp: int, e2e_ms: float, error: str | None = None, cached: int = 0,
+) -> dict:
+    return {
+        "output_tokens": out, "input_tokens": inp, "cached_tokens": cached,
+        "e2e_latency_ms": e2e_ms, "error": error,
+    }
 
 
 def test_uniform_case_matches_naive_aggregate():
     # 4 identical sessions, 1 turn each: 100 out tok in 1s. Naive aggregate
     # Σout/wall = 400/1 = 400. Robust Σ(o/t) = 4 * (100/1) = 400 — identical.
     sessions = [[_turn(100, 1000, 1000.0)] for _ in range(4)]
-    out_tps, in_tps, total_tps, req_tps = _aggregate_session_throughputs(sessions)
+    out_tps, in_tps, total_tps, req_tps, cached_tps = _aggregate_session_throughputs(sessions)
     assert out_tps == 400.0          # == naive Σout/wall_time
     assert in_tps == 4000.0
     assert total_tps == 4400.0
     assert req_tps == 4.0
+    assert cached_tps == 0.0         # no cached tokens reported
+
+
+def test_cached_tokens_are_subset_of_input_rate():
+    # 2 sessions, 1 turn each: 1000 input tok of which 800 are prefix-cache hits,
+    # 100 output, in 1s. Real prefill rate = input − cached = (1000−800)/1 per
+    # session. cached_tps = 800/1 per session. input_tps still counts the full
+    # logical input (1000), so input − cached = real prefill.
+    sessions = [[_turn(100, 1000, 1000.0, cached=800)] for _ in range(2)]
+    _, in_tps, _, _, cached_tps = _aggregate_session_throughputs(sessions)
+    assert in_tps == 2000.0          # full logical input rate
+    assert cached_tps == 1600.0      # 800/s × 2 sessions
+    assert in_tps - cached_tps == 400.0  # real prefill rate (200/s × 2)
 
 
 def test_straggler_does_not_deflate_other_sessions():
@@ -42,7 +60,7 @@ def test_straggler_does_not_deflate_other_sessions():
 def test_multi_turn_session_active_time_sums_turn_latencies():
     # one session, 2 turns: (50 tok, 0.5s) + (150 tok, 1.5s) → 200 tok / 2.0s = 100.
     sessions = [[_turn(50, 500, 500.0), _turn(150, 1500, 1500.0)]]
-    out_tps, _, _, req_tps = _aggregate_session_throughputs(sessions)
+    out_tps, _, _, req_tps, _ = _aggregate_session_throughputs(sessions)
     assert out_tps == 100.0
     assert req_tps == 1.0  # 2 successful turns / 2.0s
 
@@ -50,7 +68,7 @@ def test_multi_turn_session_active_time_sums_turn_latencies():
 def test_errored_turn_excluded_from_requests_but_time_counts():
     # 2 turns, second errored (0 tokens, but took 1s before failing).
     sessions = [[_turn(100, 1000, 1000.0), _turn(0, 0, 1000.0, error="timeout")]]
-    out_tps, _, _, req_tps = _aggregate_session_throughputs(sessions)
+    out_tps, _, _, req_tps, _ = _aggregate_session_throughputs(sessions)
     assert out_tps == 100 / 2.0      # 100 tok over the 2s the session was active
     assert req_tps == 1 / 2.0        # only 1 successful turn counted
 
@@ -62,4 +80,4 @@ def test_zero_active_time_session_skipped():
 
 
 def test_empty_input_is_zero():
-    assert _aggregate_session_throughputs([]) == (0.0, 0.0, 0.0, 0.0)
+    assert _aggregate_session_throughputs([]) == (0.0, 0.0, 0.0, 0.0, 0.0)

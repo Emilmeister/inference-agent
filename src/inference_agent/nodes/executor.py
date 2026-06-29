@@ -1046,6 +1046,30 @@ async def executor_node(state: AgentState) -> dict:
     }
 
 
+def _empirical_prefix_hit_rate(results: list[ConcurrencyResult]) -> float:
+    """Compute the prefix-cache hit rate from the benchmark's own token totals.
+
+    Fallback for engines that don't expose prefix-cache hits via Prometheus
+    (vLLM metric renames, SGLang gaps, scrape failures). The runner records
+    per-phase raw `total_cached_tokens` (prompt tokens served from KV cache,
+    read from usage.prompt_tokens_details.cached_tokens) as a subset of
+    `total_input_tokens`, so Σcached / Σinput is the EXACT token-weighted
+    fraction of prompt tokens that hit the cache across the whole run. Bounded
+    to [0, 1] since cached ≤ input per phase. Returns 0.0 when no prompt tokens
+    were measured (e.g. all phases failed, or legacy results without totals).
+
+    Token-weighted (not rate-weighted): raw totals don't carry the per-phase
+    denominators that the per-second rates do, so summing them is the true
+    pooled ratio — high-volume agentic phases contribute in proportion to their
+    actual prompt-token count, not their throughput.
+    """
+    total_in = sum(r.total_input_tokens for r in results)
+    if total_in <= 0:
+        return 0.0
+    total_cached = sum(r.total_cached_tokens for r in results)
+    return min(1.0, max(0.0, total_cached / total_in))
+
+
 def _aggregate_benchmark(
     results: list[ConcurrencyResult],
     gpu_agg: dict[int, dict],
@@ -1111,6 +1135,12 @@ def _aggregate_benchmark(
         results, benchmark_config, ceiling_probes=ceiling_probes or [],
     )
 
+    # Prefer the engine's Prometheus-reported hit rate; fall back to the
+    # empirical estimate from benchmark token counts when it's unavailable (0).
+    prefix_hit_rate = kv_metrics.get("prefix_cache_hit_rate", 0.0)
+    if prefix_hit_rate <= 0.0:
+        prefix_hit_rate = _empirical_prefix_hit_rate(results)
+
     return BenchmarkResult(
         ttft_ms=peak_throughput_result.ttft_ms,
         tpot_ms=peak_throughput_result.tpot_ms,
@@ -1124,7 +1154,7 @@ def _aggregate_benchmark(
         peak_throughput_e2e_cv=peak_e2e_cv,
         low_concurrency_ttft_cv=low_ttft_cv,
         kv_cache_usage_percent=kv_metrics.get("kv_cache_usage_percent", 0.0),
-        prefix_cache_hit_rate=kv_metrics.get("prefix_cache_hit_rate", 0.0),
+        prefix_cache_hit_rate=prefix_hit_rate,
         gpu_utilization_percent=gpu_util,
         gpu_memory_used_mb=gpu_mem,
         gpu_power_draw_watts=gpu_power,

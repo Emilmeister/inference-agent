@@ -195,6 +195,21 @@ class ConcurrencyResult(BaseModel):
     input_tokens_per_sec: float = 0.0
     output_tokens_per_sec: float = 0.0
     total_tokens_per_sec: float = 0.0
+    # Prefix-cache-hit prompt tokens per second — a subset of
+    # input_tokens_per_sec that was served from the KV cache (~0 prefill
+    # compute). Real prefill rate = input_tokens_per_sec - cached_tokens_per_sec.
+    # 0.0 when the engine doesn't report usage.prompt_tokens_details.cached_tokens
+    # (also keeps pre-existing experiments backward-compatible).
+    cached_tokens_per_sec: float = 0.0
+
+    # Raw token totals for the phase (sum across every request/turn). Rates
+    # above carry per-phase denominators (wall-time, or per-session active time
+    # for agentic) so they can't be re-combined across phases; these totals can.
+    # They enable an EXACT token-weighted prefix hit rate (Σcached / Σinput)
+    # instead of a rate-weighted estimate. 0 for experiments predating capture.
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_cached_tokens: int = 0
 
     queue_time_ms: PercentileStats = Field(default_factory=PercentileStats)
     prefill_time_ms: PercentileStats = Field(default_factory=PercentileStats)

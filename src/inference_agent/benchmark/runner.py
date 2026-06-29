@@ -247,6 +247,7 @@ async def _stream_chat_completion(
         "e2e_latency_ms": 0.0,
         "output_tokens": 0,
         "input_tokens": 0,
+        "cached_tokens": 0,
         "error": None,
         "token_count_source": "sse_delta",  # or "usage_api"
         "content": "",
@@ -258,6 +259,7 @@ async def _stream_chat_completion(
     token_count = 0
     usage_completion_tokens = 0
     usage_prompt_tokens = 0
+    usage_cached_tokens = 0
     content_parts: list[str] = []
 
     try:
@@ -298,6 +300,16 @@ async def _stream_chat_completion(
                             pt = usage.get("prompt_tokens")
                             if pt and pt > 0:
                                 usage_prompt_tokens = pt
+                            # Prefix-cache hits: prompt tokens served from KV
+                            # cache (~0 prefill compute). OpenAI-compatible
+                            # engines (vLLM, SGLang) report this under
+                            # usage.prompt_tokens_details.cached_tokens. Used to
+                            # separate logical input from real prefill work.
+                            details = usage.get("prompt_tokens_details")
+                            if isinstance(details, dict):
+                                cached = details.get("cached_tokens")
+                                if cached and cached > 0:
+                                    usage_cached_tokens = cached
 
                         choices = data.get("choices", [])
                         if choices:
@@ -358,6 +370,12 @@ async def _stream_chat_completion(
 
     if usage_prompt_tokens > 0:
         result["input_tokens"] = usage_prompt_tokens
+
+    # Cached tokens are only meaningful when the engine actually reported the
+    # prompt-token usage; clamp to input so a malformed payload can't push
+    # real_prefill negative downstream.
+    if usage_cached_tokens > 0 and result["input_tokens"] > 0:
+        result["cached_tokens"] = min(usage_cached_tokens, result["input_tokens"])
 
     result["content"] = "".join(content_parts)
 
@@ -468,6 +486,7 @@ async def run_benchmark_phase(
     e2e_list = []
     total_output_tokens = 0
     total_input_tokens = 0
+    total_cached_tokens = 0
     errors = 0
     error_details: list[str] = []
 
@@ -485,6 +504,7 @@ async def run_benchmark_phase(
             e2e_list.append(r["e2e_latency_ms"])
         total_output_tokens += r["output_tokens"]
         total_input_tokens += r["input_tokens"]
+        total_cached_tokens += r.get("cached_tokens", 0)
 
     successful = len(all_results) - errors
     total_requests = len(all_results)
@@ -506,6 +526,10 @@ async def run_benchmark_phase(
         total_tokens_per_sec=(total_input_tokens + total_output_tokens) / wall_time
         if wall_time > 0
         else 0,
+        cached_tokens_per_sec=total_cached_tokens / wall_time if wall_time > 0 else 0,
+        total_input_tokens=total_input_tokens,
+        total_output_tokens=total_output_tokens,
+        total_cached_tokens=total_cached_tokens,
         errors=errors,
         error_rate=errors / total_requests if total_requests > 0 else 0.0,
         error_details=error_details[:10],  # cap at 10
@@ -612,6 +636,7 @@ async def _run_agent_session(
             "e2e_latency_ms": result["e2e_latency_ms"],
             "output_tokens": result["output_tokens"],
             "input_tokens": result["input_tokens"],
+            "cached_tokens": result.get("cached_tokens", 0),
             "error": result["error"],
         })
 
@@ -652,13 +677,15 @@ def build_shared_prefix(shared_prefix_tokens: int, seed: int | None) -> str:
 
 def _aggregate_session_throughputs(
     per_session_results: list[list[dict]],
-) -> tuple[float, float, float, float]:
+) -> tuple[float, float, float, float, float]:
     """Straggler-robust agentic throughput = Σ over sessions of (tokensᵢ / tᵢ).
 
-    Returns ``(output_tps, input_tps, total_tps, requests_tps)``. ``tᵢ`` is the
-    session's active generation time — the sum of its turns' e2e latencies
-    (turns run back-to-back, so this is the real wall span spent generating,
-    excluding any simulated tool gaps).
+    Returns ``(output_tps, input_tps, total_tps, requests_tps, cached_tps)``.
+    ``tᵢ`` is the session's active generation time — the sum of its turns' e2e
+    latencies (turns run back-to-back, so this is the real wall span spent
+    generating, excluding any simulated tool gaps). ``cached_tps`` is the rate
+    of prefix-cache-hit prompt tokens — a subset of ``input_tps`` that cost ~0
+    prefill compute, so ``input_tps - cached_tps`` is the real prefill rate.
 
     Why not ``Σtokens / wall_time``: wall_time is the SLOWEST session's
     completion, so one tail straggler (invisible in p95 latencies) deflates the
@@ -668,10 +695,11 @@ def _aggregate_session_throughputs(
     ``Σtokens / wall_time``, so the aggregate scale is preserved — only the
     straggler artifact is removed. Sessions with ``tᵢ <= 0`` contribute nothing.
     """
-    out_tps = in_tps = total_tps = req_tps = 0.0
+    out_tps = in_tps = total_tps = req_tps = cached_tps = 0.0
     for session_results in per_session_results:
         o_i = sum(r["output_tokens"] for r in session_results)
         in_i = sum(r["input_tokens"] for r in session_results)
+        cached_i = sum(r.get("cached_tokens", 0) for r in session_results)
         succ_i = sum(1 for r in session_results if not r.get("error"))
         t_i = sum(r["e2e_latency_ms"] for r in session_results) / 1000.0
         if t_i <= 0:
@@ -680,7 +708,8 @@ def _aggregate_session_throughputs(
         in_tps += in_i / t_i
         total_tps += (o_i + in_i) / t_i
         req_tps += succ_i / t_i
-    return out_tps, in_tps, total_tps, req_tps
+        cached_tps += cached_i / t_i
+    return out_tps, in_tps, total_tps, req_tps, cached_tps
 
 
 async def run_agentic_long_context_phase(
@@ -799,6 +828,14 @@ async def run_agentic_long_context_phase(
 
     total_requests = len(flat)
 
+    # Raw token totals across all turns (errored turns contribute ~0). Kept
+    # alongside the straggler-robust rates so the benchmark-level prefix hit
+    # rate can be computed token-weighted (Σcached / Σinput) rather than from
+    # per-session rates with differing denominators.
+    total_input_tokens = sum(r["input_tokens"] for r in flat)
+    total_output_tokens = sum(r["output_tokens"] for r in flat)
+    total_cached_tokens = sum(r.get("cached_tokens", 0) for r in flat)
+
     ttft_stats = _compute_percentiles(ttft_list)
     tpot_stats = _compute_percentiles(tpot_list)
     itl_stats = _compute_percentiles(itl_list)
@@ -808,7 +845,7 @@ async def run_agentic_long_context_phase(
     # Straggler-robust throughput: Σ over sessions of (tokensᵢ / active_timeᵢ),
     # instead of Σtokens / wall_time which a single tail straggler deflates.
     # See _aggregate_session_throughputs for the rationale.
-    out_tps, in_tps, total_tps, req_tps = _aggregate_session_throughputs(
+    out_tps, in_tps, total_tps, req_tps, cached_tps = _aggregate_session_throughputs(
         per_session_results
     )
 
@@ -840,6 +877,10 @@ async def run_agentic_long_context_phase(
         input_tokens_per_sec=in_tps,
         output_tokens_per_sec=out_tps,
         total_tokens_per_sec=total_tps,
+        cached_tokens_per_sec=cached_tps,
+        total_input_tokens=total_input_tokens,
+        total_output_tokens=total_output_tokens,
+        total_cached_tokens=total_cached_tokens,
         errors=errors,
         error_rate=error_rate,
         error_details=error_details[:10],

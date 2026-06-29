@@ -144,6 +144,10 @@ class ExperimentPhaseRow(BaseModel):
     requests_per_sec: float = 0.0
     output_tokens_per_sec: float = 0.0
     total_tokens_per_sec: float = 0.0
+    cached_tokens_per_sec: float = 0.0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_cached_tokens: int = 0
     ttft_p50: float = 0.0
     ttft_p95: float = 0.0
     ttft_p99: float = 0.0
