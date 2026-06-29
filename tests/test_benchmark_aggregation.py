@@ -45,6 +45,26 @@ class TestAggregateBenchmark:
         result = _aggregate_benchmark(results, {}, {})
         assert result.peak_output_tokens_per_sec == 500.0
 
+    def test_peak_real_prefill_excludes_cache_at_peak_phase(self):
+        """Real prefill at the winning phase = input_tps − cached_tps."""
+        results = [
+            ConcurrencyResult(
+                concurrency=64, prompt_length=512, max_output_tokens=256,
+                workload_id="throughput",
+                output_tokens_per_sec=500.0,        # this phase wins peak decode
+                input_tokens_per_sec=3000.0, cached_tokens_per_sec=2000.0,
+            ),
+            ConcurrencyResult(
+                concurrency=1, prompt_length=512, max_output_tokens=256,
+                workload_id="agent_short",
+                output_tokens_per_sec=100.0,
+                input_tokens_per_sec=400.0, cached_tokens_per_sec=0.0,
+            ),
+        ]
+        result = _aggregate_benchmark(results, {}, {})
+        assert result.peak_output_tokens_per_sec == 500.0     # decode
+        assert result.peak_real_prefill_tokens_per_sec == 1000.0  # 3000 − 2000
+
     def test_low_concurrency_latency(self):
         """Low-concurrency latency uses median (not min) of c=1 phases."""
         results = [

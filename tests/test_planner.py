@@ -9,6 +9,7 @@ from inference_agent.models import (
 )
 from inference_agent.models import PlannerOutput
 from inference_agent.nodes.planner import (
+    _PROMPT_FOOTER,
     _PROMPT_HEADER,
     _build_experiment_config,
     _estimate_safe_context,
@@ -16,7 +17,37 @@ from inference_agent.nodes.planner import (
     _get_quarantined_engines,
     _load_curated_docs,
     _should_disable_speculative,
+    _summary_to_prompt_entry,
 )
+
+
+class TestPromptEntryThroughputNames:
+    """The LLM-facing entry must split throughput into explicit decode/prefill
+    keys (not the ambiguous `peak_throughput`) so the planner can't confuse the
+    two axes."""
+
+    def _summary(self) -> ExperimentSummary:
+        return ExperimentSummary(
+            experiment_id="exp1",
+            engine=EngineType.VLLM,
+            status=ExperimentStatus.SUCCESS,
+            peak_throughput=103.0,                 # decode
+            peak_real_prefill_throughput=950.0,    # prefill, cache-excluded
+        )
+
+    def test_entry_uses_explicit_decode_and_prefill_keys(self):
+        entry = _summary_to_prompt_entry(self._summary())
+        assert entry["decode_tok_s"] == 103.0
+        assert entry["real_prefill_tok_s"] == 950.0
+        # The ambiguous legacy key must be gone.
+        assert "peak_throughput" not in entry
+
+    def test_glossary_present_in_prompt_template(self):
+        assert "decode_tok_s" in _PROMPT_FOOTER
+        assert "real_prefill_tok_s" in _PROMPT_FOOTER
+        # Real prefill is flagged informational so the planner doesn't chase the
+        # bigger number instead of optimizing decode/agentic.
+        assert "does NOT mean a better config" in _PROMPT_FOOTER
 
 
 class TestFp8KvDirective:

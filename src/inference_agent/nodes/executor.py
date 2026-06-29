@@ -1124,6 +1124,15 @@ def _aggregate_benchmark(
     # spread of per-request latencies.
     peak_e2e_cv = peak_throughput_result.e2e_latency_ms.cv
 
+    # Real prefill rate at the peak-throughput phase: logical input minus
+    # prefix-cache hits. Reported alongside decode so prompt-processing capacity
+    # is visible without the cache inflation that swells raw input throughput.
+    peak_real_prefill = max(
+        0.0,
+        peak_throughput_result.input_tokens_per_sec
+        - peak_throughput_result.cached_tokens_per_sec,
+    )
+
     # GPU metrics
     gpu_util = [gpu_agg[i]["util_avg"] for i in sorted(gpu_agg)]
     gpu_mem = [gpu_agg[i]["mem_peak"] for i in sorted(gpu_agg)]
@@ -1149,6 +1158,7 @@ def _aggregate_benchmark(
         peak_requests_per_sec=peak_throughput_result.requests_per_sec,
         peak_output_tokens_per_sec=peak_throughput_result.output_tokens_per_sec,
         peak_total_tokens_per_sec=peak_throughput_result.total_tokens_per_sec,
+        peak_real_prefill_tokens_per_sec=peak_real_prefill,
         low_concurrency_ttft_p95_ms=low_ttft_p95,
         low_concurrency_tpot_p95_ms=low_tpot_p95,
         peak_throughput_e2e_cv=peak_e2e_cv,

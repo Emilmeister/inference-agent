@@ -72,7 +72,7 @@ agentic_throughput={best_agentic_tp:.1f} tok/s)
 - Best balanced (max agentic c under TTFT≤{latency_threshold}ms): \
 agents={best_balanced_tp:.0f}, ttft={best_balanced_lat:.1f}ms \
 (config: {best_balanced_id})
-- (Informational only — NOT a goal) Best raw throughput: \
+- (Informational only — NOT a goal) Best decode throughput (generation): \
 {best_throughput:.1f} tok/s (config: {best_throughput_id}). c=256/p=512 wins \
 here do NOT count as leadership — agentic concurrency is what we are \
 optimizing for.
@@ -268,11 +268,25 @@ _PROMPT_FOOTER = """
   or empty string `""`. Empty/quoted-empty strings are treated as `null` \
   defensively, but emitting `null` directly is cleaner.
 
+## Metrics in each history entry — what each number means (read this)
+- `decode_tok_s` — DECODE (generation) throughput: output tokens/sec at the \
+  peak phase. This is the real generation capacity — rank throughput on THIS \
+  (and on the `agentic` block / "Best Results" for the agentic goal).
+- `real_prefill_tok_s` — PREFILL (prompt-processing) throughput: input \
+  tokens/sec at that same phase, with prefix-cache hits EXCLUDED (actual \
+  prefill compute, not logical input — cached prefixes are ~free and not \
+  counted, so it is NOT inflated by prefix caching). INFORMATIONAL only: it is \
+  usually a much larger number than decode simply because prefill is batched, \
+  so a bigger `real_prefill_tok_s` does NOT mean a better config — do not \
+  optimize for it.
+- `ttft_p95` / `tpot_p95` — cold-start and inter-token latency at \
+  concurrency=1 (ms).
+
 ## `failed_phases` in history entries — read this before choosing knobs
 Each history entry may include `failed_phases: list`. Each item names a \
 benchmark phase (phase_id, workload, concurrency, prompt_length) that \
 breached the error-rate gate, along with `error_rate` and a `sample_error` \
-string (timeout text, HTTP code, etc.). Headline `peak_throughput` / \
+string (timeout text, HTTP code, etc.). Headline `decode_tok_s` / \
 `ttft_p95` are computed from surviving phases ONLY, so they can look fine \
 while an entire workload (e.g. `agentic_long_context`) is broken. Rules:
 - When the SAME workload's failed_phases appear across multiple consecutive \
@@ -342,7 +356,9 @@ def _format_baseline_block(
         "- agentic_ttft_p95: {agentic_ttft:.1f} ms\n"
         "- agentic_peak_throughput: {agentic_tp:.1f} tok/s\n"
         "- cold-start TTFT p95 (c=1): {ttft:.1f} ms\n"
-        "- raw peak throughput (info): {peak_tp:.1f} tok/s\n"
+        "- decode throughput (generation, info): {peak_tp:.1f} tok/s\n"
+        "- real prefill throughput (prompt-processing, cache-excluded, info): "
+        "{prefill_tp:.1f} tok/s\n"
         "- correctness gate passed: {gate}\n\n"
         "### How to use the baseline\n"
         "- START from the baseline's exact flags. Change AT MOST {max_params} "
@@ -370,6 +386,7 @@ def _format_baseline_block(
         agentic_tp=baseline.agentic_peak_throughput,
         ttft=baseline.low_concurrency_ttft_p95,
         peak_tp=baseline.peak_throughput,
+        prefill_tp=baseline.peak_real_prefill_throughput,
         gate=baseline.correctness_gate_passed,
     )
 
@@ -533,7 +550,8 @@ def _summary_to_prompt_entry(h: ExperimentSummary) -> dict:
         "config": h.config_digest,
         "container_command": h.container_command,
         "rationale": h.rationale,
-        "peak_throughput": h.peak_throughput,
+        "decode_tok_s": h.peak_throughput,
+        "real_prefill_tok_s": h.peak_real_prefill_throughput,
         "ttft_p95": h.low_concurrency_ttft_p95,
         "tpot_p95": h.low_concurrency_tpot_p95,
         "smoke_pass": f"{h.smoke_tests_passed}/{h.smoke_tests_total}",

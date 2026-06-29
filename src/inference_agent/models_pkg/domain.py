@@ -240,8 +240,13 @@ class BenchmarkResult(BaseModel):
 
     # Peak throughput (best across concurrency levels)
     peak_requests_per_sec: float = 0.0
-    peak_output_tokens_per_sec: float = 0.0
-    peak_total_tokens_per_sec: float = 0.0
+    peak_output_tokens_per_sec: float = 0.0       # DECODE (generation) tok/s
+    peak_total_tokens_per_sec: float = 0.0        # (input+output) tok/s — logical
+    # Real PREFILL (prompt-processing) rate AT the peak-throughput phase:
+    # input_tokens_per_sec − cached_tokens_per_sec. Prefix-cache hits excluded,
+    # so it reflects actual prefill compute, not logical input. Pairs with the
+    # decode headline above. 0.0 for experiments predating cache capture.
+    peak_real_prefill_tokens_per_sec: float = 0.0
 
     # Latency at low concurrency (concurrency=1)
     low_concurrency_ttft_p95_ms: float = 0.0
@@ -463,7 +468,10 @@ class ExperimentSummary(BaseModel):
     config_digest: dict[str, Any] = Field(default_factory=dict)
 
     # Key metrics
-    peak_throughput: float = 0.0
+    peak_throughput: float = 0.0                   # DECODE (generation) tok/s
+    # PREFILL (prompt-processing) tok/s at the same peak phase, prefix-cache
+    # hits excluded — real prefill compute, not inflated logical input.
+    peak_real_prefill_throughput: float = 0.0
     low_concurrency_ttft_p95: float = 0.0
     low_concurrency_tpot_p95: float = 0.0
     # Noise indicators for the phases that produced the headline metrics
@@ -590,6 +598,7 @@ class ExperimentSummary(BaseModel):
             status=result.status,
             config_digest=digest,
             peak_throughput=result.benchmark.peak_output_tokens_per_sec,
+            peak_real_prefill_throughput=result.benchmark.peak_real_prefill_tokens_per_sec,
             low_concurrency_ttft_p95=result.benchmark.low_concurrency_ttft_p95_ms,
             low_concurrency_tpot_p95=result.benchmark.low_concurrency_tpot_p95_ms,
             peak_throughput_e2e_cv=result.benchmark.peak_throughput_e2e_cv,
