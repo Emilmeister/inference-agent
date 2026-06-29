@@ -2125,80 +2125,65 @@ with tabs[9]:
                 )
                 st.plotly_chart(fig_ag_lat, use_container_width=True)
 
-            # ── 6b. Total throughput split prefill+decode, by concurrency ──
-            # The runner defines total_tokens_per_sec = (input+output)/wall_time
-            # and output_tokens_per_sec = output/wall_time, so the prefill (input)
-            # rate is exactly total - output — no extra API field needed. Stacked
-            # bar: prefill (bottom) + decode (top) = total height; two side-by-side
-            # stacks per concurrency level (offsetgroup A vs B).
-            st.subheader("Total throughput — prefill + decode by concurrency")
+            # ── 6b. Throughput by concurrency — metric-selectable grouped bars ──
+            # Grouped (A vs B), same shape as the latency chart, with a radio to
+            # switch which throughput AXIS is shown. Decode and real-prefill are
+            # SEPARATE selectable metrics, never summed into one bar: a combined
+            # "total" is dominated by prefill and misleads. real_prefill =
+            # total − output − cached, so prefix-cache hits are excluded and it
+            # reflects actual prefill compute (not inflated logical input).
+            st.subheader("Throughput по concurrency")
+            tp_split = ag_pair.copy()
+            # cached column may be absent for legacy API responses / experiments
+            # that predate cached-token capture — treat as 0.
+            if "cached_tokens_per_sec" in tp_split.columns:
+                tp_split["cached_tps"] = tp_split["cached_tokens_per_sec"].fillna(0).clip(lower=0)
+            else:
+                tp_split["cached_tps"] = 0.0
+            tp_split["real_prefill_tps"] = (
+                tp_split["total_tokens_per_sec"]
+                - tp_split["output_tokens_per_sec"]
+                - tp_split["cached_tps"]
+            ).clip(lower=0)
+            tp_options = {
+                "Decode (генерация, ток/с)": "output_tokens_per_sec",
+                "Real prefill — без кэша (ток/с)": "real_prefill_tps",
+                "Total input+output (ток/с)": "total_tokens_per_sec",
+            }
+            tp_options = {k: v for k, v in tp_options.items() if v in tp_split.columns}
+            tp_label = st.radio(
+                "Throughput-метрика",
+                list(tp_options.keys()),
+                horizontal=True,
+                key="compare_agentic_throughput_metric",
+            )
             st.caption(
-                "Высота столбика = общий throughput (input+output ток/с), разбитый "
-                "на три сегмента: **real prefill** (фактически посчитанный вход), "
-                "**cached** (закэшированные префиксы — prefix caching, ~0 "
-                "prefill-compute, *логический* вход) и **decode** (генерация). "
-                "Cached вынесен отдельным штрихованным сегментом, чтобы он не "
-                "раздувал реальный prefill: при высоком prefix hit rate именно он "
-                "делает столбик визуально больше, не отражая реальной работы. "
-                "Сравнивай конфиги по decode (генерация) и real prefill, а не по "
-                "общей высоте. Cached=0 для движков/прогонов без отчёта "
+                "Decode — генерация (главная ось, по ней и сравнивай). Real "
+                "prefill — обработка промпта без закэшированных префиксов (~0 "
+                "compute), не раздут prefix caching'ом. Это РАЗНЫЕ оси, смотри по "
+                "отдельности. Cached=0, если движок/прогон не отдаёт "
                 "usage.prompt_tokens_details.cached_tokens."
             )
-            split = ag_pair.copy()
-            # Cached column may be absent for legacy API responses / experiments
-            # that predate cached-token capture — treat as 0 (chart degrades to
-            # the old prefill+decode view).
-            if "cached_tokens_per_sec" in split.columns:
-                split["cached_tps"] = split["cached_tokens_per_sec"].fillna(0).clip(lower=0)
-            else:
-                split["cached_tps"] = 0.0
-            # real prefill = logical input − cached = (total − output) − cached
-            split["prefill_tps"] = (
-                split["total_tokens_per_sec"]
-                - split["output_tokens_per_sec"]
-                - split["cached_tps"]
-            ).clip(lower=0)
-            seg_colors = {
-                (label_a, "real prefill"): "#1f4e8c", (label_a, "cached"): "#8aa6c8",
-                (label_a, "decode"): "#e8820c",
-                (label_b, "real prefill"): "#7fb3e6", (label_b, "cached"): "#bcd2ea",
-                (label_b, "decode"): "#f6c177",
-            }
-            # Bottom→top: real prefill, cached (hatched), decode.
-            seg_specs = (
-                ("real prefill", "prefill_tps", ""),
-                ("cached", "cached_tps", "/"),
-                ("decode", "output_tokens_per_sec", ""),
+            tp_col = tp_options[tp_label]
+            fig_tp = px.bar(
+                tp_split,
+                x="concurrency_label",
+                y=tp_col,
+                color="config",
+                barmode="group",
+                color_discrete_map=color_map,
+                category_orders=cat_orders,
+                hover_data=[
+                    c for c in ("experiment_id", "output_tokens_per_sec", "viable")
+                    if c in tp_split.columns
+                ],
+                labels={
+                    tp_col: tp_label,
+                    "concurrency_label": "Concurrent agentic sessions",
+                    "config": "config",
+                },
             )
-            fig_split = go.Figure()
-            for cfg in (label_a, label_b):
-                sub = split[split["config"] == cfg].sort_values("concurrency")
-                if sub.empty:
-                    continue
-                total_cd = sub["total_tokens_per_sec"]
-                for stage, ycol, pattern in seg_specs:
-                    fig_split.add_trace(go.Bar(
-                        x=sub["concurrency_label"],
-                        y=sub[ycol],
-                        name=f"{cfg} · {stage}",
-                        offsetgroup=cfg,
-                        legendgroup=cfg,
-                        marker_color=seg_colors[(cfg, stage)],
-                        marker_pattern_shape=pattern,
-                        customdata=total_cd,
-                        hovertemplate=(
-                            "%{x} agents<br>" + stage + " %{y:.0f} tok/s"
-                            "<br>total %{customdata:.0f} tok/s<extra>" + cfg + "</extra>"
-                        ),
-                    ))
-            fig_split.update_layout(
-                barmode="stack",
-                xaxis_title="Concurrent agentic sessions",
-                yaxis_title="Tokens/sec (real prefill + cached + decode = total)",
-                legend_title_text="config · stage",
-            )
-            fig_split.update_xaxes(categoryorder="array", categoryarray=conc_order)
-            st.plotly_chart(fig_split, use_container_width=True)
+            st.plotly_chart(fig_tp, use_container_width=True)
 
             # ── 6c. Degradation by concurrency: ttft / tpot / error vs agents ──
             # Speed-of-degradation view. Viable phases come from concurrency_results
