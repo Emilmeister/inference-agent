@@ -109,3 +109,39 @@ planner_instructions: |
   enable-auto-tool-choice идут из container.vllm_extra_args — в extra_engine_args
   их НЕ дублируй. --enable-expert-parallel остаётся включённым (MoE) — не
   выключай. attention_backend=FLASH_ATTN — рабочий выбор бейзлайна.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# quality — прод-валидация финалистов ПОСЛЕ сходимости поиска (report-only,
+# на оптимизатор не влияет). Для топ-конфигов (agentic/latency/balanced)
+# перезапускает контейнер и гоняет внешние суиты против эндпоинта. Дедуп по
+# quality-fingerprint: финалисты с одинаковыми quality-полями → один прогон.
+# Идемпотентно: повтор пропускает уже готовые суиты. Preflight на discovery
+# падает сразу, если суиты не находятся/не запускаются.
+# ─────────────────────────────────────────────────────────────────────────────
+quality:
+  enabled: true
+  finalists: [agentic, latency, balanced]
+  fingerprint_dedup: true
+  so_testing:                               # tool-calls + structured output (минуты)
+    enabled: true
+    interpreter: .venv/bin/python           # относительно cwd ниже
+    cwd: /home/ansible/ermadatov/structured-output-testing
+    suites: [so, tool, streaming]
+    runs: 3
+    temperature: 0.0
+    max_tokens: 4096
+    timeout_sec: 1800
+  terminal_bench:                           # агентские сценарии через harbor (~2ч)
+    enabled: true
+    harbor_bin: /home/ansible/.local/bin/harbor
+    cwd: /home/ansible/ermadatov/terminal-bench2
+    dataset: "terminal-bench@2.0"
+    agent: terminus-2
+    temperature: 0.1
+    max_turns: 100
+    n_concurrent: 5
+    agent_timeout_multiplier: 5
+    k: 1
+    jobs_dir: jobs
+    timeout_sec: 14400
