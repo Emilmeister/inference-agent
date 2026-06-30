@@ -13,7 +13,7 @@
 
 LangGraph граф: `discovery → history_loader → planner → validator → executor → analyzer → reporter → (planner | quality_finalize | END)`
 
-- **discovery** — детектит GPU (nvidia-smi), читает model config с HuggingFace, определяет доступные container images через `nerdctl images`. Fails fast если нет engine images.
+- **discovery** — детектит GPU (nvidia-smi), читает model config с HuggingFace, определяет доступные container images через `nerdctl images`. Fails fast если нет engine images. При `quality.enabled` тут же гоняет quality-preflight (`quality/preflight.py`): включённые суиты должны находиться и запускаться (интерпретатор/harbor резолвятся, `cwd` существует, модуль импортируется / `harbor --help` отвечает) — иначе падаем сразу, ДО многочасовой оптимизации.
 - **history_loader** — после discovery подгружает через `GET /experiments/top` top-2 экспериментов по каждой из 3 категорий (throughput, latency, balanced) для текущей конфигурации железа (полный матч HardwareProfile) и текущей модели. Кладёт результат в `state["loaded_top_history"]` (max 6, дедуп по experiment_id).
 - **planner** — LLM выбирает следующую конфигурацию на основе истории экспериментов (текущая сессия + loaded_top_history)
 - **validator** — проверяет конфиг против hardware profile и engine capabilities до запуска контейнера. Невалидные конфигурации скипают executor.

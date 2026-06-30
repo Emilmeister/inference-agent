@@ -15,6 +15,7 @@ from inference_agent.models import (
     GPUInfo,
     HardwareProfile,
 )
+from inference_agent.quality.preflight import preflight_quality
 from inference_agent.state import AgentState
 from inference_agent.utils.container import pull_image
 
@@ -412,6 +413,11 @@ async def discovery_node(state: AgentState) -> dict:
     """Detect hardware, model info, and available engines."""
     config = state["config"]
     logger.info("Starting discovery for model: %s", config.model_name)
+
+    # Fail fast on a misconfigured quality phase BEFORE the (hours-long)
+    # optimization loop — don't discover that harbor/so-testing isn't runnable
+    # only after the search converges.
+    await preflight_quality(config.quality)
 
     # Run GPU detection, model config read, and weight-size lookup concurrently
     loop = asyncio.get_event_loop()
