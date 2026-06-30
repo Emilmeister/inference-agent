@@ -14,6 +14,7 @@ from inference_agent.nodes.discovery import discovery_node
 from inference_agent.nodes.executor import executor_node
 from inference_agent.nodes.history_loader import make_history_loader_node
 from inference_agent.nodes.planner import planner_node
+from inference_agent.nodes.quality_finalize import make_quality_finalize_node
 from inference_agent.nodes.reporter import make_reporter_node
 from inference_agent.nodes.validator import validator_node
 from inference_agent.state import AgentState
@@ -22,8 +23,16 @@ logger = logging.getLogger(__name__)
 
 
 def _should_continue(state: AgentState) -> str:
-    """Decide whether to continue experimenting or stop."""
+    """Decide whether to continue experimenting, validate finalists, or stop.
+
+    On a normal stop (status=completed) with quality validation enabled, route
+    to `quality_finalize` to validate the finalists before ending. A failed run
+    ends directly — there are no meaningful finalists to validate.
+    """
     if state.get("status") == "completed":
+        config = state.get("config")
+        if config is not None and config.quality.enabled:
+            return "quality"
         return "end"
     if state.get("status") == "failed":
         return "end"
@@ -66,6 +75,7 @@ def build_graph(client: ExperimentApiClient) -> StateGraph:
     graph.add_node("crash_diagnostician", crash_diagnostician_node)
     graph.add_node("reporter", make_reporter_node(client))
     graph.add_node("analyzer", analyzer_node)
+    graph.add_node("quality_finalize", make_quality_finalize_node(client))
 
     graph.set_entry_point("discovery")
 
@@ -105,9 +115,11 @@ def build_graph(client: ExperimentApiClient) -> StateGraph:
         _should_continue,
         {
             "continue": "planner",
+            "quality": "quality_finalize",
             "end": END,
         },
     )
+    graph.add_edge("quality_finalize", END)
 
     return graph
 

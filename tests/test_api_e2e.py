@@ -155,3 +155,52 @@ async def test_unauthorized_without_token(api_service):
     async with ExperimentApiClient(base_url=api_service, token="wrong") as client:
         with pytest.raises(APIClientError, match="HTTP 401"):
             await client.insert_experiment(_make_result("denied", 1.0, 1.0))
+
+
+@pytest.mark.asyncio
+async def test_get_experiment_returns_full_result(api_service):
+    async with ExperimentApiClient(base_url=api_service, token=TOKEN) as client:
+        await client.insert_experiment(_make_result("e2e_full", 700.0, 90.0))
+        result = await client.get_experiment("e2e_full")
+    assert result.experiment_id == "e2e_full"
+    assert result.benchmark.peak_output_tokens_per_sec == 700.0
+
+
+@pytest.mark.asyncio
+async def test_quality_run_upsert_idempotency_and_list(api_service):
+    async with ExperimentApiClient(base_url=api_service, token=TOKEN) as client:
+        run_id = "fp_quality-so_testing"
+        base = {
+            "id": run_id,
+            "fingerprint": "fp_quality",
+            "suite": "so_testing",
+            "suite_version": "1.0",
+            "model_name": "Qwen/Qwen2.5-7B-Instruct",
+            "gpu_name": "H100",
+            "gpu_count": 1,
+            "gpu_vram_mb": 81920,
+            "nvlink_available": False,
+            "experiment_ids": ["e2e_a", "e2e_b"],
+            "categories": ["agentic", "latency"],
+        }
+        # First upsert: running, no score.
+        await client.upsert_quality_run({**base, "status": "running", "score": None, "data": {}})
+        running = await client.get_quality_run(run_id)
+        assert running["status"] == "running"
+
+        # Second upsert (same id): done with a score → replaces, not duplicates.
+        await client.upsert_quality_run({
+            **base, "status": "done", "score": 88.5, "data": {"suites": {}},
+        })
+        done = await client.get_quality_run(run_id)
+        assert done["status"] == "done"
+        assert done["score"] == 88.5
+
+        listed = await client._request(
+            "GET", "/quality/runs", params={"fingerprint": "fp_quality"},
+        )
+        assert len(listed["runs"]) == 1
+        assert listed["runs"][0]["id"] == run_id
+
+        missing = await client.get_quality_run("does-not-exist")
+        assert missing is None

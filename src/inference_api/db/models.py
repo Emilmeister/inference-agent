@@ -73,3 +73,56 @@ class ExperimentRow(Base):
             "model_name",
         ),
     )
+
+
+class QualityRunRow(Base):
+    """One prod-readiness validation run of a quality suite for a fingerprint.
+
+    Quality suites (so-testing, terminal-bench) validate the FINALIST configs
+    after the optimization loop converges. Because a suite's outcome depends
+    only on the quality fingerprint (model + quant + dtype + sampling + tool
+    parser + …), the expensive run executes once per (fingerprint, suite) and
+    is attributed to every finalist experiment that shares the fingerprint —
+    listed in `experiment_ids`. The dashboard joins finalist experiments to
+    their quality runs via this list. Idempotency: `id` = "<fingerprint>-<suite>"
+    so a re-run upserts the same row.
+    """
+
+    __tablename__ = "quality_runs"
+
+    id: Mapped[str] = mapped_column(String(96), primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    suite: Mapped[str] = mapped_column(String(32), nullable=False)
+    suite_version: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+
+    model_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    gpu_name: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    gpu_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    gpu_vram_mb: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    nvlink_available: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    status: Mapped[str] = mapped_column(String(16), nullable=False)  # running|done|failed
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    error: Mapped[str] = mapped_column(Text, nullable=False, default="")
+
+    # Finalist experiments sharing this fingerprint + their leaderboard labels.
+    experiment_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    categories: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+
+    # Full suite report (so-testing JSON contract, or terminal-bench summary).
+    data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(),
+        onupdate=func.now(), nullable=False,
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_quality_runs_hardware_model",
+            "gpu_name", "gpu_count", "gpu_vram_mb", "nvlink_available", "model_name",
+        ),
+    )

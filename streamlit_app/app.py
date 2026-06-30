@@ -27,6 +27,7 @@ from api import (
     list_distinct_models,
     list_experiment_phases,
     list_experiment_summaries,
+    list_quality_runs,
 )
 
 
@@ -553,6 +554,7 @@ tabs = st.tabs([
     "Search",
     "Compare",
     "Agentic",
+    "Prod-Readiness",
     "Manage",
 ])
 
@@ -2861,6 +2863,91 @@ with tabs[10]:
 
 
 with tabs[11]:
+    st.header("Prod-Readiness")
+    st.caption(
+        "Quality validation of the finalists (throughput/agentic, latency, "
+        "balanced winners) after the search converged. so-testing checks "
+        "tool-calls + structured output; terminal-bench (tb2) runs agentic "
+        "scenarios. Report-only — these never influenced the optimizer. One run "
+        "per quality fingerprint, shared across finalists with identical "
+        "quality-relevant config."
+    )
+
+    quality_df = list_quality_runs(selected_hw, tuple(selected_models))
+    if quality_df.empty:
+        st.info(
+            "No quality runs for this hardware/model yet. Enable `quality.enabled` "
+            "(and `quality.so_testing` / `quality.terminal_bench`) in the agent "
+            "config to validate finalists after the loop converges."
+        )
+    else:
+        _STATUS_BADGE = {"done": "✅", "running": "⏳", "failed": "❌"}
+
+        for fingerprint, fp_group in quality_df.groupby("fingerprint"):
+            exp_ids: list[str] = []
+            cats: list[str] = []
+            for _, r in fp_group.iterrows():
+                exp_ids.extend(r.get("experiment_ids") or [])
+                cats.extend(r.get("categories") or [])
+            exp_ids = sorted(set(exp_ids))
+            cats = sorted(set(cats))
+            st.subheader(f"Fingerprint `{fingerprint}`")
+            st.caption(
+                f"Finalists: {', '.join(cats) or '—'} · "
+                f"experiments: {', '.join(exp_ids) or '—'} · "
+                f"model: {fp_group.iloc[0]['model_name']}"
+            )
+
+            for _, run in fp_group.iterrows():
+                suite = run["suite"]
+                status = run["status"]
+                badge = _STATUS_BADGE.get(status, "•")
+                data = run.get("data") or {}
+
+                if suite == "so_testing":
+                    score = run.get("score")
+                    label = f"{badge} so-testing — score {score if score is not None else '—'}"
+                    with st.expander(label, expanded=(status != "done")):
+                        if status == "failed":
+                            st.error(run.get("error") or "failed")
+                        suites = data.get("suites") or {}
+                        if not suites:
+                            st.write("_No suite data._")
+                        for sname, sdata in suites.items():
+                            if not isinstance(sdata, dict):
+                                continue
+                            cols = st.columns(3)
+                            cols[0].metric(f"{sname} composite", sdata.get("composite_score", "—"))
+                            cols[1].metric(
+                                "passed",
+                                f"{sdata.get('passed_tests', 0)}/{sdata.get('total_tests', 0)}",
+                            )
+                            cols[2].metric("success rate", f"{sdata.get('success_rate', 0)}%")
+                            tests = sdata.get("tests") or []
+                            if tests:
+                                tdf = pd.DataFrame(tests)
+                                if "ok" in tdf.columns:
+                                    tdf.insert(0, "", tdf["ok"].map({True: "✅", False: "❌"}))
+                                st.dataframe(tdf, use_container_width=True, hide_index=True)
+
+                elif suite == "terminal_bench":
+                    score = run.get("score")
+                    label = f"{badge} terminal-bench (tb2) — accuracy {score if score is not None else '—'}"
+                    with st.expander(label, expanded=(status != "done")):
+                        if status == "failed":
+                            st.error(run.get("error") or "failed")
+                        cols = st.columns(3)
+                        cols[0].metric("accuracy", data.get("accuracy", "—"))
+                        cols[1].metric("resolved", data.get("n_resolved", "—"))
+                        cols[2].metric("tasks", data.get("n_tasks", "—"))
+                        st.caption(f"dataset: {run.get('suite_version', '—')} · jobs: {data.get('jobs_dir', '—')}")
+                        if data.get("stdout_tail"):
+                            with st.expander("harbor stdout (tail)", expanded=False):
+                                st.code(data["stdout_tail"])
+            st.divider()
+
+
+with tabs[12]:
     st.header("Manage Experiments")
     st.caption(
         "Permanently delete experiments from the database. This cannot be undone; "

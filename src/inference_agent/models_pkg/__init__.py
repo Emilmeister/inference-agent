@@ -7,8 +7,11 @@ from inference_agent.models_pkg.config import (
     BenchmarkConfig,
     ContainerConfig,
     ExperimentsConfig,
+    QualityConfig,
+    SoTestingConfig,
     StartupConfig,
     StorageConfig,
+    TerminalBenchConfig,
 )
 from inference_agent.models_pkg.domain import (
     AgenticTurnMetric,
@@ -66,6 +69,9 @@ __all__ = [
     "ExperimentsConfig",
     "StorageConfig",
     "ApiClientConfig",
+    "QualityConfig",
+    "SoTestingConfig",
+    "TerminalBenchConfig",
     "AgentConfig",
     # LLM Schemas
     "PlannerOutput",

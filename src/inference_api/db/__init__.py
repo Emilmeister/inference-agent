@@ -6,12 +6,15 @@
 """
 
 from inference_api.db.engine import init_schema
-from inference_api.db.models import Base, ExperimentRow
+from inference_api.db.models import Base, ExperimentRow, QualityRunRow
+from inference_api.db.quality_repository import QualityRepository
 from inference_api.db.repository import ExperimentRepository
 
 __all__ = [
     "Base",
     "ExperimentRow",
     "ExperimentRepository",
+    "QualityRepository",
+    "QualityRunRow",
     "init_schema",
 ]

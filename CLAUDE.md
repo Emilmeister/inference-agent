@@ -11,7 +11,7 @@
 
 ## Architecture
 
-LangGraph граф: `discovery → history_loader → planner → validator → executor → analyzer → reporter → (planner | END)`
+LangGraph граф: `discovery → history_loader → planner → validator → executor → analyzer → reporter → (planner | quality_finalize | END)`
 
 - **discovery** — детектит GPU (nvidia-smi), читает model config с HuggingFace, определяет доступные container images через `nerdctl images`. Fails fast если нет engine images.
 - **history_loader** — после discovery подгружает через `GET /experiments/top` top-2 экспериментов по каждой из 3 категорий (throughput, latency, balanced) для текущей конфигурации железа (полный матч HardwareProfile) и текущей модели. Кладёт результат в `state["loaded_top_history"]` (max 6, дедуп по experiment_id).
@@ -20,6 +20,7 @@ LangGraph граф: `discovery → history_loader → planner → validator → 
 - **executor** — запускает движок через nerdctl, проводит correctness gate (smoke tests до performance), прогоняет бенчмарк (async HTTP load generator), проводит post-benchmark correctness check, собирает GPU метрики. Структурированные ошибки и failure classification по стадиям.
 - **analyzer** — LLM анализирует результаты, строит Pareto-фронт, решает continue/stop. Leaderboards и Pareto учитывают объединение текущей сессии + loaded_top_history; plateau detection и обновление best_* — только сессия (иначе плато сработает на исторических топах).
 - **reporter** — отправляет полный `ExperimentResult` в `POST /experiments`. Никаких прямых записей в Postgres из процесса агента.
+- **quality_finalize** — терминальная фаза прод-валидации финалистов (только при `quality.enabled`). После штатного stop берёт топ-конфиги по 3 лидербордам (agentic/latency/balanced), группирует по quality-fingerprint (model+quant+dtype+sampling+tool-parser+…), перезапускает контейнер финалиста и гоняет внешние суиты против эндпоинта: **so-testing** (tool-calls + structured output, subprocess в py3.13-venv) и **terminal-bench** (агентские сценарии через `harbor`, ~2ч). Результаты пишет в таблицу `quality_runs` через `POST /quality/runs`. **Report-only** — на лидерборды/Pareto/планировщик не влияет. Идемпотентно: готовые суиты пропускаются (Ctrl+C на 2-м часу возобновляется). Дедуп по fingerprint: финалисты с одинаковыми quality-полями → один прогон. Строится фабрикой `make_quality_finalize_node(client)`.
 
 ## Project structure
 
@@ -36,7 +37,8 @@ src/inference_agent/              — agent (no DB access)
   api_client.py        — async HTTP клиент REST-сервиса; fail-fast (никаких retry)
   cli.py               — CLI entrypoint, env-overrides AGENT_LLM_* / AGENT_API_*
   engines/             — nerdctl command builders (base.py, vllm.py, sglang.py)
-  nodes/               — LangGraph nodes (discovery, history_loader, planner, validator, executor, reporter, analyzer); reporter и history_loader строятся фабриками `make_*_node(client)`
+  nodes/               — LangGraph nodes (discovery, history_loader, planner, validator, executor, reporter, analyzer, quality_finalize); reporter, history_loader и quality_finalize строятся фабриками `make_*_node(client)`
+  quality/             — прод-валидация финалистов: fingerprint.py (quality-fingerprint), finalists.py (выбор финалистов из state), runner.py (subprocess-раннеры so-testing + harbor/terminal-bench)
   benchmark/           — load generator (runner.py), smoke tests, GPU monitor (nvidia-smi)
   utils/               — container (nerdctl) helpers, Prometheus metrics parser, structured logging
 
@@ -50,7 +52,8 @@ src/inference_api/                — REST service (owns Postgres)
     health.py          — GET /healthz (open)
     experiments.py     — POST/GET/DELETE /experiments, /experiments/top, /experiments/phases, /experiments/agentic-turns
     meta.py            — GET /meta/{hardware,models,engines} (sidebar filters)
-  db/                  — SQLAlchemy ORM (Base, ExperimentRow), async engine, ExperimentRepository (domain + dashboard projections), mappers, alembic-миграции
+    quality.py         — POST/GET /quality/runs (прод-валидация финалистов: upsert + idempotency + dashboard)
+  db/                  — SQLAlchemy ORM (Base, ExperimentRow, QualityRunRow), async engine, ExperimentRepository + QualityRepository (domain + dashboard projections), mappers, alembic-миграции
   db_proxy.py          — HTTP-CONNECT TCP tunnel для Postgres за proxy (раньше жил в inference_agent)
 
 tests/                 — unit + integration tests (integration через testcontainers[postgres], отметка `@pytest.mark.integration`)

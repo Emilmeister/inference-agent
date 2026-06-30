@@ -232,6 +232,74 @@ class ExperimentsConfig(BaseModel):
         return v
 
 
+class SoTestingConfig(BaseModel):
+    """so-testing (tool-calls + structured output) suite — run via subprocess.
+
+    so-testing requires Python >= 3.13 and pulls in streamlit/plotly, so it
+    lives in its OWN venv; the agent shells out to it via `interpreter -m
+    module run ...` and parses the JSON report. `interpreter` must point at the
+    so-testing venv's python; `cwd` at the so-testing repo root so `-m` import
+    resolves.
+    """
+
+    enabled: bool = True
+    # Python used to run so-testing. A bare name ("python") is resolved on PATH
+    # (system). A path (~/…, ./…, .venv/bin/python, /abs/…) has ~ expanded; a
+    # relative path is resolved against `cwd` below (the repo dir).
+    interpreter: str = "python"
+    cwd: str | None = None                  # so-testing repo dir (for -m import)
+    module: str = "llm_provider_benchmark.cli"
+    suites: list[str] = Field(default_factory=lambda: ["so", "tool", "streaming"])
+    runs: int = 3
+    temperature: float = 0.0
+    max_tokens: int = 4096
+    # Env var (read from the agent's environment) holding the bearer token for
+    # the engine endpoint. vLLM/SGLang ignore it, but keep it configurable.
+    api_key_env: str = "OPENAI_API_KEY"
+    timeout_sec: int = 1800                 # 30 min hard cap on the subprocess
+
+
+class TerminalBenchConfig(BaseModel):
+    """terminal-bench (agentic scenarios) via the `harbor` CLI.
+
+    Reproduces the operator's working invocation, parameterised per finalist.
+    Disabled by default: a full run is ~2h, so it is opt-in. The node runs it
+    once per unique quality fingerprint (not per finalist).
+    """
+
+    enabled: bool = False
+    # harbor executable. Bare name → PATH (system); a path → ~ expanded and, if
+    # relative, resolved against `cwd` below.
+    harbor_bin: str = "harbor"
+    cwd: str | None = None                  # terminal-bench repo dir
+    dataset: str = "terminal-bench@2.0"
+    agent: str = "terminus-2"
+    temperature: float = 0.1
+    max_turns: int = 100
+    n_concurrent: int = 5
+    agent_timeout_multiplier: float = 5.0
+    k: int = 1
+    jobs_dir: str = "jobs"                   # base dir; node appends /<fingerprint>
+    timeout_sec: int = 14400                 # 4h hard cap on the subprocess
+
+
+class QualityConfig(BaseModel):
+    """Prod-readiness validation of finalists. Report-only — never feeds the
+    optimizer. Disabled by default so existing runs are unaffected; enable to
+    add the terminal `quality_finalize` phase after the loop converges.
+    """
+
+    enabled: bool = False
+    # Which leaderboards to validate. See quality.finalists.VALID_CATEGORIES.
+    finalists: list[str] = Field(
+        default_factory=lambda: ["agentic", "latency", "balanced"]
+    )
+    # Run each costly suite once per unique quality fingerprint (vs per finalist).
+    fingerprint_dedup: bool = True
+    so_testing: SoTestingConfig = Field(default_factory=SoTestingConfig)
+    terminal_bench: TerminalBenchConfig = Field(default_factory=TerminalBenchConfig)
+
+
 class StorageConfig(BaseModel):
     logs_dir: str = "./logs"
 
@@ -290,6 +358,7 @@ class AgentConfig(BaseModel):
     experiments: ExperimentsConfig = Field(default_factory=ExperimentsConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     api: ApiClientConfig = Field(default_factory=ApiClientConfig)
+    quality: QualityConfig = Field(default_factory=QualityConfig)
 
     # Natural language instructions for the LLM planner
     # e.g. "Try chunked_prefill_size=4096 with SGLang."

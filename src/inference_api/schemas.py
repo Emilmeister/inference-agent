@@ -201,6 +201,40 @@ class ExperimentDetailResponse(BaseModel):
     data: dict[str, Any]
 
 
+# ── Quality runs (prod-readiness validation of finalists) ───────────────────
+
+
+class QualityRunUpsert(BaseModel):
+    """Upsert body for a quality suite run. `id` = "<fingerprint>-<suite>"."""
+
+    id: str
+    fingerprint: str
+    suite: str                       # "so_testing" | "terminal_bench"
+    suite_version: str = ""
+    model_name: str
+    gpu_name: str = ""
+    gpu_count: int = 0
+    gpu_vram_mb: int = 0
+    nvlink_available: bool = False
+    status: str                      # "running" | "done" | "failed"
+    score: float | None = None
+    error: str = ""
+    experiment_ids: list[str] = Field(default_factory=list)
+    categories: list[str] = Field(default_factory=list)
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class QualityRunRecord(QualityRunUpsert):
+    """Stored quality run, including server timestamps."""
+
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class QualityRunListResponse(BaseModel):
+    runs: list[QualityRunRecord] = Field(default_factory=list)
+
+
 # Re-export so route signatures read cleanly.
 __all__ = [
     "AgenticTurnRow",
@@ -214,6 +248,9 @@ __all__ = [
     "ExperimentSummaryRow",
     "HardwareOption",
     "IdListBody",
+    "QualityRunListResponse",
+    "QualityRunRecord",
+    "QualityRunUpsert",
     "TopHistoryQuery",
     "TopHistoryResponse",
 ]

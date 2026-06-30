@@ -260,6 +260,37 @@ def get_experiment_payload(experiment_id: str) -> dict | None:
     return body.get("data") if isinstance(body, dict) else None
 
 
+# ── Quality runs (prod-readiness) ──────────────────────────────────────────
+
+
+@st.cache_data(ttl=30)
+def list_quality_runs(
+    hardware: HardwareKey | None = None,
+    models: tuple[str, ...] = (),
+) -> pd.DataFrame:
+    """Quality suite runs (so-testing / terminal-bench) for the finalists.
+
+    Filtered by hardware server-side; model filtering is applied client-side so
+    a multi-model dashboard selection works against the single-model endpoint.
+    """
+    params: dict[str, Any] = {}
+    if hardware is not None:
+        params["gpu_name"] = hardware.gpu_name
+        params["gpu_count"] = hardware.gpu_count
+        params["gpu_vram_mb"] = hardware.gpu_vram_mb
+        params["nvlink_available"] = "true" if hardware.nvlink_available else "false"
+    body = _get("/quality/runs", params=params)
+    runs = body.get("runs", []) if isinstance(body, dict) else []
+    df = pd.DataFrame(runs)
+    if df.empty:
+        return df
+    if models and "model_name" in df.columns:
+        df = df[df["model_name"].isin(list(models))]
+    if "updated_at" in df.columns:
+        df["updated_at"] = pd.to_datetime(df["updated_at"], errors="coerce", utc=True)
+    return df
+
+
 def delete_experiments(experiment_ids: list[str]) -> int:
     if not experiment_ids:
         return 0

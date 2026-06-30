@@ -152,6 +152,36 @@ class ExperimentApiClient:
             result.status.value,
         )
 
+    async def get_experiment(self, experiment_id: str) -> ExperimentResult:
+        """GET /experiments/{id} — full ExperimentResult for a finalist.
+
+        Used by quality_finalize to recover the finalist's launch config so it
+        can relaunch the container. Raises APIClientError (incl. 404) on miss.
+        """
+        payload = await self._request("GET", f"/experiments/{experiment_id}")
+        if not isinstance(payload, dict) or "data" not in payload:
+            raise APIClientError(
+                f"GET /experiments/{experiment_id}: unexpected payload shape "
+                f"{type(payload).__name__}"
+            )
+        return ExperimentResult.model_validate(payload["data"])
+
+    async def get_quality_run(self, run_id: str) -> dict[str, Any] | None:
+        """GET /quality/runs/{id} — a stored quality run, or None if absent.
+
+        Used for idempotency: skip a (fingerprint, suite) whose run is done.
+        """
+        try:
+            return await self._request("GET", f"/quality/runs/{run_id}")
+        except APIClientError as e:
+            if e.status_code == 404:
+                return None
+            raise
+
+    async def upsert_quality_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """POST /quality/runs — insert or replace a quality run by id."""
+        return await self._request("POST", "/quality/runs", json=payload)
+
     async def find_top_for_hardware(
         self,
         hardware: HardwareProfile,

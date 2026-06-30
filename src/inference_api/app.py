@@ -16,9 +16,9 @@ from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from inference_api.config import ApiServiceConfig
-from inference_api.db import ExperimentRepository, init_schema
+from inference_api.db import ExperimentRepository, QualityRepository, init_schema
 from inference_api.db_proxy import DBProxyTunnel
-from inference_api.routes import experiments, health, meta
+from inference_api.routes import experiments, health, meta, quality
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,7 @@ def create_app(config: ApiServiceConfig) -> FastAPI:
             repo = ExperimentRepository(sessionmaker)
 
             app.state.repository = repo
+            app.state.quality_repository = QualityRepository(sessionmaker)
             app.state.auth_token = config.auth.token
             logger.info(
                 "inference-api ready — DB %s:%d/%s",
@@ -76,5 +77,6 @@ def create_app(config: ApiServiceConfig) -> FastAPI:
     app.include_router(health.router)
     app.include_router(experiments.router)
     app.include_router(meta.router)
+    app.include_router(quality.router)
 
     return app
