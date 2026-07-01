@@ -10,12 +10,23 @@ import pytest
 from inference_agent.models_pkg.config import SoTestingConfig, TerminalBenchConfig
 from inference_agent.quality import runner
 from inference_agent.quality.runner import (
+    _clean_subprocess_env,
     _parse_harbor_results,
     _resolve_executable,
     _so_headline_score,
     run_so_testing,
     run_terminal_bench,
 )
+
+
+def test_clean_subprocess_env_strips_python_path(monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", "/home/ansible/.local/lib/python3.10/site-packages")
+    monkeypatch.setenv("PYTHONHOME", "/usr")
+    monkeypatch.setenv("KEEP_ME", "yes")
+    env = _clean_subprocess_env()
+    assert "PYTHONPATH" not in env
+    assert "PYTHONHOME" not in env
+    assert env["KEEP_ME"] == "yes"
 
 
 def test_resolve_executable_bare_name_uses_path():

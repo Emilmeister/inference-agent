@@ -148,6 +148,7 @@ quality:
   enabled: true
   finalists: [agentic, latency, balanced]
   fingerprint_dedup: true
+  preflight_strict: false                   # провал preflight → отключить quality, не валить прогон
   so_testing:                               # tool-calls + structured output (минуты)
     enabled: true
     interpreter: .venv/bin/python           # относительно cwd ниже

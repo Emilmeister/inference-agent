@@ -296,6 +296,13 @@ class QualityConfig(BaseModel):
     )
     # Run each costly suite once per unique quality fingerprint (vs per finalist).
     fingerprint_dedup: bool = True
+    # Preflight (at discovery) checks the enabled suites are runnable. When the
+    # check fails:
+    #   False (default) — log a loud error, DISABLE quality for this run, and
+    #     continue the optimization. Quality is report-only; a misconfigured
+    #     add-on must never abort the core benchmark.
+    #   True — raise and abort the run (the whole model in a series is skipped).
+    preflight_strict: bool = False
     so_testing: SoTestingConfig = Field(default_factory=SoTestingConfig)
     terminal_bench: TerminalBenchConfig = Field(default_factory=TerminalBenchConfig)
 

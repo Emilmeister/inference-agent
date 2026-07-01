@@ -51,6 +51,22 @@ class SuiteResult:
     error: str = ""
 
 
+def _clean_subprocess_env() -> dict[str, str]:
+    """Environment for launching an external suite's OWN interpreter.
+
+    The agent runs under its own (often different) Python; leaking its
+    ``PYTHONPATH`` / ``PYTHONHOME`` into so-testing's py3.13 venv or harbor
+    makes that interpreter import the AGENT's site-packages — e.g. a
+    ``pydantic_core`` compiled for the wrong Python, which fails with
+    ``No module named 'pydantic_core._pydantic_core'``. Strip them so the child
+    resolves modules from its own venv only.
+    """
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONHOME", None)
+    return env
+
+
 async def _run_subprocess(
     cmd: list[str],
     *,
@@ -61,12 +77,14 @@ async def _run_subprocess(
     """Run a command, return (returncode, stdout_tail, stderr_tail).
 
     returncode is None on timeout (process killed). Output is tail-truncated so
-    a chatty suite can't blow memory/logs.
+    a chatty suite can't blow memory/logs. When `env` is None, a cleaned
+    environment (no PYTHONPATH/PYTHONHOME) is used so the child interpreter
+    isn't polluted by the agent's site-packages.
     """
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         cwd=cwd,
-        env=env,
+        env=env if env is not None else _clean_subprocess_env(),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )

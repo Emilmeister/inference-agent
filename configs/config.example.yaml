@@ -220,6 +220,10 @@ quality:
   enabled: false
   finalists: [agentic, latency, balanced]   # какие лидерборды валидировать
   fingerprint_dedup: true
+  # preflight на discovery проверяет, что суиты находятся/запускаются. При
+  # провале: false (дефолт) — громкий лог, quality отключается, оптимизация
+  # продолжается (report-only фича не валит бенчмарк); true — abort всего прогона.
+  preflight_strict: false
   so_testing:                               # tool-calls + structured output
     enabled: true
     # interpreter: голое имя ("python") → системный из PATH; путь с ~ / ./ /

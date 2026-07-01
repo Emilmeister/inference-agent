@@ -15,7 +15,7 @@ from inference_agent.models import (
     GPUInfo,
     HardwareProfile,
 )
-from inference_agent.quality.preflight import preflight_quality
+from inference_agent.quality.preflight import QualityPreflightError, preflight_quality
 from inference_agent.state import AgentState
 from inference_agent.utils.container import pull_image
 
@@ -409,15 +409,37 @@ def _detect_available_engines() -> list[EngineType]:
     return engines
 
 
+async def _apply_quality_preflight(config) -> None:
+    """Run the quality preflight; on failure either abort or disable + continue.
+
+    Quality validation is report-only, so a misconfigured suite must never kill
+    the core benchmark by default — we log loudly and disable quality for this
+    run. `quality.preflight_strict` restores the hard-abort behavior.
+    """
+    if not config.quality.enabled:
+        return
+    try:
+        await preflight_quality(config.quality)
+    except QualityPreflightError as e:
+        if config.quality.preflight_strict:
+            raise
+        logger.error(
+            "Quality preflight FAILED — DISABLING quality validation for this "
+            "run and continuing the optimization. Fix config.quality or set "
+            "quality.preflight_strict: true to abort instead.\n%s", e,
+        )
+        config.quality.enabled = False
+
+
 async def discovery_node(state: AgentState) -> dict:
     """Detect hardware, model info, and available engines."""
     config = state["config"]
     logger.info("Starting discovery for model: %s", config.model_name)
 
-    # Fail fast on a misconfigured quality phase BEFORE the (hours-long)
-    # optimization loop — don't discover that harbor/so-testing isn't runnable
-    # only after the search converges.
-    await preflight_quality(config.quality)
+    # Check the quality phase BEFORE the (hours-long) optimization loop — don't
+    # discover that harbor/so-testing isn't runnable only after the search
+    # converges. Report-only, so a misconfig must NOT abort the core benchmark.
+    await _apply_quality_preflight(config)
 
     # Run GPU detection, model config read, and weight-size lookup concurrently
     loop = asyncio.get_event_loop()
@@ -639,6 +661,9 @@ async def discovery_node(state: AgentState) -> dict:
     )
 
     return {
+        # Re-publish config so a preflight-driven quality disable propagates
+        # explicitly (not just via the shared object reference).
+        "config": config,
         "hardware": hardware,
         "experiments_count": 0,
         "best_throughput": 0.0,

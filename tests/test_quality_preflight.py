@@ -82,3 +82,51 @@ async def test_launch_failure_fails(monkeypatch):
 
 async def _should_not_run(*args, **kwargs):  # pragma: no cover - guard
     raise AssertionError("_run_subprocess should not be called in this path")
+
+
+# ── discovery degrade-vs-abort behavior ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_discovery_degrades_disables_quality_and_continues(monkeypatch):
+    from inference_agent.models import AgentConfig
+    from inference_agent.nodes import discovery
+
+    cfg = AgentConfig()
+    cfg.quality.enabled = True
+    cfg.quality.preflight_strict = False
+
+    async def boom(_qcfg):
+        raise QualityPreflightError("not runnable")
+
+    monkeypatch.setattr(discovery, "preflight_quality", boom)
+    await discovery._apply_quality_preflight(cfg)  # must NOT raise
+    assert cfg.quality.enabled is False  # disabled, optimization continues
+
+
+@pytest.mark.asyncio
+async def test_discovery_strict_aborts(monkeypatch):
+    from inference_agent.models import AgentConfig
+    from inference_agent.nodes import discovery
+
+    cfg = AgentConfig()
+    cfg.quality.enabled = True
+    cfg.quality.preflight_strict = True
+
+    async def boom(_qcfg):
+        raise QualityPreflightError("not runnable")
+
+    monkeypatch.setattr(discovery, "preflight_quality", boom)
+    with pytest.raises(QualityPreflightError):
+        await discovery._apply_quality_preflight(cfg)
+    assert cfg.quality.enabled is True  # left intact for the abort
+
+
+@pytest.mark.asyncio
+async def test_discovery_noop_when_quality_disabled(monkeypatch):
+    from inference_agent.models import AgentConfig
+    from inference_agent.nodes import discovery
+
+    cfg = AgentConfig()  # quality disabled by default
+    monkeypatch.setattr(discovery, "preflight_quality", _should_not_run)
+    await discovery._apply_quality_preflight(cfg)

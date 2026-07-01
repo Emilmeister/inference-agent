@@ -134,9 +134,9 @@ benchmark:
 
 # Эксперименты. Только vLLM.
 experiments:
-  max_experiments: 50
+  max_experiments: 3
   plateau_threshold: 0.02
-  plateau_window: 10
+  plateau_window: 3
   engines: ["vllm"]
   max_params_per_step: 10
 
@@ -185,6 +185,7 @@ quality:
   enabled: true
   finalists: [agentic, latency, balanced]
   fingerprint_dedup: true
+  preflight_strict: false                   # провал preflight → отключить quality, не валить прогон
   so_testing:                               # tool-calls + structured output (минуты)
     enabled: true
     interpreter: .venv/bin/python           # относительно cwd ниже
