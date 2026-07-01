@@ -14,9 +14,25 @@ from inference_agent.quality.runner import (
     _parse_harbor_results,
     _resolve_executable,
     _so_headline_score,
+    _suite_env,
     run_so_testing,
     run_terminal_bench,
 )
+
+
+def test_suite_env_prepends_path_and_merges_extra(monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("PYTHONPATH", "/leak")
+    env = _suite_env(["/home/ansible/.local/bin"], {"DOCKER_HOST": "unix:///x"})
+    assert env["PATH"] == "/home/ansible/.local/bin:/usr/bin:/bin"
+    assert "PYTHONPATH" not in env          # still cleaned
+    assert env["DOCKER_HOST"] == "unix:///x"
+
+
+def test_suite_env_noop_without_config(monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin")
+    env = _suite_env(None, None)
+    assert env["PATH"] == "/usr/bin"
 
 
 def test_clean_subprocess_env_strips_python_path(monkeypatch):

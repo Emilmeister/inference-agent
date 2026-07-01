@@ -67,6 +67,29 @@ def _clean_subprocess_env() -> dict[str, str]:
     return env
 
 
+def _suite_env(
+    path_prepend: list[str] | None,
+    extra_env: dict[str, str] | None,
+) -> dict[str, str]:
+    """Cleaned subprocess env with PATH prepends + extra vars from config.
+
+    The agent may run under a minimal PATH (systemd/nohup) that lacks e.g.
+    ``~/.local/bin``, so a suite tool (or something it shells out to, like
+    harbor → ``docker``) isn't found. `path_prepend` fixes this deterministically
+    regardless of how the agent was launched.
+    """
+    env = _clean_subprocess_env()
+    if path_prepend:
+        parts = [os.path.expanduser(p) for p in path_prepend]
+        existing = env.get("PATH", "")
+        if existing:
+            parts.append(existing)
+        env["PATH"] = os.pathsep.join(parts)
+    if extra_env:
+        env.update(extra_env)
+    return env
+
+
 async def _run_subprocess(
     cmd: list[str],
     *,
@@ -142,6 +165,7 @@ async def run_so_testing(
     rc, _stdout, stderr = await _run_subprocess(
         cmd, cwd=os.path.expanduser(cfg.cwd) if cfg.cwd else None,
         timeout_sec=cfg.timeout_sec,
+        env=_suite_env(cfg.path_prepend, cfg.extra_env),
     )
 
     report: dict[str, Any] = {}
@@ -257,7 +281,8 @@ async def run_terminal_bench(
     cwd = os.path.expanduser(cfg.cwd) if cfg.cwd else None
     logger.info("Running terminal-bench (harbor): model=%s jobs=%s", model, jobs_subdir)
     rc, stdout, stderr = await _run_subprocess(
-        cmd, cwd=cwd, timeout_sec=cfg.timeout_sec
+        cmd, cwd=cwd, timeout_sec=cfg.timeout_sec,
+        env=_suite_env(cfg.path_prepend, cfg.extra_env),
     )
 
     # jobs_subdir is relative to cfg.cwd when set.

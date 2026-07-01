@@ -70,6 +70,36 @@ async def test_passes_when_launchable(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_terminal_bench_missing_docker_fails(monkeypatch):
+    async def ok(cmd, *, cwd, timeout_sec, env=None):
+        return 0, "", ""
+
+    monkeypatch.setenv("PATH", "/nonexistent-xyz")   # no docker anywhere
+    monkeypatch.setattr(preflight, "_run_subprocess", ok)
+    qcfg = _qcfg(terminal_bench=TerminalBenchConfig(
+        enabled=True, harbor_bin=sys.executable,     # real file → passes exe check
+    ))
+    with pytest.raises(QualityPreflightError, match="needs `docker`"):
+        await preflight_quality(qcfg)
+
+
+@pytest.mark.asyncio
+async def test_terminal_bench_docker_found_via_path_prepend(monkeypatch, tmp_path):
+    async def ok(cmd, *, cwd, timeout_sec, env=None):
+        return 0, "", ""
+
+    docker = tmp_path / "docker"
+    docker.write_text("#!/bin/sh\n")
+    docker.chmod(0o755)
+    monkeypatch.setenv("PATH", "/nonexistent-xyz")
+    monkeypatch.setattr(preflight, "_run_subprocess", ok)
+    qcfg = _qcfg(terminal_bench=TerminalBenchConfig(
+        enabled=True, harbor_bin=sys.executable, path_prepend=[str(tmp_path)],
+    ))
+    await preflight_quality(qcfg)   # docker resolvable via path_prepend → no raise
+
+
+@pytest.mark.asyncio
 async def test_launch_failure_fails(monkeypatch):
     async def fake_fail(cmd, *, cwd, timeout_sec, env=None):
         return 1, "", "ModuleNotFoundError: llm_provider_benchmark"

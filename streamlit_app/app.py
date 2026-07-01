@@ -2876,9 +2876,12 @@ with tabs[11]:
     quality_df = list_quality_runs(selected_hw, tuple(selected_models))
     if quality_df.empty:
         st.info(
-            "No quality runs for this hardware/model yet. Enable `quality.enabled` "
-            "(and `quality.so_testing` / `quality.terminal_bench`) in the agent "
-            "config to validate finalists after the loop converges."
+            "No quality runs for this hardware/model yet. Possible reasons: "
+            "(1) the agent hasn't reached the `quality_finalize` phase yet — it "
+            "runs only after the optimization loop converges; (2) `quality.enabled` "
+            "is off in the agent config; (3) the inference-api instance predates "
+            "the quality endpoints — update + restart it (migration 0005 adds the "
+            "`quality_runs` table on startup)."
         )
     else:
         _STATUS_BADGE = {"done": "✅", "running": "⏳", "failed": "❌"}

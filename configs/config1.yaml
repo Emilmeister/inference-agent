@@ -144,6 +144,7 @@ quality:
   terminal_bench:                           # агентские сценарии через harbor (~2ч)
     enabled: true
     harbor_bin: /home/ansible/.local/bin/harbor
+    path_prepend: [/home/ansible/.local/bin]   # каталог docker для harbor
     cwd: /home/ansible/ermadatov/terminal-bench2
     dataset: "terminal-bench@2.0"
     agent: terminus-2

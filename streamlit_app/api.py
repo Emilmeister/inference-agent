@@ -279,7 +279,16 @@ def list_quality_runs(
         params["gpu_count"] = hardware.gpu_count
         params["gpu_vram_mb"] = hardware.gpu_vram_mb
         params["nvlink_available"] = "true" if hardware.nvlink_available else "false"
-    body = _get("/quality/runs", params=params)
+    try:
+        body = _get("/quality/runs", params=params)
+    except requests.HTTPError as exc:
+        # An inference-api that predates the quality endpoints returns 404 for
+        # the whole route. Degrade to "no runs" instead of crashing the tab —
+        # the fix is to update + restart inference-api (migration 0005 adds the
+        # quality_runs table on startup).
+        if exc.response is not None and exc.response.status_code == 404:
+            return pd.DataFrame()
+        raise
     runs = body.get("runs", []) if isinstance(body, dict) else []
     df = pd.DataFrame(runs)
     if df.empty:

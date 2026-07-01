@@ -257,6 +257,12 @@ class SoTestingConfig(BaseModel):
     # the engine endpoint. vLLM/SGLang ignore it, but keep it configurable.
     api_key_env: str = "OPENAI_API_KEY"
     timeout_sec: int = 1800                 # 30 min hard cap on the subprocess
+    # Directories prepended to PATH for the subprocess, and extra env vars.
+    # The agent may run with a minimal PATH; use path_prepend so the suite (and
+    # anything it shells out to) finds its tools regardless of how the agent
+    # was launched.
+    path_prepend: list[str] = Field(default_factory=list)
+    extra_env: dict[str, str] = Field(default_factory=dict)
 
 
 class TerminalBenchConfig(BaseModel):
@@ -281,6 +287,11 @@ class TerminalBenchConfig(BaseModel):
     k: int = 1
     jobs_dir: str = "jobs"                   # base dir; node appends /<fingerprint>
     timeout_sec: int = 14400                 # 4h hard cap on the subprocess
+    # harbor shells out to `docker`; if it isn't on the agent's PATH, add its
+    # directory here (e.g. /home/ansible/.local/bin). extra_env can set
+    # DOCKER_HOST etc. for rootless docker.
+    path_prepend: list[str] = Field(default_factory=list)
+    extra_env: dict[str, str] = Field(default_factory=dict)
 
 
 class QualityConfig(BaseModel):

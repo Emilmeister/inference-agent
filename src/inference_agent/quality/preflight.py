@@ -19,7 +19,11 @@ from inference_agent.models_pkg.config import (
     SoTestingConfig,
     TerminalBenchConfig,
 )
-from inference_agent.quality.runner import _resolve_executable, _run_subprocess
+from inference_agent.quality.runner import (
+    _resolve_executable,
+    _run_subprocess,
+    _suite_env,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +73,7 @@ async def _check_so_testing(cfg: SoTestingConfig) -> list[str]:
         [exe, "-c", f"import importlib; importlib.import_module({cfg.module!r})"],
         cwd=os.path.expanduser(cfg.cwd) if cfg.cwd else None,
         timeout_sec=_LAUNCH_TIMEOUT_SEC,
+        env=_suite_env(cfg.path_prepend, cfg.extra_env),
     )
     if rc != 0:
         errors.append(
@@ -90,10 +95,22 @@ async def _check_terminal_bench(cfg: TerminalBenchConfig) -> list[str]:
     if errors:
         return errors
 
+    env = _suite_env(cfg.path_prepend, cfg.extra_env)
+
+    # harbor shells out to `docker` — verify it's resolvable on the suite PATH
+    # so we fail fast here instead of ~200s into a container relaunch.
+    if shutil.which("docker", path=env.get("PATH")) is None:
+        errors.append(
+            "terminal-bench needs `docker` but it's not on PATH. Add its "
+            "directory to terminal_bench.path_prepend (e.g. "
+            "/home/ansible/.local/bin) or install docker."
+        )
+
     rc, _out, err = await _run_subprocess(
         [exe, "--help"],
         cwd=os.path.expanduser(cfg.cwd) if cfg.cwd else None,
         timeout_sec=_LAUNCH_TIMEOUT_SEC,
+        env=env,
     )
     if rc != 0:
         errors.append(
