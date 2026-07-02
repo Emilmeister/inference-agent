@@ -150,7 +150,7 @@ async def run_so_testing(
     out_path = tempfile.NamedTemporaryFile(
         prefix="so_testing_", suffix=".json", delete=False
     ).name
-    cmd = [
+    cmd = list(cfg.command_prefix) + [
         _resolve_executable(cfg.interpreter, cfg.cwd), "-m", cfg.module, "run",
         "--base-url", base_url,
         "--model", model,
@@ -265,7 +265,7 @@ async def run_terminal_bench(
     collide and the parser reads exactly this run's output.
     """
     jobs_subdir = os.path.join(cfg.jobs_dir, fingerprint)
-    cmd = [
+    cmd = list(cfg.command_prefix) + [
         _resolve_executable(cfg.harbor_bin, cfg.cwd), "run",
         "--dataset", cfg.dataset,
         "--agent", cfg.agent,

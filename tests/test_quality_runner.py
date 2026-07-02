@@ -127,6 +127,26 @@ def test_parse_harbor_results_missing(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_command_prefix_prepended_to_harbor(monkeypatch, tmp_path):
+    cfg = TerminalBenchConfig(
+        enabled=True, cwd=str(tmp_path), jobs_dir="jobs",
+        harbor_bin="/usr/bin/harbor",
+        command_prefix=["sudo", "-u", "ansible", "--preserve-env=PATH,DOCKER_HOST"],
+    )
+    captured = {}
+
+    async def fake_subprocess(cmd, *, cwd, timeout_sec, env=None):
+        captured["cmd"] = cmd
+        return 0, "", ""
+
+    monkeypatch.setattr(runner, "_run_subprocess", fake_subprocess)
+    await run_terminal_bench(cfg, base_url="http://x/v1", model="m", fingerprint="fp")
+    assert captured["cmd"][:4] == ["sudo", "-u", "ansible", "--preserve-env=PATH,DOCKER_HOST"]
+    assert captured["cmd"][4] == "/usr/bin/harbor"
+    assert "openai/m" in captured["cmd"]
+
+
+@pytest.mark.asyncio
 async def test_run_terminal_bench_parses_jobs_dir(monkeypatch, tmp_path):
     cfg = TerminalBenchConfig(enabled=True, cwd=str(tmp_path), jobs_dir="jobs")
     fp = "abc123"

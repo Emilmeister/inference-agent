@@ -70,7 +70,8 @@ async def _check_so_testing(cfg: SoTestingConfig) -> list[str]:
         return errors  # don't try to launch a broken interpreter/cwd
 
     rc, _out, err = await _run_subprocess(
-        [exe, "-c", f"import importlib; importlib.import_module({cfg.module!r})"],
+        list(cfg.command_prefix)
+        + [exe, "-c", f"import importlib; importlib.import_module({cfg.module!r})"],
         cwd=os.path.expanduser(cfg.cwd) if cfg.cwd else None,
         timeout_sec=_LAUNCH_TIMEOUT_SEC,
         env=_suite_env(cfg.path_prepend, cfg.extra_env),
@@ -98,8 +99,10 @@ async def _check_terminal_bench(cfg: TerminalBenchConfig) -> list[str]:
     env = _suite_env(cfg.path_prepend, cfg.extra_env)
 
     # harbor shells out to `docker` — verify it's resolvable on the suite PATH
-    # so we fail fast here instead of ~200s into a container relaunch.
-    if shutil.which("docker", path=env.get("PATH")) is None:
+    # so we fail fast here instead of ~200s into a container relaunch. Skip when
+    # command_prefix is set: the suite then runs under a DIFFERENT user whose
+    # PATH/env we can't introspect here (checking the agent's env would false-fail).
+    if not cfg.command_prefix and shutil.which("docker", path=env.get("PATH")) is None:
         errors.append(
             "terminal-bench needs `docker` but it's not on PATH. Add its "
             "directory to terminal_bench.path_prepend (e.g. "
@@ -107,7 +110,7 @@ async def _check_terminal_bench(cfg: TerminalBenchConfig) -> list[str]:
         )
 
     rc, _out, err = await _run_subprocess(
-        [exe, "--help"],
+        list(cfg.command_prefix) + [exe, "--help"],
         cwd=os.path.expanduser(cfg.cwd) if cfg.cwd else None,
         timeout_sec=_LAUNCH_TIMEOUT_SEC,
         env=env,

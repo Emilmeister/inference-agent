@@ -263,6 +263,10 @@ class SoTestingConfig(BaseModel):
     # was launched.
     path_prepend: list[str] = Field(default_factory=list)
     extra_env: dict[str, str] = Field(default_factory=dict)
+    # Argv prepended before the suite command. Use to drop privileges when the
+    # agent runs as root (sudo) but the suite must run as another user, e.g.
+    # ["sudo", "-u", "ansible", "--preserve-env=PATH,DOCKER_HOST,XDG_RUNTIME_DIR"].
+    command_prefix: list[str] = Field(default_factory=list)
 
 
 class TerminalBenchConfig(BaseModel):
@@ -292,6 +296,10 @@ class TerminalBenchConfig(BaseModel):
     # DOCKER_HOST etc. for rootless docker.
     path_prepend: list[str] = Field(default_factory=list)
     extra_env: dict[str, str] = Field(default_factory=dict)
+    # Argv prepended before the harbor command — same use as SoTestingConfig's.
+    # Typically ["sudo", "-u", "ansible", ...] so harbor runs under the user
+    # that owns the (rootless) docker + harbor install, while the agent stays root.
+    command_prefix: list[str] = Field(default_factory=list)
 
 
 class QualityConfig(BaseModel):

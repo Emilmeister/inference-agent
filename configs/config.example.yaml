@@ -239,8 +239,17 @@ quality:
     enabled: false
     harbor_bin: /home/ansible/.local/bin/harbor
     # harbor вызывает docker по PATH; если у процесса агента docker не в PATH,
-    # добавь его каталог сюда. extra_env — напр. DOCKER_HOST для rootless docker.
+    # добавь его каталог сюда.
     path_prepend: [/home/ansible/.local/bin]
+    # Если агент запущен через sudo (root ради nerdctl), а harbor/docker
+    # настроены под пользователя ansible — запускай harbor от ansible:
+    # command_prefix: ["sudo", "-u", "ansible",
+    #   "--preserve-env=PATH,HOME,DOCKER_HOST,XDG_RUNTIME_DIR,HTTP_PROXY,HTTPS_PROXY,NO_PROXY,http_proxy,https_proxy,no_proxy"]
+    command_prefix: []
+    # extra_env — например HOME + rootless-docker сокет (uid ansible подставь свой):
+    #   HOME: /home/ansible
+    #   DOCKER_HOST: unix:///run/user/1000/docker.sock
+    #   XDG_RUNTIME_DIR: /run/user/1000
     extra_env: {}
     cwd: /home/ansible/ermadatov/terminal-bench2
     dataset: "terminal-bench@2.0"
