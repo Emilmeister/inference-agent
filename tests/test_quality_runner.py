@@ -147,6 +147,23 @@ async def test_command_prefix_prepended_to_harbor(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_run_terminal_bench_rc0_no_results_is_failed(monkeypatch, tmp_path):
+    """harbor exiting 0 with no parseable results (e.g. docker setup failed on
+    every task) must be `failed`, not a `done` that idempotency caches forever."""
+    cfg = TerminalBenchConfig(enabled=True, cwd=str(tmp_path), jobs_dir="jobs")
+    (tmp_path / "jobs").mkdir()  # dir exists but no results json
+
+    async def fake_subprocess(cmd, *, cwd, timeout_sec, env=None):
+        return 0, "Docker compose command failed: Permission denied", ""
+
+    monkeypatch.setattr(runner, "_run_subprocess", fake_subprocess)
+    result = await run_terminal_bench(cfg, base_url="http://x/v1", model="m", fingerprint="fp")
+    assert result.status == "failed"
+    assert result.score is None
+    assert "no parseable results" in result.error
+
+
+@pytest.mark.asyncio
 async def test_run_terminal_bench_parses_jobs_dir(monkeypatch, tmp_path):
     cfg = TerminalBenchConfig(enabled=True, cwd=str(tmp_path), jobs_dir="jobs")
     fp = "abc123"

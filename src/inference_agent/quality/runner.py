@@ -302,6 +302,23 @@ async def run_terminal_bench(
             error=f"harbor exited rc={rc}: {stderr[-800:]}",
         )
 
+    # harbor can exit 0 while every task failed to even set up (e.g. a docker
+    # permission error it logs per-task but swallows at the process level),
+    # leaving NO parseable results json. Recording that as `done` is a trap:
+    # idempotency would then skip the suite forever even though nothing ran.
+    # Treat "rc=0 but no score" as failed so the operator sees it and a re-run
+    # retries instead of caching an empty result.
+    if accuracy is None:
+        return SuiteResult(
+            suite="terminal_bench", status="failed",
+            suite_version=cfg.dataset, data=summary,
+            error=(
+                "harbor exited 0 but produced no parseable results in "
+                f"{abs_jobs} — likely every task failed to set up "
+                "(check docker/permissions). stdout tail: " + stdout[-800:]
+            ),
+        )
+
     return SuiteResult(
         suite="terminal_bench",
         status="done",
