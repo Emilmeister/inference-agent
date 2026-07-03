@@ -225,8 +225,15 @@ class QualityRunUpsert(BaseModel):
 
 
 class QualityRunRecord(QualityRunUpsert):
-    """Stored quality run, including server timestamps."""
+    """Stored quality run, including server timestamps.
 
+    `experiment_ids` = the finalists that triggered this run (provenance).
+    `matched_experiment_ids` = the live attribution set — EVERY experiment whose
+    quality fingerprint equals this run's, resolved by join at read time, so it
+    also covers non-finalists and configs from later runs.
+    """
+
+    matched_experiment_ids: list[str] = Field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

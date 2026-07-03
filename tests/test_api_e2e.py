@@ -204,3 +204,49 @@ async def test_quality_run_upsert_idempotency_and_list(api_service):
 
         missing = await client.get_quality_run("does-not-exist")
         assert missing is None
+
+
+@pytest.mark.asyncio
+async def test_quality_run_attributes_to_all_matching_configs(api_service):
+    """A quality run is attributed to EVERY experiment sharing its fingerprint
+    — including non-finalists and configs inserted after the run — via the
+    live fingerprint join, not just the static `experiment_ids` list."""
+    from inference_agent.quality.fingerprint import quality_fingerprint
+
+    async with ExperimentApiClient(base_url=api_service, token=TOKEN) as client:
+        # Three experiments with identical quality-relevant config → same fp.
+        finalist = _make_result("attr_finalist", 500.0, 80.0)
+        sibling = _make_result("attr_sibling", 900.0, 70.0)
+        fp = quality_fingerprint(finalist.config, finalist.hardware, finalist.model)
+
+        await client.insert_experiment(finalist)
+        await client.insert_experiment(sibling)  # non-finalist, same fingerprint
+
+        # The run lists only the finalist as provenance.
+        await client.upsert_quality_run({
+            "id": f"{fp}-terminal_bench",
+            "fingerprint": fp,
+            "suite": "terminal_bench",
+            "suite_version": "terminal-bench@2.0",
+            "model_name": finalist.model,
+            "gpu_name": "H100", "gpu_count": 1, "gpu_vram_mb": 81920,
+            "nvlink_available": False,
+            "status": "done", "score": 0.5,
+            "experiment_ids": ["attr_finalist"],
+            "categories": ["agentic"],
+            "data": {},
+        })
+
+        listed = await client._request(
+            "GET", "/quality/runs", params={"fingerprint": fp},
+        )
+        run = next(r for r in listed["runs"] if r["id"] == f"{fp}-terminal_bench")
+        # Provenance stays the finalist; attribution covers BOTH configs.
+        assert run["experiment_ids"] == ["attr_finalist"]
+        assert set(run["matched_experiment_ids"]) >= {"attr_finalist", "attr_sibling"}
+
+        # Looking up by the NON-finalist experiment id still finds the run.
+        by_sibling = await client._request(
+            "GET", "/quality/runs", params={"experiment_id": "attr_sibling"},
+        )
+        assert any(r["id"] == f"{fp}-terminal_bench" for r in by_sibling["runs"])

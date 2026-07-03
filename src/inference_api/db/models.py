@@ -60,6 +60,15 @@ class ExperimentRow(Base):
     # JSONB.
     max_model_len: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
+    # Quality fingerprint — sha1 over the quality-relevant config dims (model +
+    # quant + dtype + sampling + tool-parser + hardware). Persisted as a flat,
+    # indexed column so quality_runs (keyed by fingerprint) attribute to EVERY
+    # experiment sharing it via a live join — finalists, non-finalists, and
+    # configs from later runs alike — rather than a static finalist list.
+    quality_fingerprint: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="", index=True
+    )
+
     # Full ExperimentResult.model_dump(mode="json")
     data: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
 

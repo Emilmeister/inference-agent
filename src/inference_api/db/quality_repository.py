@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from inference_api.db.models import QualityRunRow
+from inference_api.db.models import ExperimentRow, QualityRunRow
 
 logger = logging.getLogger(__name__)
 
@@ -70,10 +70,52 @@ class QualityRepository:
         )
         return result
 
+    async def _fingerprint_of_experiment(
+        self, session: AsyncSession, experiment_id: str
+    ) -> str | None:
+        """The quality fingerprint of one experiment, or None if unknown/empty."""
+        fp = (
+            await session.execute(
+                select(ExperimentRow.quality_fingerprint).where(
+                    ExperimentRow.experiment_id == experiment_id
+                )
+            )
+        ).scalar_one_or_none()
+        return fp or None
+
+    async def _matched_ids(
+        self, session: AsyncSession, fingerprints: set[str]
+    ) -> dict[str, list[str]]:
+        """Map each fingerprint → all experiment ids that share it (live join).
+
+        This is the attribution: a quality run belongs to its fingerprint, so
+        every experiment carrying that fingerprint inherits the result — not
+        just the finalists that happened to trigger the run.
+        """
+        fps = {f for f in fingerprints if f}
+        if not fps:
+            return {}
+        rows = (
+            await session.execute(
+                select(
+                    ExperimentRow.quality_fingerprint, ExperimentRow.experiment_id
+                ).where(ExperimentRow.quality_fingerprint.in_(fps))
+            )
+        ).all()
+        out: dict[str, list[str]] = {}
+        for fp, eid in rows:
+            out.setdefault(fp, []).append(eid)
+        return {fp: sorted(ids) for fp, ids in out.items()}
+
     async def get(self, run_id: str) -> dict[str, Any] | None:
         async with self._sessionmaker() as session:
             row = await session.get(QualityRunRow, run_id)
-            return row_to_dict(row) if row is not None else None
+            if row is None:
+                return None
+            record = row_to_dict(row)
+            matched = await self._matched_ids(session, {row.fingerprint})
+            record["matched_experiment_ids"] = matched.get(row.fingerprint, [])
+            return record
 
     async def list(
         self,
@@ -102,15 +144,25 @@ class QualityRepository:
             clauses.append(QualityRunRow.gpu_vram_mb == gpu_vram_mb)
         if nvlink_available is not None:
             clauses.append(QualityRunRow.nvlink_available == nvlink_available)
-        query = select(QualityRunRow)
-        if clauses:
-            query = query.where(*clauses)
-        query = query.order_by(QualityRunRow.updated_at.desc())
+
         async with self._sessionmaker() as session:
+            # Resolve experiment_id → fingerprint so filtering covers EVERY
+            # config sharing the fingerprint (finalist or not), not just the
+            # static finalist list stored on the run.
+            if experiment_id is not None:
+                exp_fp = await self._fingerprint_of_experiment(session, experiment_id)
+                if exp_fp is None:
+                    return []
+                clauses.append(QualityRunRow.fingerprint == exp_fp)
+
+            query = select(QualityRunRow)
+            if clauses:
+                query = query.where(*clauses)
+            query = query.order_by(QualityRunRow.updated_at.desc())
             rows = (await session.execute(query)).scalars().all()
-        out = [row_to_dict(r) for r in rows]
-        # JSONB containment for experiment_id is awkward to express portably;
-        # filter in Python (the result set here is small — finalists only).
-        if experiment_id is not None:
-            out = [r for r in out if experiment_id in r["experiment_ids"]]
+
+            out = [row_to_dict(r) for r in rows]
+            matched = await self._matched_ids(session, {r.fingerprint for r in rows})
+            for record, r in zip(out, rows):
+                record["matched_experiment_ids"] = matched.get(r.fingerprint, [])
         return out

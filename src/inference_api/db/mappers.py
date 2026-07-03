@@ -8,6 +8,7 @@ from inference_agent.models_pkg.domain import (
     ExperimentSummary,
     HardwareProfile,
 )
+from inference_agent.quality.fingerprint import quality_fingerprint
 
 
 class HeterogeneousClusterError(ValueError):
@@ -66,6 +67,9 @@ def result_to_row(result: ExperimentResult) -> ExperimentRow:
         low_concurrency_ttft_p95=result.benchmark.low_concurrency_ttft_p95_ms,
         max_model_len=max_model_len,
         is_baseline=result.is_baseline,
+        quality_fingerprint=quality_fingerprint(
+            result.config, result.hardware, result.model
+        ),
         data=result.model_dump(mode="json"),
     )
 

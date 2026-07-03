@@ -2887,17 +2887,23 @@ with tabs[11]:
         _STATUS_BADGE = {"done": "✅", "running": "⏳", "failed": "❌"}
 
         for fingerprint, fp_group in quality_df.groupby("fingerprint"):
-            exp_ids: list[str] = []
+            finalist_ids: list[str] = []
+            matched_ids: list[str] = []
             cats: list[str] = []
             for _, r in fp_group.iterrows():
-                exp_ids.extend(r.get("experiment_ids") or [])
+                finalist_ids.extend(r.get("experiment_ids") or [])
+                matched_ids.extend(r.get("matched_experiment_ids") or [])
                 cats.extend(r.get("categories") or [])
-            exp_ids = sorted(set(exp_ids))
+            finalist_ids = sorted(set(finalist_ids))
+            # Full attribution: every config with this fingerprint inherits the
+            # result (falls back to finalists if the API predates the join).
+            matched_ids = sorted(set(matched_ids)) or finalist_ids
             cats = sorted(set(cats))
             st.subheader(f"Fingerprint `{fingerprint}`")
             st.caption(
                 f"Finalists: {', '.join(cats) or '—'} · "
-                f"experiments: {', '.join(exp_ids) or '—'} · "
+                f"applies to {len(matched_ids)} config(s): "
+                f"{', '.join(matched_ids) or '—'} · "
                 f"model: {fp_group.iloc[0]['model_name']}"
             )
 
